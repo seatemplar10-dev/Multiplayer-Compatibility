@@ -37,9 +37,26 @@ namespace Multiplayer.Compat
     ///    (MP patches it to the VIEWED map's speed, vanilla when the world view is open) and
     ///    TickManager.NotPlaying (this player's escape menu is open). Fix: in MP, paused = the synced
     ///    CurTimeSpeed of the executing context and NotPlaying = false.
+    /// 6. DictCache&lt;Pawn, BSCache&gt;.JunkCache is a static that is never cleared (BigAndSmallCache.ExposeData
+    ///    clears DictCache.Cache only), and Pawn equality is def + thingIDNumber, so after a reload the host's
+    ///    lookups for a reloaded pawn hit the cache object of the PRE-reload Pawn. GetCacheInner returns it
+    ///    without "new entry", GetCache then skips CheckForScribedEntry (always for canRegenerate, and for a
+    ///    junk entry that was regenerated since), so the refresh that gets scheduled is for the stale Pawn:
+    ///    the host's DelayedUpdate (forced hediffs, apparel, genes, traits) runs on a ghost object, the joiner's
+    ///    on the real pawn. Seen in lab run mp18: the VQE inventor (Genetron_GameComponent.inventor, gene
+    ///    guy762_statgene_PsyHarmonize) got guy762_Hediff_PsyHarmonize on the arbiter 101 ticks after the join,
+    ///    never on the host. Metamorphosis.pawnsQueuedForMorphing (HashSet of Pawn) has the same shape.
+    ///    Fix: both cleared in the Game.LoadGame prefix.
+    /// 7. Interface (render, UI) calls of HumanoidPawnScaler.GetCache create, register and refresh caches and
+    ///    schedule simulation work (DelayedUpdate) on the machine that draws - a graphical host, never the
+    ///    headless arbiter. Fix: in MP, while MP.InInterface, GetCache is read only (the existing cache or the
+    ///    default one) and ShedueleForceRegenerate is skipped.
+    /// 8. The Gene.ExposeData postfix registers every gene with a frequent-update extension into
+    ///    frequentUpdateGenes with its current Active value, also when SAVING - only the host saves (join
+    ///    points, autosaves). Fix: in MP, a save leaves frequentUpdateGenes as it was.
     /// Everything is MP only: outside a session nothing is written to saves and nothing changes.
     /// Not handled here: unsynced UI actions (drafted-pawn toggles, gene picker dialog, resource
-    /// sliders, recolor window) and render-thread cache creation; see the lane report.
+    /// sliders, recolor window), and stale pre-reload Pawns that other mods' statics hand to Big and Small.
     /// </remarks>
     [MpCompatFor("RedMattis.BetterPrerequisites")]
     public class BigAndSmall
@@ -62,11 +79,23 @@ namespace Multiplayer.Compat
         private static FieldInfo refreshQueueField;
         private static FieldInfo frequentUpdateGenesField;
 
+        // BigAndSmall.DictCache<Pawn, BSCache> and BigAndSmall.Metamorphosis
+        private static FieldInfo junkCacheField;
+        private static FieldInfo pawnsQueuedForMorphingField;
+
+        // Interface read-only GetCache
+        private static Func<object> pawnCacheGetter;
+        private static FieldInfo defaultCacheField;
+        private static ConstructorInfo bsCacheCtor;
+
         public BigAndSmall(ModContentPack mod)
         {
             PatchTickCounter();
             PatchRefreshOrder();
             PatchInvalidateLater();
+            PatchStaleCaches();
+            PatchInterfaceReadOnly();
+            PatchGeneSaveHook();
         }
 
         #region Tick counter, globalRandNum, stale statics
@@ -103,6 +132,9 @@ namespace Multiplayer.Compat
             regenerationAttemptedField.SetValue(null, false);
             RefreshQueue.Clear();
             ((IDictionary)frequentUpdateGenesField.GetValue(null))?.Clear();
+            // Point 6: no cache object (or queued morph) of a pre-reload Pawn may answer for a reloaded one.
+            ((IDictionary)junkCacheField?.GetValue(null))?.Clear();
+            ClearPawnSet(pawnsQueuedForMorphingField?.GetValue(null));
         }
 
         private static void PostCacheExposeData()
@@ -138,6 +170,116 @@ namespace Multiplayer.Compat
             internalTick10Field.SetValue(null, tick / 10);
             internalTick100Field.SetValue(null, tick / 100);
         }
+
+        #endregion
+
+        #region Stale pawn caches (point 6)
+
+        private static void PatchStaleCaches()
+        {
+            var bsCacheType = FindType("BigAndSmall.BSCache");
+            var dictCacheType = FindType("BigAndSmall.DictCache`2").MakeGenericType(typeof(Pawn), bsCacheType);
+            junkCacheField = GetStaticField(dictCacheType, "JunkCache", null);
+            if (!typeof(IDictionary).IsAssignableFrom(junkCacheField.FieldType))
+                throw new MissingFieldException($"{LogPrefix}DictCache<Pawn, BSCache>.JunkCache is {junkCacheField.FieldType}, expected a dictionary");
+
+            pawnsQueuedForMorphingField = GetStaticField(FindType("BigAndSmall.Metamorphosis"), "pawnsQueuedForMorphing", typeof(HashSet<Pawn>));
+        }
+
+        private static void ClearPawnSet(object set)
+        {
+            if (set is ICollection<Pawn> pawns)
+                pawns.Clear();
+        }
+
+        #endregion
+
+        #region Interface calls are read only (point 7)
+
+        private static void PatchInterfaceReadOnly()
+        {
+            var scalerType = FindType("BigAndSmall.HumanoidPawnScaler");
+            var bsCacheType = FindType("BigAndSmall.BSCache");
+            var dictCacheType = FindType("BigAndSmall.DictCache`2").MakeGenericType(typeof(Pawn), bsCacheType);
+
+            var cacheGetter = AccessTools.PropertyGetter(dictCacheType, "Cache")
+                              ?? throw new MissingMethodException(dictCacheType.FullName, "get_Cache");
+            if (!typeof(IDictionary).IsAssignableFrom(cacheGetter.ReturnType))
+                throw new MissingMethodException($"{LogPrefix}DictCache<Pawn, BSCache>.Cache is {cacheGetter.ReturnType}, expected a dictionary");
+            pawnCacheGetter = (Func<object>)Delegate.CreateDelegate(typeof(Func<object>), cacheGetter);
+            defaultCacheField = GetStaticField(bsCacheType, "defaultCache", bsCacheType);
+            // An uncached pawn gets an UNREGISTERED temp cache bound to it (what GetCacheInner builds on a
+            // canRegenerate:false miss, minus JunkCache/ScribedCache inserts and scheduling). Never defaultCache:
+            // its pawn is null and B&S render helpers dereference cache.pawn (round-4 review must-fix).
+            // GetConstructor, not AccessTools.Constructor: the latter walks base types to object..ctor on a miss.
+            bsCacheCtor = bsCacheType.GetConstructor(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+                              null, new[] { typeof(Pawn) }, null)
+                          ?? throw new MissingMethodException(bsCacheType.FullName, ".ctor(Pawn)");
+
+            var getCache = AccessTools.DeclaredMethod(scalerType, "GetCache",
+                               new[] { typeof(Pawn), typeof(bool), typeof(bool), typeof(int), typeof(bool) })
+                           ?? throw new MissingMethodException(scalerType.FullName, "GetCache(Pawn, bool, bool, int, bool)");
+            if (getCache.ReturnType != bsCacheType)
+                throw new MissingMethodException($"{LogPrefix}HumanoidPawnScaler.GetCache returns {getCache.ReturnType}, expected BSCache");
+            var schedule = AccessTools.DeclaredMethod(scalerType, "ShedueleForceRegenerate", new[] { bsCacheType, typeof(int) })
+                           ?? throw new MissingMethodException(scalerType.FullName, "ShedueleForceRegenerate(BSCache, int)");
+
+            MpCompat.harmony.Patch(getCache, prefix: new HarmonyMethod(typeof(BigAndSmall), nameof(PreGetCache)));
+            MpCompat.harmony.Patch(schedule, prefix: new HarmonyMethod(typeof(BigAndSmall), nameof(PreShedueleForceRegenerate)));
+        }
+
+        // Render threads and UI of the drawing machine only. Ticks, synced commands, loading and reloading are
+        // not MP.InInterface and keep the mod's own behaviour on every machine.
+        private static bool PreGetCache(Pawn pawn, ref object __result)
+        {
+            if (pawn == null || !MP.IsInMultiplayer || !MP.InInterface)
+                return true;
+
+            __result = ((IDictionary)pawnCacheGetter())[pawn] ?? bsCacheCtor.Invoke(new object[] { pawn });
+            return false;
+        }
+
+        private static bool PreShedueleForceRegenerate() => !MP.IsInMultiplayer || !MP.InInterface;
+
+        #endregion
+
+        #region Gene.ExposeData while saving (point 8)
+
+        private static void PatchGeneSaveHook()
+        {
+            frequentUpdateGenesField ??= GetStaticField(FindType("BigAndSmall.BigAndSmallCache"), "frequentUpdateGenes", null);
+            var exposeData = AccessTools.DeclaredMethod(typeof(Gene), nameof(Gene.ExposeData))
+                             ?? throw new MissingMethodException(typeof(Gene).FullName, nameof(Gene.ExposeData));
+            // The prefix runs before, the postfix after every other patch (Big and Small's postfix included).
+            MpCompat.harmony.Patch(exposeData,
+                prefix: new HarmonyMethod(typeof(BigAndSmall), nameof(PreGeneExposeData)) { priority = Priority.First },
+                postfix: new HarmonyMethod(typeof(BigAndSmall), nameof(PostGeneExposeData)) { priority = Priority.Last });
+        }
+
+        // __state: null = nothing to restore; otherwise the entry as it was before the save (Present, Value).
+        private static void PreGeneExposeData(Gene __instance, out object __state)
+        {
+            __state = null;
+            if (!MP.IsInMultiplayer || Scribe.mode != LoadSaveMode.Saving || __instance == null)
+                return;
+
+            var genes = (IDictionary)frequentUpdateGenesField.GetValue(null);
+            __state = genes.Contains(__instance) ? new SavedGeneEntry(true, genes[__instance]) : new SavedGeneEntry(false, null);
+        }
+
+        private static void PostGeneExposeData(Gene __instance, object __state)
+        {
+            if (__state is not SavedGeneEntry saved)
+                return;
+
+            var genes = (IDictionary)frequentUpdateGenesField.GetValue(null);
+            if (saved.Present)
+                genes[__instance] = saved.Value;
+            else
+                genes.Remove(__instance);
+        }
+
+        private sealed record SavedGeneEntry(bool Present, object Value);
 
         #endregion
 
