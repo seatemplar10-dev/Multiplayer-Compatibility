@@ -159,19 +159,33 @@ namespace Multiplayer.Compat
                     Scan(map.gameConditionManager);
 
             foreach (var def in longNightDefs)
-                SetHomeTag(def, xmlHasHomeTag.Contains(def) || longNight || (planetEvent && def == planetEventDef));
+            {
+                var wanted = xmlHasHomeTag.Contains(def) || longNight || (planetEvent && def == planetEventDef);
+                SetHomeTag(def, wanted);
+                // Log only when the state differs from the last logged one (log only, no game state), so a headless
+                // player's log shows the tag state after each Init/End/load without a line per tick.
+                if (!loggedHomeTag.TryGetValue(def, out var last) || last != wanted)
+                {
+                    loggedHomeTag[def] = wanted;
+                    Log.Message($"MPCompat :: VEE purple target tags: {def.defName} Map_PlayerHome={wanted} (LongNight={longNight}, PlanetEvent={planetEvent})");
+                }
+            }
         }
 
-        private static void SetHomeTag(IncidentDef def, bool wanted)
+        private static readonly Dictionary<IncidentDef, bool> loggedHomeTag = new();
+
+        // Returns true if the list was changed.
+        private static bool SetHomeTag(IncidentDef def, bool wanted)
         {
             var tag = IncidentTargetTagDefOf.Map_PlayerHome;
             def.targetTags ??= new List<IncidentTargetTagDef>();
             var count = def.targetTags.Count(t => t == tag);
             if (count == (wanted ? 1 : 0))
-                return;
+                return false;
             def.targetTags.RemoveAll(t => t == tag);
             if (wanted)
                 def.targetTags.Add(tag);
+            return true;
         }
 
         #endregion
