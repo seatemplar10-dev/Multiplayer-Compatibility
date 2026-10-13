@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<loadFolders>
+  <!-- 1.6: unchanged layout, the mod root (Assemblies\, Referenced\, Languages\). -->
+  <v1.6>
+    <li>/</li>
+  </v1.6>
+  <!-- 1.7 (net10.0 build): root for Languages\, then 1.7\ (Assemblies\, Referenced\). A folder listed later
+       wins, so 1.7\Assemblies\Multiplayer_Compat.dll replaces a root copy of the same relative path. -->
+  <v1.7>
+    <li>/</li>
+    <li>1.7</li>
+  </v1.7>
+</loadFolders>

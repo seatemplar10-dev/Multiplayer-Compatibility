@@ -638,7 +638,7 @@ namespace Multiplayer.Compat
 
             if (!replacedAnything)
             {
-                var name = (baseMethod.DeclaringType?.Namespace).NullOrEmpty() ? baseMethod.Name : $"{baseMethod.DeclaringType!.Name}:{baseMethod.Name}";
+                var name = GenText.NullOrEmpty(baseMethod.DeclaringType?.Namespace) ? baseMethod.Name : $"{baseMethod.DeclaringType!.Name}:{baseMethod.Name}";
                 Log.Warning($"Failed to patch {nameof(VehiclePathingSystem)}.{nameof(VehiclePathingSystem.ThreadAvailable)} calls for method {name}");
             }
         }
@@ -801,7 +801,7 @@ namespace Multiplayer.Compat
                 return;
 
             var pawns = aerialVehicle.vehicle.AllPawnsAboard;
-            if (pawns.NullOrEmpty())
+            if (GenList.NullOrEmpty(pawns))
                 return;
 
             var pawn = pawns.Find(p => p.thingIDNumber == pawnId);
@@ -834,13 +834,13 @@ namespace Multiplayer.Compat
             const int expected = 1;
             if (replacedCount != expected)
             {
-                var name = (baseMethod.DeclaringType?.Namespace).NullOrEmpty() ? baseMethod.Name : $"{baseMethod.DeclaringType!.Name}:{baseMethod.Name}";
+                var name = GenText.NullOrEmpty(baseMethod.DeclaringType?.Namespace) ? baseMethod.Name : $"{baseMethod.DeclaringType!.Name}:{baseMethod.Name}";
                 Log.Warning($"Patched incorrect number of PawnBanishUtility.ShowBanishPawnConfirmationDialog calls (patched {replacedCount}, expected {expected}) for method {name}");
             }
 #if DEBUG
             else
             {
-                var name = (baseMethod.DeclaringType?.Namespace).NullOrEmpty() ? baseMethod.Name : $"{baseMethod.DeclaringType!.Name}:{baseMethod.Name}";
+                var name = GenText.NullOrEmpty(baseMethod.DeclaringType?.Namespace) ? baseMethod.Name : $"{baseMethod.DeclaringType!.Name}:{baseMethod.Name}";
                 Log.Message($"Patched PawnBanishUtility.ShowBanishPawnConfirmationDialog calls (patched {replacedCount}, expected {expected}) for method {name}");
             }
 #endif
@@ -892,7 +892,7 @@ namespace Multiplayer.Compat
             const int expected = 1;
             if (replacedCount != expected)
             {
-                var name = (baseMethod.DeclaringType?.Namespace).NullOrEmpty() ? baseMethod.Name : $"{baseMethod.DeclaringType!.Name}:{baseMethod.Name}";
+                var name = GenText.NullOrEmpty(baseMethod.DeclaringType?.Namespace) ? baseMethod.Name : $"{baseMethod.DeclaringType!.Name}:{baseMethod.Name}";
                 Log.Warning($"Patched incorrect number of SetTarget calls (patched {replacedCount}, expected {expected}) for method {name}");
             }
         }
@@ -1785,7 +1785,7 @@ namespace Multiplayer.Compat
         {
             private List<VehiclePawn> vehicles = [];
             public override Map Map { get; }
-            public override bool IsSessionValid => !vehicles.NullOrEmpty();
+            public override bool IsSessionValid => !GenList.NullOrEmpty(vehicles);
 
             private FlyingVehicleTargetedLandingSession(Map map) : base(map)
                 => Map = map;
@@ -1979,13 +1979,13 @@ namespace Multiplayer.Compat
 
             if (replacedCount != expected)
             {
-                var name = (baseMethod.DeclaringType?.Namespace).NullOrEmpty() ? baseMethod.Name : $"{baseMethod.DeclaringType!.Name}:{baseMethod.Name}";
+                var name = GenText.NullOrEmpty(baseMethod.DeclaringType?.Namespace) ? baseMethod.Name : $"{baseMethod.DeclaringType!.Name}:{baseMethod.Name}";
                 Log.Warning($"Patched incorrect number of Widgets.ButtonText calls (patched {replacedCount}, expected {expected}) for method {name}");
             }
 #if DEBUG
             else
             {
-                var name = (baseMethod.DeclaringType?.Namespace).NullOrEmpty() ? baseMethod.Name : $"{baseMethod.DeclaringType!.Name}:{baseMethod.Name}";
+                var name = GenText.NullOrEmpty(baseMethod.DeclaringType?.Namespace) ? baseMethod.Name : $"{baseMethod.DeclaringType!.Name}:{baseMethod.Name}";
                 Log.Message($"Patched Widgets.ButtonText calls (patched {replacedCount}, expected {expected}) for method {name}");
             }
 #endif

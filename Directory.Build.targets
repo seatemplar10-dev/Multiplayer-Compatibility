@@ -1,0 +1,53 @@
+<Project>
+  <!--
+    RimWorld 1.7 runs on the Waylith engine: .NET 10 (CoreCLR), UnityStubs.dll in place of the
+    UnityEngine modules, Harmony 3. Both projects compile against the game's own assemblies in the
+    RimWorld install root (never copied: Private=false). Same approach as the Multiplayer rw-1.7 port
+    (Source/Directory.Build.targets there).
+
+    RimWorld17Dir: the RimWorld 1.7 install root. Order: -p:RimWorld17Dir=..., env RIMWORLD_DIR, Steam default.
+    UseUnityFacades=true (set by Source_Referenced): also reference the compile-time Unity facades in
+    $(UnityFacadesDir) - one assembly per old UnityEngine.* name, forwarding every type to UnityStubs, so
+    1.6-era mod reference DLLs (References\*.dll) compile. Compile only, never shipped.
+  -->
+  <PropertyGroup>
+    <RimWorld17Dir Condition="'$(RimWorld17Dir)' == ''">$(RIMWORLD_DIR)</RimWorld17Dir>
+    <RimWorld17Dir Condition="'$(RimWorld17Dir)' == ''">C:\Program Files (x86)\Steam\steamapps\common\RimWorld</RimWorld17Dir>
+    <_RimWorld17Dir>$([MSBuild]::EnsureTrailingSlash('$(RimWorld17Dir)'))</_RimWorld17Dir>
+    <UnityFacadesDir Condition="'$(UnityFacadesDir)' == ''">$(MSBuildThisFileDirectory)..\..\facades\out\</UnityFacadesDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- RimWorld.MultiplayerAPI 0.6.0 (net472) pulls in the 1.6 Krafs reference pack; keep it out. -->
+    <PackageReference Include="Krafs.Rimworld.Ref" Version="1.6.4518" ExcludeAssets="all" PrivateAssets="all" NoWarn="NU1701" />
+    <Reference Include="Assembly-CSharp">
+      <HintPath>$(_RimWorld17Dir)Assembly-CSharp.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityStubs">
+      <HintPath>$(_RimWorld17Dir)UnityStubs.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Waylith">
+      <HintPath>$(_RimWorld17Dir)Waylith.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="com.rlabrecque.steamworks.net">
+      <HintPath>$(_RimWorld17Dir)com.rlabrecque.steamworks.net.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(UseUnityFacades)' == 'true'">
+    <Reference Include="$(UnityFacadesDir)*.dll">
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <Target Name="CheckRimWorld17Refs" BeforeTargets="ResolveAssemblyReferences">
+    <Error Condition="!Exists('$(_RimWorld17Dir)Assembly-CSharp.dll') Or !Exists('$(_RimWorld17Dir)UnityStubs.dll')"
+           Text="RimWorld 1.7 assemblies not found in $(_RimWorld17Dir). Pass -p:RimWorld17Dir=&lt;RimWorld 1.7 install root&gt; or set RIMWORLD_DIR." />
+    <Error Condition="'$(UseUnityFacades)' == 'true' And !Exists('$(UnityFacadesDir)UnityEngine.CoreModule.dll')"
+           Text="Unity compile-time facades not found in $(UnityFacadesDir). Pass -p:UnityFacadesDir=&lt;folder with the facade dlls&gt;." />
+  </Target>
+</Project>

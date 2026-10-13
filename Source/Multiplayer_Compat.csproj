@@ -1,12 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <TargetFramework>net48</TargetFramework>
+    <!-- RimWorld 1.7 (Waylith, .NET 10 CoreCLR). Game references: ..\Directory.Build.targets. Loaded via LoadFolders.xml v1.7. -->
+    <TargetFramework>net10.0</TargetFramework>
     <LangVersion>12</LangVersion>
     <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
     <GenerateTargetFrameworkAttribute>false</GenerateTargetFrameworkAttribute>
+    <GenerateDependencyFile>false</GenerateDependencyFile>
     <PublicizeAsReferenceAssemblies>false</PublicizeAsReferenceAssemblies>
-    <OutputPath>..\Assemblies\</OutputPath>
+    <OutputPath>..\1.7\Assemblies\</OutputPath>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <AppendRuntimeIdentifierToOutputPath>false</AppendRuntimeIdentifierToOutputPath>
     <DebugType>None</DebugType>
@@ -15,16 +17,14 @@
 
   <ItemGroup>
     <PackageReference Include="Lib.Harmony">
-      <Version>2.3.6</Version>
+      <Version>3.0.0-rc.2</Version>
       <ExcludeAssets>runtime</ExcludeAssets>
     </PackageReference>
+    <!-- net472-only package (NU1701 = restored for another framework); the same 0MultiplayerAPI.dll the Multiplayer 1.7 port ships. -->
     <PackageReference Include="RimWorld.MultiplayerAPI">
       <Version>0.6.0</Version>
       <ExcludeAssets>runtime</ExcludeAssets>
-    </PackageReference>
-    <PackageReference Include="Krafs.Rimworld.Ref">
-      <Version>1.6.*</Version>
-      <ExcludeAssets>runtime</ExcludeAssets>
+      <NoWarn>NU1701</NoWarn>
     </PackageReference>
     <PackageReference Include="Krafs.Publicizer">
       <Version>2.3.*</Version>
