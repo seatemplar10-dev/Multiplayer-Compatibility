@@ -17,7 +17,9 @@ namespace Multiplayer.Compat
             MpSyncWorkers.Requires<GameCondition>();
 
             PatchingUtilities.PatchSystemRand("VEE.RegularEvents.MeteoriteShower:TryExecuteWorker", false);
-            PatchingUtilities.PatchPushPopRand("VEE.IncomingSmoker:ThrowBlackSmoke");
+            // IncomingSmoker was removed from current VEE (1.6 VEE.dll has no such type).
+            if (AccessTools.TypeByName("VEE.IncomingSmoker") != null)
+                PatchingUtilities.PatchPushPopRand("VEE.IncomingSmoker:ThrowBlackSmoke");
 
             // Reset game conditions - technically does not require debug mode,
             // but lets you end (almost?) any game condition at any time
@@ -34,6 +36,9 @@ namespace Multiplayer.Compat
         private static void RegisterChoiceLetterLambdas(string typeName)
         {
             var type = AccessTools.TypeByName(typeName);
+            // Both choice letters were removed from current VEE (1.6 VEE.dll has no ChoiceLetter_* types).
+            if (type == null)
+                return;
             foreach (var method in MpMethodUtil.GetLambda(type, "Choices", MethodType.Getter, null, 0, 1))
                 MP.RegisterSyncMethod(method);
         }

@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Linq;
 using System.Reflection;
 using System.Reflection.Emit;
 using HarmonyLib;
@@ -38,7 +39,18 @@ namespace Multiplayer.Compat
                     prefix: new HarmonyMethod(typeof(PerformanceOptimizer), nameof(CancelIfAutosaving)));
                 refreshCache = MethodInvoker.GetHandler(resetDataMethod);
 
-                var method = AccessTools.DeclaredMethod("Multiplayer.Client.Autosaving:SaveGameToFile_Overwrite");
+                // MP (1.7) has 2 overloads: (string, bool) only forwards to (string, GameDataSnapshot), which does
+                // the saving and is also called directly by Autosaving.DoAutosave - so patch the non-bool overload.
+                // A by-name lookup throws AmbiguousMatchException with 2 overloads.
+                MethodInfo method = null;
+                var autosavingType = AccessTools.TypeByName("Multiplayer.Client.Autosaving");
+                if (autosavingType != null)
+                {
+                    var overloads = AccessTools.GetDeclaredMethods(autosavingType).Where(m => m.Name == "SaveGameToFile_Overwrite").ToArray();
+                    method = overloads.Length == 1
+                        ? overloads[0]
+                        : overloads.FirstOrDefault(m => m.GetParameters().All(p => p.ParameterType != typeof(bool)));
+                }
                 // Backwards compat
                 method ??= AccessTools.DeclaredMethod("Multiplayer.Client.MultiplayerSession:SaveGameToFile_Overwrite");
                 // Even more backwards compat

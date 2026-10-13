@@ -44,10 +44,13 @@ namespace Multiplayer.Compat
 
             // CompInstalledPart
             {
-                var type = AccessTools.TypeByName("CompInstalledPart.InstalledPartFloatMenuPatch");
+                // 1.6: InstalledPartFloatMenuPatch.GetFloatMenus was replaced by a static constructor that
+                // registers the same float menu with FloatMenuOptionProvider_HumanlikeOrders. The install
+                // target callback (old lambda 3) is lambda 2 of that static constructor.
+                var type = AccessTools.TypeByName("CompInstalledPart.InstalledPartFloatMenuRegistration");
                 if (type != null)
                 {
-                    MP.RegisterSyncMethodLambda(type, "GetFloatMenus", 3);
+                    MpCompat.RegisterLambdaMethod(type, null, MethodType.StaticConstructor, 2);
                     patchedElementsCount++;
                 }
                 // Looking at the code, it seems there's no built-in way to uninstall those?
@@ -62,7 +65,9 @@ namespace Multiplayer.Compat
                     MP.RegisterSyncMethod(type, "TryGiveLoadSlotJob"); // Gizmo -> float menu -> load option
                     MP.RegisterSyncMethod(type, "TryEmptySlot"); // Gizmo -> float menu -> empty option
 
-                    MpCompat.RegisterLambdaMethod("CompSlotLoadable.SloatLoadbleFloatMenuPatch", "GetFloatMenus", 1);
+                    // 1.6: SloatLoadbleFloatMenuPatch.GetFloatMenus was replaced by a static constructor that registers
+                    // the same float menu with FloatMenuOptionProvider_HumanlikeOrders. Equip is still lambda 1.
+                    MpCompat.RegisterLambdaMethod("CompSlotLoadable.SlotLoadableFloatMenuRegistration", null, MethodType.StaticConstructor, 1);
 
                     patchedElementsCount++;
                 }

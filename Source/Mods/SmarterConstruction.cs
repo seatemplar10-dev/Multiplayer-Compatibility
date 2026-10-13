@@ -1,4 +1,5 @@
-﻿using System.Collections;
+﻿using System;
+using System.Collections;
 using System.Reflection;
 using HarmonyLib;
 using Verse;
@@ -13,11 +14,11 @@ namespace Multiplayer.Compat
     {
         // Patch_WorkGiver_Scanner_GetPriority
         private static AccessTools.FieldRef<IDictionary> workGiverScannerCacheField;
-        // ClosedRegionDetector
-        private static AccessTools.FieldRef<object> closedRegionDetectorCacheField;
-        // EncloseThingsCache
-        private static AccessTools.FieldRef<object, IDictionary> encloseThingsCacheField;
-        // PawnPositionCache
+        // EncloseThingsCache (a MapComponent since the 1.7 build; ClosedRegionDetector no longer holds a static cache)
+        private static Type encloseThingsCacheType;
+        private static FieldInfo encloseThingsCacheField;
+        // PawnPositionCache (a MapComponent since the 1.7 build; the fields are per-map instance fields now)
+        private static Type pawnPositionCacheType;
         private static FieldInfo positionsCacheField;
         private static FieldInfo lastPositionsCacheCleanupField;
         // WorkGiver_ConstructFinishFrames_JobOnThing
@@ -38,14 +39,13 @@ namespace Multiplayer.Compat
             {
                 workGiverScannerCacheField = AccessTools.StaticFieldRefAccess<IDictionary>(AccessTools.DeclaredField(type, "cache"));
 
-                closedRegionDetectorCacheField = AccessTools.StaticFieldRefAccess<object>(
-                    AccessTools.DeclaredField("SmarterConstruction.Core.ClosedRegionDetector:cache"));
-                encloseThingsCacheField = AccessTools.FieldRefAccess<IDictionary>("SmarterConstruction.Core.EncloseThingsCache:cache");
+                encloseThingsCacheType = AccessTools.TypeByName("SmarterConstruction.Core.EncloseThingsCache");
+                encloseThingsCacheField = AccessTools.DeclaredField(encloseThingsCacheType, "_cache");
 
-                type = AccessTools.TypeByName("SmarterConstruction.Core.PawnPositionCache");
+                pawnPositionCacheType = AccessTools.TypeByName("SmarterConstruction.Core.PawnPositionCache");
                 // Harmony seems to fail to create FieldRef<T> on those 2, so just gonna use FieldInfo instead.
-                positionsCacheField = AccessTools.DeclaredField(type, "positionCache");
-                lastPositionsCacheCleanupField = AccessTools.DeclaredField(type, "lastCacheCleanup");
+                positionsCacheField = AccessTools.DeclaredField(pawnPositionCacheType, "_positionCache");
+                lastPositionsCacheCleanupField = AccessTools.DeclaredField(pawnPositionCacheType, "_lastCacheCleanup");
 
                 constructFinishFrameCurrentTickField = AccessTools.StaticFieldRefAccess<int>(
                     AccessTools.DeclaredField("SmarterConstruction.Patches.WorkGiver_ConstructFinishFrames_JobOnThing:currentTick"));
@@ -58,12 +58,22 @@ namespace Multiplayer.Compat
         private static void ClearCache()
         {
             workGiverScannerCacheField().Clear();
-            // ClosedRegionDetector.cache.cache.Clear();
-            encloseThingsCacheField(closedRegionDetectorCacheField()).Clear();
 
-            ((IDictionary)positionsCacheField.GetValue(null)).Clear();
-            // Reset the last cleanup tick field, as if we load an older save - it'll have to wait until the previously assigned tick to cleanup.
-            lastPositionsCacheCleanupField.SetValue(null, 0);
+            // The enclose and pawn position caches are per-map components now - clear them on every map.
+            foreach (var map in Find.Maps)
+            {
+                var encloseCache = map.GetComponent(encloseThingsCacheType);
+                if (encloseCache != null)
+                    ((IDictionary)encloseThingsCacheField.GetValue(encloseCache)).Clear();
+
+                var positionCache = map.GetComponent(pawnPositionCacheType);
+                if (positionCache != null)
+                {
+                    ((IDictionary)positionsCacheField.GetValue(positionCache)).Clear();
+                    // Reset the last cleanup tick field, as if we load an older save - it'll have to wait until the previously assigned tick to cleanup.
+                    lastPositionsCacheCleanupField.SetValue(positionCache, 0);
+                }
+            }
 
             // Small chance it could cause issues when the loaded game is on the same tick as the tick stored by this field
             constructFinishFrameCurrentTickField() = -1;

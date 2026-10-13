@@ -1,6 +1,7 @@
 ﻿using System.Linq;
 using HarmonyLib;
 using Multiplayer.API;
+using RimWorld;
 using Verse;
 
 namespace Multiplayer.Compat;
@@ -11,23 +12,20 @@ namespace Multiplayer.Compat;
 [MpCompatFor("Aoba.Exosuit.Framework")]
 public class ExosuitFramework
 {
+    // The mod renamed its namespace from WalkerGear to Exosuit (see Exosuit.BackCompat_Exosuit_1_6) and
+    // now registers some of its own sync methods (MP.RegisterAll in Exosuit.MultiplayerCompatibility).
+    // ModuleComp_EmergencyEject and WalkerGear_Core:Eject were removed, there is nothing left to sync for them.
     public ExosuitFramework(ModContentPack mod)
     {
-        LongEventHandler.ExecuteWhenFinished(LatePatch);
-
         #region Gizmos
 
         {
-            // Eject to location (0), launch to map (3), release (8)
-            MpCompat.RegisterLambdaMethod("WalkerGear.Building_EjectorBay", nameof(Building.GetGizmos), 0, 3, 8)
+            // Eject to location (0), launch to map (1), release (6)
+            MpCompat.RegisterLambdaMethod("Exosuit.Building_EjectorBay", nameof(Building.GetGizmos), 0, 1, 6)
                 // The first 2 gizmos use current map, the last one doesn't care
                 .SkipLast(1).SetContext(SyncContext.CurrentMap);
-            // Get in (0), toggle auto repair (2)
-            MpCompat.RegisterLambdaMethod("WalkerGear.Building_MaintenanceBay", nameof(Building.GetGizmos), 0, 2);
-            // Toggle safety (1), syncing it is not necessary, as it's only used to enable the eject
-            // gizmo. Better to sync it anyway in case some mods end up using it in some other way.
-            // Eject (2) is synced through WalkerGear_Core:Eject for more compatibility.
-            MpCompat.RegisterLambdaMethod("WalkerGear.ModuleComp_EmergencyEject", nameof(ThingComp.CompGetWornGizmosExtra), 1);
+            // Get in (7), toggle auto repair (10)
+            MpCompat.RegisterLambdaMethod("Exosuit.Building_MaintenanceBay", nameof(Building.GetGizmos), 7, 10);
         }
 
         #endregion
@@ -35,33 +33,22 @@ public class ExosuitFramework
         #region Float Menus
 
         {
-            var type = AccessTools.TypeByName("WalkerGear.Building_MaintenanceBay");
-            // Add/replace/remove methods, called from ITab_MechGear
-            MP.RegisterSyncMethod(type, "AddOrReplaceModule");
-            MP.RegisterSyncMethod(type, "RemoveModules");
+            var type = AccessTools.TypeByName("Exosuit.Building_MaintenanceBay");
+            // Remove module, called from ITab_Exosuit. Install/replace/cancel install go through the mod's
+            // own [SyncMethod]s now; remove calls RequestRemoveModule directly (the old ITab called RemoveModules).
+            MP.RegisterSyncMethod(type, "RequestRemoveModule");
 
-            type = AccessTools.TypeByName("WalkerGear.FloatMenuMakerMap_MakeForFrame");
+            type = AccessTools.TypeByName("Exosuit.FloatMenuOptionProvider_ExosuitDown");
             // Take to maintenance bay. Needs to be synced due to the method
             // modifying a field after starting a job - `job.count = 1`.
-            MpCompat.RegisterLambdaDelegate(type, "AddHumanlikeOrders", 1);
+            // GetOptionsFor is overloaded (Pawn/Thing), the option is in the Pawn one.
+            var lambda = MpMethodUtil.GetLambda(type, "GetOptionsFor", MethodType.Normal, [typeof(Pawn), typeof(FloatMenuContext)], 1);
+            MP.RegisterSyncDelegate(type, lambda.DeclaringType!.Name, lambda.Name, null);
         }
 
         #endregion
 
         // Once it's included in a mod/implemented, also patch Building_EjectorBay and WG_PawnFlyer.
         // The building (and thus the flyer) aren't used by this mod or any of its addons yet.
-    }
-
-    private static void LatePatch()
-    {
-        #region Gizmos
-
-        {
-            // Eject, only called from lambda in ModuleComp_EmergencyEject. Could sync it instead,
-            // but could be called from other mods. Probably safer to call this method.
-            MP.RegisterSyncMethod(AccessTools.DeclaredMethod("WalkerGear.WalkerGear_Core:Eject"));
-        }
-
-        #endregion
     }
 }

@@ -226,6 +226,8 @@ namespace Multiplayer.Compat
         // CompAdvancedResourceProcessor
         private static Type advancedResourceProcessorType;
         private static AccessTools.FieldRef<ThingComp, object> advancedResourceProcessorProcessStackField;
+        // <>4__this of the display class holding the paste gizmo lambda (null if the lambda is declared on the comp itself)
+        private static AccessTools.FieldRef<object, ThingComp> pasteGizmoClosureCompField;
         // Process
         // Most of those have getters/setters, but given they're not virtual - not bothering to use them.
         private static AccessTools.FieldRef<object, ThingWithComps> processParentField;
@@ -234,6 +236,8 @@ namespace Multiplayer.Compat
         private static AccessTools.FieldRef<object, int> processTargetCountField;
         private static AccessTools.FieldRef<object, float> processProgressField;
         private static AccessTools.FieldRef<object, bool> processSuspendedField;
+        private static AccessTools.FieldRef<object, BillRepeatModeDef> processRepeatModeField;
+        private static AccessTools.FieldRef<object, QualityCategory> processQualityToOutputField;
         // ProcessStack
         private static FastInvokeHandler processStackAddProcessMethod;
         private static FastInvokeHandler processStackNotifyProcessChangeMethod;
@@ -253,17 +257,23 @@ namespace Multiplayer.Compat
         {
             var type = advancedResourceProcessorType = AccessTools.TypeByName("PipeSystem.CompAdvancedResourceProcessor");
             advancedResourceProcessorProcessStackField = AccessTools.FieldRefAccess<object>(type, "processStack");
-            // Add to process stack (2)
-            MpCompat.RegisterLambdaDelegate(type, "ProcessesOptions", MethodType.Getter, 2);
+            // Add to process stack (6). Ordinal 2 is now the no-op "no process available" option.
+            MpCompat.RegisterLambdaDelegate(type, "ProcessesOptions", MethodType.Getter, 6);
             // Toggle: output to ground
             MpCompat.RegisterLambdaMethod(type, "Settings", MethodType.Getter, 0);
             // Extract at current quality (0), and debug: finish in 10 ticks (3), advance progress 1 day (4), empty wastepacks (5).
-            // 2 is newly added for overclock 
-            MpCompat.RegisterLambdaMethod(type, nameof(ThingComp.CompGetGizmosExtra), 0);
+            // 2 is newly added for overclock
+            // All of them now live in the display class that captures the paste gizmo's clipboard list, so
+            // extract (0) is synced as a delegate - only the comp (<>4__this) matters, as it did for the old instance lambda.
+            MpCompat.RegisterLambdaDelegate(type, nameof(ThingComp.CompGetGizmosExtra), ["<>4__this"], 0);
             MpCompat.RegisterLambdaDelegate(type, nameof(ThingComp.CompGetGizmosExtra), 3, 4, 5).SetDebugOnly();
             // Handle paste (1) gizmo differently, since we need to also sync the clipboard.
-            MpCompat.harmony.Patch(MpMethodUtil.GetLambda(type, nameof(ThingComp.CompGetGizmosExtra), lambdaOrdinal: 1),
-                prefix: new HarmonyMethod(PrePasteProcessesGizmo));
+            var pasteLambda = MpMethodUtil.GetLambda(type, nameof(ThingComp.CompGetGizmosExtra), lambdaOrdinal: 1);
+            // The lambda's instance is the display class, the comp is its <>4__this field.
+            pasteGizmoClosureCompField = pasteLambda.DeclaringType == type
+                ? null
+                : AccessTools.FieldRefAccess<object, ThingComp>(AccessTools.DeclaredField(pasteLambda.DeclaringType, "<>4__this"));
+            MpCompat.harmony.Patch(pasteLambda, prefix: new HarmonyMethod(PrePasteProcessesGizmo));
 
 
             // The process, we'll need to sync it
@@ -274,11 +284,13 @@ namespace Multiplayer.Compat
             processTargetCountField = AccessTools.FieldRefAccess<int>(type, "targetCount");
             processProgressField = AccessTools.FieldRefAccess<float>(type, "progress");
             processSuspendedField = AccessTools.FieldRefAccess<bool>(type, "suspended");
+            processRepeatModeField = AccessTools.FieldRefAccess<BillRepeatModeDef>(type, "repeatMode");
+            processQualityToOutputField = AccessTools.FieldRefAccess<QualityCategory>(type, "qualityToOutput");
             MP.RegisterSyncWorker<object>(SyncProcess, type, true);
             // Called (together with delete on process stack) when deleting. Other places this is called from don't matter.
             MP.RegisterSyncMethod(type, "ResetProcess");
-            // Make x (0), make forever (1)
-            MpCompat.RegisterLambdaMethod(type, "Options", MethodType.Getter, 0, 1);
+            // Make x (0), make forever (2). 1 is the newer "until you have X" (TargetCount) option.
+            MpCompat.RegisterLambdaMethod(type, "Options", MethodType.Getter, 0, 2);
             MP.RegisterSyncMethod(MpMethodUtil.MethodOf(SyncedProcessModifyTargetCountButton));
             MP.RegisterSyncMethod(MpMethodUtil.MethodOf(SyncedProcessSuspendButton));
             MpCompat.harmony.Patch(AccessTools.DeclaredMethod(type, "DoInterface"),
@@ -356,21 +368,31 @@ namespace Multiplayer.Compat
             offset = num - index;
         }
 
-        private static bool PrePasteProcessesGizmo(ThingComp __instance)
+        // __instance is the lambda's display class (PipeSystem.CompAdvancedResourceProcessor+<>c__DisplayClass76_0),
+        // not a ThingComp - Harmony 3 refuses to bind it to a ThingComp parameter, so take object and resolve the comp.
+        private static bool PrePasteProcessesGizmo(object __instance)
         {
             if (!MP.IsInMultiplayer)
                 return true;
 
+            var comp = __instance as ThingComp;
+            if (comp == null && pasteGizmoClosureCompField != null)
+                comp = pasteGizmoClosureCompField(__instance);
+            // Shouldn't happen
+            if (comp == null)
+                return false;
+
             var clipboard = processUtilityClipboardField();
-            if (!clipboard.Contains(__instance.parent.def))
+            if (!clipboard.Contains(comp.parent.def))
                 return false;
 
-            if (clipboard[__instance.parent.def] is not IList processes || processes.Count == 0)
+            if (clipboard[comp.parent.def] is not IList processes || processes.Count == 0)
                 return false;
 
-            // Rather than using the processes themselves, grab a list of their defs and target count
-            var list = processes.Cast<object>().Select(process => (processDefField(process), processTargetCountField(process))).ToList();
-            SyncedPasteProcesses(__instance, list);
+            // Rather than using the processes themselves, grab a list of their defs, repeat modes and target count.
+            // The gizmo paste in the mod doesn't pass a quality (AddProcess default: Normal).
+            var list = processes.Cast<object>().Select(process => (processDefField(process), processRepeatModeField(process), processTargetCountField(process), QualityCategory.Normal)).ToList();
+            SyncedPasteProcesses(comp, list);
             return false;
         }
 
@@ -390,7 +412,7 @@ namespace Multiplayer.Compat
 
         #region ITab Patches
 
-        private static void SyncedPasteProcesses(ThingComp comp, List<(Def, int)> clipboard)
+        private static void SyncedPasteProcesses(ThingComp comp, List<(Def, BillRepeatModeDef, int, QualityCategory)> clipboard)
         {
             // Just in case
             if (clipboard.Empty())
@@ -401,9 +423,10 @@ namespace Multiplayer.Compat
             // Clear before pasting
             processes.Clear();
 
-            // Add all the pasted processes.
-            foreach (var (process, targetCount) in clipboard) 
-                processStackAddProcessMethod(processStack, process, comp.parent, targetCount);
+            // Add all the pasted processes. FastInvokeHandler needs every parameter of
+            // ProcessStack.AddProcess(ProcessDef, ThingWithComps, BillRepeatModeDef, int targetCount, QualityCategory forcedQuality).
+            foreach (var (process, repeatMode, targetCount, quality) in clipboard)
+                processStackAddProcessMethod(processStack, process, comp.parent, repeatMode, targetCount, quality);
 
             // Probably not needed since the list is cleared? But
             // do the same as the mod and reset the progress to 0.
@@ -432,8 +455,9 @@ namespace Multiplayer.Compat
             if (clipboard[thing.def] is not IList processes || processes.Count == 0)
                 return false;
 
-            // Rather than using the processes themselves, grab a list of their defs and target count
-            var list = processes.Cast<object>().Select(process => (processDefField(process), processTargetCountField(process))).ToList();
+            // Rather than using the processes themselves, grab a list of their defs, repeat modes, target count
+            // and quality (the ITab paste in the mod passes the copied process's qualityToOutput).
+            var list = processes.Cast<object>().Select(process => (processDefField(process), processRepeatModeField(process), processTargetCountField(process), processQualityToOutputField(process))).ToList();
             SyncedPasteProcesses(comp, list);
 
             return false;

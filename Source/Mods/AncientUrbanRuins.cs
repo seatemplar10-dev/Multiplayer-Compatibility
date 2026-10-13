@@ -119,12 +119,12 @@ public class AncientUrbanRuins
 
             customMapEntranceField = AccessTools.FieldRefAccess<MapPortal>("AncientMarket_Libraray.MapParent_Custom:entrance");
 
-            // Add to allowed (2), remove from allowed (4)
+            // Add to allowed (8), remove from allowed (10)
             MpCompat.RegisterLambdaDelegate(
                 "AncientMarket_Libraray.Window_AllowLevel",
                 nameof(Window.DoWindowContents),
                 ["schedule"], // Skip x and y, syncing them is not needed - they're only used for UI
-                2, 4);
+                8, 10);
         }
 
         #endregion
@@ -256,7 +256,7 @@ public class AncientUrbanRuins
         }
     }
 
-    [MpCompatPrefix("AncientMarket_Libraray.Window_AllowLevel", nameof(Window.DoWindowContents), 2)]
+    [MpCompatPrefix("AncientMarket_Libraray.Window_AllowLevel", nameof(Window.DoWindowContents), 8)]
     private static bool PreMapAddedToSchedule(PocketMapParent m, object ___schedule)
     {
         if (!MP.IsInMultiplayer || !MP.IsExecutingSyncCommand)

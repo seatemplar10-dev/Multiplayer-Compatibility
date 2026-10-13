@@ -19,8 +19,8 @@ public class VanillaChristmasExpanded
 
         // Change graphic
         MpCompat.RegisterLambdaMethod("VanillaChristmasExpanded.GrandFestiveTree", nameof(Building.GetGizmos), 0);
-        // Deactivate (0)/activate (1) the snow spewer.
-        MpCompat.RegisterLambdaMethod("VanillaChristmasExpanded.CompSnowSpewer", nameof(Building.GetGizmos), 0, 1);
+        // Deactivate (0)/activate (1) the snow spewer. CompSnowSpewer is a ThingComp, its gizmos come from CompGetGizmosExtra.
+        MpCompat.RegisterLambdaMethod("VanillaChristmasExpanded.CompSnowSpewer", nameof(ThingComp.CompGetGizmosExtra), 0, 1);
     }
 
     private static void LatePatch()
@@ -70,7 +70,8 @@ public class VanillaChristmasExpanded
             }
         }
 
-        const int expected = 1;
+        // DrawUI reads UI.screenWidth twice (festive favor line + days until presents line), both need the offset.
+        const int expected = 2;
         if (replacedCount != expected)
         {
             var name = (baseMethod.DeclaringType?.Namespace).NullOrEmpty() ? baseMethod.Name : $"{baseMethod.DeclaringType!.Name}:{baseMethod.Name}";

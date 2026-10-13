@@ -20,6 +20,12 @@ namespace Multiplayer.Compat
 
         public VanillaFishingExpanded(ModContentPack mod)
         {
+            // With Odyssey active the mod loads 1.6Odyssey\VCE-Fishing.dll, which only patches vanilla (Odyssey) fishing
+            // and has none of its own fishing job, zone or command types - nothing below exists there.
+            // The non-Odyssey build (1.6NotOdyssey) still has them.
+            if (AccessTools.TypeByName("VCE_Fishing.JobDriver_Fish") == null)
+                return;
+
             // RNG fix
             {
                 PatchingUtilities.PatchSystemRandCtor("VCE_Fishing.JobDriver_Fish", false);
