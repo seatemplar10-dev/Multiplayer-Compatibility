@@ -234,6 +234,7 @@ namespace Multiplayer.Compat
         private static AccessTools.FieldRef<object, string> processIdField;
         private static AccessTools.FieldRef<object, Def> processDefField;
         private static AccessTools.FieldRef<object, int> processTargetCountField;
+        private static AccessTools.FieldRef<object, int> processProcessCountField;
         private static AccessTools.FieldRef<object, float> processProgressField;
         private static AccessTools.FieldRef<object, bool> processSuspendedField;
         private static AccessTools.FieldRef<object, BillRepeatModeDef> processRepeatModeField;
@@ -282,6 +283,7 @@ namespace Multiplayer.Compat
             processIdField = AccessTools.FieldRefAccess<string>(type, "id");
             processDefField = AccessTools.FieldRefAccess<Def>(type, "def");
             processTargetCountField = AccessTools.FieldRefAccess<int>(type, "targetCount");
+            processProcessCountField = AccessTools.FieldRefAccess<int>(type, "processCount");
             processProgressField = AccessTools.FieldRefAccess<float>(type, "progress");
             processSuspendedField = AccessTools.FieldRefAccess<bool>(type, "suspended");
             processRepeatModeField = AccessTools.FieldRefAccess<BillRepeatModeDef>(type, "repeatMode");
@@ -289,8 +291,12 @@ namespace Multiplayer.Compat
             MP.RegisterSyncWorker<object>(SyncProcess, type, true);
             // Called (together with delete on process stack) when deleting. Other places this is called from don't matter.
             MP.RegisterSyncMethod(type, "ResetProcess");
-            // Make x (0), make forever (2). 1 is the newer "until you have X" (TargetCount) option.
-            MpCompat.RegisterLambdaMethod(type, "Options", MethodType.Getter, 0, 2);
+            // Repeat mode float menu: do X times (0), do until you have X (1, TargetCount: counts the results on
+            // the map, so it must run inside the synced command), do forever (2). All 3 capture only the process.
+            MpCompat.RegisterLambdaMethod(type, "Options", MethodType.Getter, 0, 1, 2);
+            // Output quality float menu (processes with ticksQuality): Awful (0) ... Legendary (6). Each one
+            // changes tickLeft/qualityToOutput/ticksOrQualityTicks, which the process ticks on.
+            MpCompat.RegisterLambdaMethod(type, "QualitySelections", MethodType.Getter, 0, 1, 2, 3, 4, 5, 6);
             MP.RegisterSyncMethod(MpMethodUtil.MethodOf(SyncedProcessModifyTargetCountButton));
             MP.RegisterSyncMethod(MpMethodUtil.MethodOf(SyncedProcessSuspendButton));
             MpCompat.harmony.Patch(AccessTools.DeclaredMethod(type, "DoInterface"),
@@ -474,7 +480,11 @@ namespace Multiplayer.Compat
 
             if (targetCount == -1)
             {
-                processTargetCountField(process) = 0;
+                // Same as the mod's +/- buttons (Process.DoInterface) on a "forever" process: back to
+                // "do X times", count restarted, target 1. The old code wrote targetCount twice and left
+                // repeatMode on Forever, so MP and single player ended in different states.
+                processRepeatModeField(process) = BillRepeatModeDefOf.RepeatCount;
+                processProcessCountField(process) = 0;
                 targetCount = 1;
             }
             else if (targetCount > -1)

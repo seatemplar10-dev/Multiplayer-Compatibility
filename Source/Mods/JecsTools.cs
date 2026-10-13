@@ -47,10 +47,13 @@ namespace Multiplayer.Compat
                 // 1.6: InstalledPartFloatMenuPatch.GetFloatMenus was replaced by a static constructor that
                 // registers the same float menu with FloatMenuOptionProvider_HumanlikeOrders. The install
                 // target callback (old lambda 3) is lambda 2 of that static constructor.
+                // It lives in a closure class (<>c__DisplayClass0_0: groundPart, curThing, pawn), not on the type,
+                // so it must be synced as a delegate - a sync method would need a writer for the closure type
+                // ("No writer for type ...+<>c__DisplayClass0_0" when the target is picked).
                 var type = AccessTools.TypeByName("CompInstalledPart.InstalledPartFloatMenuRegistration");
                 if (type != null)
                 {
-                    MpCompat.RegisterLambdaMethod(type, null, MethodType.StaticConstructor, 2);
+                    MpCompat.RegisterLambdaDelegate(type, null, MethodType.StaticConstructor, 2);
                     patchedElementsCount++;
                 }
                 // Looking at the code, it seems there's no built-in way to uninstall those?
@@ -67,7 +70,9 @@ namespace Multiplayer.Compat
 
                     // 1.6: SloatLoadbleFloatMenuPatch.GetFloatMenus was replaced by a static constructor that registers
                     // the same float menu with FloatMenuOptionProvider_HumanlikeOrders. Equip is still lambda 1.
-                    MpCompat.RegisterLambdaMethod("CompSlotLoadable.SlotLoadableFloatMenuRegistration", null, MethodType.StaticConstructor, 1);
+                    // Equip lives in a nested closure (<>c__DisplayClass0_1: loadableThing + CS$<>8__locals1/pawn),
+                    // so sync it as a delegate (MP walks the nested closure); a sync method has no writer for it.
+                    MpCompat.RegisterLambdaDelegate("CompSlotLoadable.SlotLoadableFloatMenuRegistration", null, MethodType.StaticConstructor, 1);
 
                     patchedElementsCount++;
                 }

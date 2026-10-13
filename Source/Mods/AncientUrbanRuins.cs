@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Linq;
 using System.Reflection;
 using System.Reflection.Emit;
 using HarmonyLib;
@@ -9,6 +10,7 @@ using RimWorld;
 using RimWorld.Planet;
 using UnityEngine;
 using Verse;
+using Verse.AI;
 
 namespace Multiplayer.Compat;
 
@@ -26,8 +28,21 @@ public class AncientUrbanRuins
     // LevelSchedule
     private static AccessTools.FieldRef<object, IList> levelScheduleAllowedLevelsField;
     private static AccessTools.FieldRef<object, List<bool>> levelScheduleTimeScheduleField;
+    private static FieldInfo levelScheduleSleepLevelField;
+    private static FieldInfo levelScheduleWorkLevelField;
+    private static FieldInfo levelScheduleJoyLevelField;
+    // PawnColumnWorker_CopyPasteLevelTimetable (static clipboard)
+    private static AccessTools.FieldRef<List<bool>> levelTimetableClipboardField;
+    private static AccessTools.FieldRef<IList> levelTimetableAllowedLevelsField;
+    private static FieldInfo levelTimetableSleepLevelField;
+    private static FieldInfo levelTimetableWorkLevelField;
+    private static FieldInfo levelTimetableJoyLevelField;
     // MapParent_Custom
     private static AccessTools.FieldRef<PocketMapParent, MapPortal> customMapEntranceField;
+    // GPU+<>c__DisplayClass0_1 (add to miner float menu option) and its nested <>c__DisplayClass0_0
+    private static AccessTools.FieldRef<object, Job> gpuOptionJobField;
+    private static AccessTools.FieldRef<object, object> gpuOptionLocalsField;
+    private static AccessTools.FieldRef<object, Pawn> gpuOptionPawnField;
 
     // Tab_LevelPower
     private static FastInvokeHandler levelPowerTabCompGetter;
@@ -101,6 +116,21 @@ public class AncientUrbanRuins
                 MpCompat.RegisterLambdaMethod("AncientMarket_Libraray.CustomSite", nameof(WorldObject.GetGizmos), 1));
             // Toggle plan to fill the portal
             MpCompat.RegisterLambdaMethod("AncientMarket_Libraray.CompFillPortal", nameof(ThingComp.CompGetGizmosExtra), 0);
+            // Fill the portal (float menu): calls selPawn.jobs.StartJob directly, which MP does not sync.
+            MpCompat.RegisterLambdaDelegate("AncientMarket_Libraray.CompFillPortal", nameof(ThingComp.CompFloatMenuOptions), 0);
+            // Virtual miner: toggle auto-adding graphic cards (1), dev: generate products (2)
+            MpCompat.RegisterLambdaMethod("AncientMarket_Libraray.VirtualMiner", nameof(Thing.GetGizmos), 1);
+            MpCompat.RegisterLambdaMethod("AncientMarket_Libraray.VirtualMiner", nameof(Thing.GetGizmos), 2).SetDebugOnly();
+            // Add a graphic card to a miner (GPU float menu, lambda 1): StartJob directly with a prepared Job, which
+            // has no sync worker - rebuild the same job (def, targets, count) inside a synced method instead.
+            var type = AccessTools.TypeByName("AncientMarket_Libraray.GPU");
+            var addGpuOption = MpMethodUtil.GetLambda(type, nameof(Thing.GetFloatMenuOptions), lambdaOrdinal: 1);
+            var localsField = AccessTools.DeclaredField(addGpuOption.DeclaringType, "CS$<>8__locals1");
+            gpuOptionJobField = AccessTools.FieldRefAccess<object, Job>(AccessTools.DeclaredField(addGpuOption.DeclaringType, "result"));
+            gpuOptionLocalsField = AccessTools.FieldRefAccess<object, object>(localsField);
+            gpuOptionPawnField = AccessTools.FieldRefAccess<object, Pawn>(AccessTools.DeclaredField(localsField.FieldType, "selPawn"));
+            MpCompat.harmony.Patch(addGpuOption, prefix: new HarmonyMethod(PreAddGpuToMinerOption));
+            MP.RegisterSyncMethod(MpMethodUtil.MethodOf(SyncedStartAddGpuJob)).CancelIfAnyArgNull();
         }
 
         #endregion
@@ -116,15 +146,31 @@ public class AncientUrbanRuins
             type = AccessTools.TypeByName("AncientMarket_Libraray.LevelSchedule");
             levelScheduleAllowedLevelsField = AccessTools.FieldRefAccess<IList>(type, "allowedLevels");
             levelScheduleTimeScheduleField = AccessTools.FieldRefAccess<List<bool>>(type, "timeSchedule");
+            levelScheduleSleepLevelField = AccessTools.DeclaredField(type, "sleepLevel");
+            levelScheduleWorkLevelField = AccessTools.DeclaredField(type, "workLevel");
+            levelScheduleJoyLevelField = AccessTools.DeclaredField(type, "joyLevel");
 
             customMapEntranceField = AccessTools.FieldRefAccess<MapPortal>("AncientMarket_Libraray.MapParent_Custom:entrance");
 
-            // Add to allowed (8), remove from allowed (10)
+            // Add to allowed (8), remove from allowed (10),
+            // sleep level set (1) / not set (12), work level set (3) / not set (13), joy level set (5) / not set (14).
+            // 7 is the UI-only label loop over the allowed levels.
             MpCompat.RegisterLambdaDelegate(
                 "AncientMarket_Libraray.Window_AllowLevel",
                 nameof(Window.DoWindowContents),
                 ["schedule"], // Skip x and y, syncing them is not needed - they're only used for UI
-                8, 10);
+                8, 10, 1, 12, 3, 13, 5, 14);
+
+            // Copy/paste of the level timetable column (PawnColumnWorker_CopyPasteLevelTimetable). PasteTo writes
+            // the clicking player's static clipboard into the pawn's schedule - sync it with the clipboard contents.
+            type = AccessTools.TypeByName("AncientMarket_Libraray.PawnColumnWorker_CopyPasteLevelTimetable");
+            levelTimetableClipboardField = AccessTools.StaticFieldRefAccess<List<bool>>(AccessTools.DeclaredField(type, "clipboard"));
+            levelTimetableAllowedLevelsField = AccessTools.StaticFieldRefAccess<IList>(AccessTools.DeclaredField(type, "allowedLevels"));
+            levelTimetableSleepLevelField = AccessTools.DeclaredField(type, "sleepLevel");
+            levelTimetableWorkLevelField = AccessTools.DeclaredField(type, "workLevel");
+            levelTimetableJoyLevelField = AccessTools.DeclaredField(type, "joyLevel");
+            MpCompat.harmony.Patch(AccessTools.DeclaredMethod(type, "PasteTo"), prefix: new HarmonyMethod(PrePasteLevelTimetable));
+            MP.RegisterSyncMethod(MpMethodUtil.MethodOf(SyncedPasteLevelTimetable)).CancelIfAnyArgNull();
         }
 
         #endregion
@@ -270,6 +316,71 @@ public class AncientUrbanRuins
 
         // If the allowed levels already contains the entrance, cancel execution.
         return !allowedLevels.Contains(entrance);
+    }
+
+    // Level portals (AMMapPortal) usually sit on other maps than the pawn, and a sync command can only carry
+    // things from one map - send them as thing ids (-1 = none), like the ITab transmit/power links do.
+    private static int ThingIdOrNone(object thing) => (thing as Thing)?.thingIDNumber ?? -1;
+
+    private static Thing ThingByIdOrNull(int id) => id >= 0 && MP.TryGetThingById(id, out var thing) ? thing : null;
+
+    private static bool PrePasteLevelTimetable(Pawn p)
+    {
+        if (!MP.IsInMultiplayer || MP.IsExecutingSyncCommand)
+            return true;
+
+        var clipboard = levelTimetableClipboardField();
+        // The paste button only shows with a clipboard, but be safe.
+        if (clipboard == null || p == null)
+            return false;
+
+        var levels = levelTimetableAllowedLevelsField();
+        SyncedPasteLevelTimetable(p,
+            clipboard.ToList(),
+            levels == null ? [] : levels.Cast<object>().Select(ThingIdOrNone).Where(id => id >= 0).ToList(),
+            ThingIdOrNone(levelTimetableSleepLevelField.GetValue(null)),
+            ThingIdOrNone(levelTimetableWorkLevelField.GetValue(null)),
+            ThingIdOrNone(levelTimetableJoyLevelField.GetValue(null)));
+        return false;
+    }
+
+    private static void SetLevelField(FieldInfo field, object schedule, int thingId)
+    {
+        var thing = ThingByIdOrNull(thingId);
+        field.SetValue(schedule, field.FieldType.IsInstanceOfType(thing) ? thing : null);
+    }
+
+    private static void SyncedPasteLevelTimetable(Pawn pawn, List<bool> timeSchedule, List<int> allowedLevelIds, int sleepLevelId, int workLevelId, int joyLevelId)
+    {
+        var comp = Current.Game.GetComponent(ancientMarketGameCompType);
+        var schedule = ancientMarketGameCompGetScheduleMethod(comp, pawn);
+        if (schedule == null)
+            return;
+
+        // Same as PawnColumnWorker_CopyPasteLevelTimetable.PasteTo
+        var times = levelScheduleTimeScheduleField(schedule);
+        for (var i = 0; i < times.Count && i < timeSchedule.Count; i++)
+            times[i] = timeSchedule[i];
+
+        // The mod assigns the copied pawn's list object itself (both pawns then share it); give this pawn its own copy.
+        ref var allowedLevels = ref levelScheduleAllowedLevelsField(schedule);
+        if (allowedLevels != null)
+        {
+            var listType = allowedLevels.GetType();
+            var elementType = listType.IsGenericType ? listType.GetGenericArguments()[0] : typeof(Thing);
+            var newList = (IList)Activator.CreateInstance(listType);
+            foreach (var id in allowedLevelIds)
+            {
+                var thing = ThingByIdOrNull(id);
+                if (elementType.IsInstanceOfType(thing))
+                    newList.Add(thing);
+            }
+            allowedLevels = newList;
+        }
+
+        SetLevelField(levelScheduleSleepLevelField, schedule, sleepLevelId);
+        SetLevelField(levelScheduleWorkLevelField, schedule, workLevelId);
+        SetLevelField(levelScheduleJoyLevelField, schedule, joyLevelId);
     }
 
     [MpCompatSyncMethod(cancelIfAnyArgNull = true)]
@@ -428,6 +539,31 @@ public class AncientUrbanRuins
     {
         if (__state)
             MP.WatchEnd();
+    }
+
+    #endregion
+
+    #region Graphic card to virtual miner
+
+    private static bool PreAddGpuToMinerOption(object __instance)
+    {
+        if (!MP.IsInMultiplayer || MP.IsExecutingSyncCommand)
+            return true;
+
+        var job = gpuOptionJobField(__instance);
+        var locals = gpuOptionLocalsField(__instance);
+        var pawn = locals == null ? null : gpuOptionPawnField(locals);
+        if (job != null && pawn != null)
+            SyncedStartAddGpuJob(pawn, job.def, job.targetA.Thing, job.targetB.Thing, job.count);
+        return false;
+    }
+
+    // Same job as the mod builds in GPU.GetFloatMenuOptions: MakeJob(AM_AddGPU, gpu, miner) with count 1.
+    private static void SyncedStartAddGpuJob(Pawn pawn, JobDef def, Thing gpu, Thing miner, int count)
+    {
+        var job = JobMaker.MakeJob(def, gpu, miner);
+        job.count = count;
+        pawn.jobs.StartJob(job);
     }
 
     #endregion
