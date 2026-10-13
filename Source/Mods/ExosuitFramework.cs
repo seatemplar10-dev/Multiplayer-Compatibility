@@ -1,10 +1,12 @@
-﻿using System.Linq;
+﻿using System.Collections;
+using System.Linq;
 using System.Reflection;
 using HarmonyLib;
 using Multiplayer.API;
 using RimWorld;
 using Verse;
 using Verse.AI;
+using Color = UnityEngine.Color;
 
 namespace Multiplayer.Compat;
 
@@ -28,6 +30,14 @@ public class ExosuitFramework
     private static AccessTools.FieldRef<object, Building> getInAssignedBayField;
     // Exosuit.JobDefOf.WG_GetInWalkerCore
     private static FieldInfo getInWalkerCoreJobDefField;
+    // Building_MaintenanceBay.occupiedSlots (Dictionary<SlotDef, Thing>, filled from the Dummy's worn modules)
+    private static FieldInfo maintenanceBayOccupiedSlotsField;
+    // ITab_Exosuit.Parent (SelThing as Building_MaintenanceBay)
+    private static FastInvokeHandler itabParentGetter;
+    // ITab_Exosuit+<>c__DisplayClass37_0, the closure of the "change module colour" option
+    private static AccessTools.FieldRef<object, object> colorClosureTabField;
+    private static AccessTools.FieldRef<object, Def> colorClosureSlotField;
+    private static AccessTools.FieldRef<object, Thing> colorClosureModuleField;
 
     public ExosuitFramework(ModContentPack mod)
     {
@@ -83,9 +93,19 @@ public class ExosuitFramework
             // cancel core work (lambda 0) calls CancelAllCoreWork - both edit pendingModuleWork, which the jobs read.
             MP.RegisterSyncMethod(type, "CancelPendingWork");
             MP.RegisterSyncMethod(type, "CancelAllCoreWork");
-            // Change module colour (lambda 4, the Dialog_ChooseColor callback): t.SetColor(color). Only the module
-            // (t) is needed; the closure's ITab (<>4__this) has no sync worker.
-            MpCompat.RegisterLambdaDelegate("Exosuit.ITab_Exosuit", "GizmoFloatMenu", ["t"], 4);
+            // Change module colour (lambda 4 in closure 37_0, the Dialog_ChooseColor callback): t.SetColor(color).
+            // The module t is worn by the bay's Dummy pawn, which is never spawned and sits in no ThingOwner, so
+            // MP's Thing writer cannot reach it ("Thing ... is inaccessible", read back as null). Sync the bay and
+            // the slot instead and look the module up inside the command (prefix + SyncedSetModuleColor).
+            var itabType = AccessTools.TypeByName("Exosuit.ITab_Exosuit");
+            var colorCallback = MpMethodUtil.GetLambda(itabType, "GizmoFloatMenu", lambdaOrdinal: 4);
+            itabParentGetter = MethodInvoker.GetHandler(AccessTools.DeclaredPropertyGetter(itabType, "Parent"));
+            colorClosureTabField = AccessTools.FieldRefAccess<object, object>(AccessTools.DeclaredField(colorCallback.DeclaringType, "<>4__this"));
+            colorClosureSlotField = AccessTools.FieldRefAccess<object, Def>(AccessTools.DeclaredField(colorCallback.DeclaringType, "slot"));
+            colorClosureModuleField = AccessTools.FieldRefAccess<object, Thing>(AccessTools.DeclaredField(colorCallback.DeclaringType, "t"));
+            maintenanceBayOccupiedSlotsField = AccessTools.DeclaredField(type, "occupiedSlots");
+            MpCompat.harmony.Patch(colorCallback, prefix: new HarmonyMethod(PreSetModuleColor));
+            MP.RegisterSyncMethod(MpMethodUtil.MethodOf(SyncedSetModuleColor)).CancelIfAnyArgNull();
 
             type = AccessTools.TypeByName("Exosuit.FloatMenuOptionProvider_ExosuitDown");
             // Take to maintenance bay. Needs to be synced due to the method
@@ -135,6 +155,30 @@ public class ExosuitFramework
         var jobDef = (JobDef)getInWalkerCoreJobDefField.GetValue(null);
         pawn.jobs.StartJob(JobMaker.MakeJob(jobDef, bay), JobCondition.InterruptForced);
     }
+
+    #endregion
+
+    #region Change module colour
+
+    private static Thing ModuleInSlot(Building bay, Def slot)
+        => maintenanceBayOccupiedSlotsField.GetValue(bay) is IDictionary slots && slots.Contains(slot) ? slots[slot] as Thing : null;
+
+    // Prefix on the Dialog_ChooseColor callback (closure 37_0). Skips if the slot no longer holds the module
+    // the menu was opened for (it was removed or replaced while the dialog was open).
+    private static bool PreSetModuleColor(object __instance, Color color)
+    {
+        if (!MP.IsInMultiplayer || MP.IsExecutingSyncCommand)
+            return true;
+
+        var slot = colorClosureSlotField(__instance);
+        if (itabParentGetter(colorClosureTabField(__instance)) is Building bay && slot != null &&
+            ModuleInSlot(bay, slot) == colorClosureModuleField(__instance))
+            SyncedSetModuleColor(bay, slot, color);
+        return false;
+    }
+
+    private static void SyncedSetModuleColor(Building bay, Def slot, Color color)
+        => ModuleInSlot(bay, slot)?.SetColor(color);
 
     #endregion
 }

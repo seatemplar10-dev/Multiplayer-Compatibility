@@ -18,13 +18,22 @@ public class DefensivePositions
     // baked in the API version the dll was built against: the 1.6 dll compares "0.5" with "0.1", the root dll "0.3".
     // The check always throws ("MP API version mismatch. This mod is designed to work with MPAPI version 0.1"),
     // nothing gets registered and every Defensive Positions click (save/clear position, advanced mode, squads)
-    // runs on the clicking client only. This module registers exactly what the mod's own layer would have,
-    // and only when the mod's check is the always-failing kind, so a fixed mod build is not registered twice.
+    // runs on the clicking client only. This module registers the per-pawn part of what the mod's own layer would
+    // have, and only when the mod's check is the always-failing kind, so a fixed mod build is not registered twice.
+    //
+    // Deliberately NOT synced (unlike the mod's own layer): squads (PawnSquadHandler.ReassignSquadMembers/ClearSquad)
+    // and the advanced-mode toggle (DefensivePositionsManager.ToggleAdvancedMode). Both live in one global
+    // WorldComponent (WorldData.pawnSquads, advancedModeEnabled), not per faction, and squad membership only checks
+    // Faction.IsPlayer, which is true for every player faction in MP multifaction. Synced, player B assigning
+    // squad 1 would replace player A's squad 1, and one player's alt-click would flip everyone's gizmo mode.
+    // Left local, each player keeps their own squads and mode. Nothing in the simulation reads them: activating
+    // a squad only selects things and moves the camera (PawnSquadSelector), and the mode only picks which gizmo
+    // is drawn, while sending pawns to positions goes through Pawn_JobTracker.TryTakeOrderedJob (synced by MP).
+    // Cost: a client's own squads/mode are not in the host's save, so on (re)join the client gets the host's instead.
 
     // DefensivePositionsManager
     private static FastInvokeHandler managerInstanceGetter;
     private static FastInvokeHandler managerGetHandlerForPawnMethod;
-    private static AccessTools.FieldRef<object, object> managerSquadHandlerField;
     // PawnSavedPositions
     private static FastInvokeHandler pawnSavedPositionsOwnerGetter;
 
@@ -40,23 +49,16 @@ public class DefensivePositions
         var managerType = AccessTools.TypeByName("DefensivePositions.DefensivePositionsManager");
         managerInstanceGetter = MethodInvoker.GetHandler(AccessTools.DeclaredPropertyGetter(managerType, "Instance"));
         managerGetHandlerForPawnMethod = MethodInvoker.GetHandler(AccessTools.DeclaredMethod(managerType, "GetHandlerForPawn"));
-        managerSquadHandlerField = AccessTools.FieldRefAccess<object>(managerType, "squadHandler");
 
         pawnSavedPositionsOwnerGetter = MethodInvoker.GetHandler(
             AccessTools.PropertyGetter(AccessTools.TypeByName("DefensivePositions.PawnSavedPositions"), "Owner"));
 
         var handlerType = AccessTools.TypeByName("DefensivePositions.PawnSavedPositionHandler");
-        var squadHandlerType = AccessTools.TypeByName("DefensivePositions.PawnSquadHandler");
 
-        // Same registrations as Compat_MultiplayerAPI.Initialize
-        MP.RegisterSyncMethod(managerType, "ToggleAdvancedMode");
+        // The per-pawn registrations of Compat_MultiplayerAPI.Initialize (squads and advanced mode stay local, see top)
         MP.RegisterSyncMethod(handlerType, "SetDefensivePosition");
         MP.RegisterSyncMethod(handlerType, "DiscardSavedPosition");
-        MP.RegisterSyncMethod(squadHandlerType, "ReassignSquadMembers");
-        MP.RegisterSyncMethod(squadHandlerType, "ClearSquad");
-        MP.RegisterSyncWorker<object>(SyncManager, managerType);
         MP.RegisterSyncWorker<object>(SyncPawnHandler, handlerType);
-        MP.RegisterSyncWorker<object>(SyncSquadHandler, squadHandlerType);
     }
 
     // True if the method compares two different string constants with string.Equals - the const-folded
@@ -87,12 +89,6 @@ public class DefensivePositions
 
     private static object Manager => managerInstanceGetter(null);
 
-    private static void SyncManager(SyncWorker sync, ref object manager)
-    {
-        if (!sync.isWriting)
-            manager = Manager;
-    }
-
     private static void SyncPawnHandler(SyncWorker sync, ref object handler)
     {
         if (sync.isWriting)
@@ -105,11 +101,5 @@ public class DefensivePositions
             if (pawn != null)
                 handler = managerGetHandlerForPawnMethod(Manager, pawn);
         }
-    }
-
-    private static void SyncSquadHandler(SyncWorker sync, ref object squadHandler)
-    {
-        if (!sync.isWriting)
-            squadHandler = managerSquadHandlerField(Manager);
     }
 }
