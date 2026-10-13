@@ -1,0 +1,254 @@
+using System;
+using System.Collections;
+using System.Collections.Generic;
+using System.Linq;
+using System.Reflection;
+using HarmonyLib;
+using Multiplayer.API;
+using Verse;
+
+namespace Multiplayer.Compat
+{
+    /// <summary>Big and Small - Framework by RedMattis</summary>
+    /// <see href="https://steamcommunity.com/sharedfiles/filedetails/?id=2925432336"/>
+    /// <see href="https://github.com/RedMattis/BigSmall_Framework"/>
+    /// <remarks>
+    /// Written against BigAndSmall.dll from 1.6/Base (the folder 1.7 falls back to), sha256 c774509634b8...
+    /// Why the mod desyncs in Multiplayer as shipped (the join-point reload is the trigger: host and existing
+    /// clients reload their own save, a joiner loads the host's save in a fresh process):
+    /// 1. BS.internalTick (+Tick10/Tick100) is a process-lifetime static, advanced once per
+    ///    BigAndSmallCache.GameComponentTick, never saved and never reset on load. BigAndSmallCache runs
+    ///    SlowUpdate when it is a multiple of 100 (refresh queue every 5th, gene override pass every 4th,
+    ///    jesus mode every 10th), so host and joiner run them at different game ticks after a join.
+    ///    Fix: the counter is written into the MP save and restored on load (0 when the key is absent).
+    /// 2. BigAndSmallCache.globalRandNum (set every SlowUpdate) decides raid infiltrators in
+    ///    GeneratePawns_Patch.TrySetInfiltrator and whether Rand.Range is called there. Not saved either.
+    ///    Fix: saved as raw float bits with the counter, default 1 (its initializer) when absent.
+    /// 3. refreshQueue and frequentUpdateGenes are statics that survive the reload, so the host keeps
+    ///    pre-reload Pawn/Gene objects (refresh / Notify_GenesChanged on stale objects) while a joiner
+    ///    starts empty; regenerationAttempted (one-shot cache wipe on an exception) likewise.
+    ///    Fix: reset in a Game.LoadGame prefix, before anything of the new game is loaded.
+    /// 4. The refresh queue is filled from DictCache.Cache.Values, a ConcurrentDictionary whose order depends
+    ///    on its bucket growth, which depends on its lock count = Environment.ProcessorCount by default.
+    ///    Two PCs with different core counts refresh pawns in a different order (DelayedUpdate adds/removes
+    ///    hediffs, drops apparel, repairs apparel by elapsed time). Fix: refill sorted by thingIDNumber.
+    /// 5. HumanoidPawnScaler.GetInvalidateLater (called from simulation on every hediff add/remove, equip,
+    ///    gene change and SlowUpdate) picks "refresh in N ticks" or "refresh now" from TickManager.Paused
+    ///    (MP patches it to the VIEWED map's speed, vanilla when the world view is open) and
+    ///    TickManager.NotPlaying (this player's escape menu is open). Fix: in MP, paused = the synced
+    ///    CurTimeSpeed of the executing context and NotPlaying = false.
+    /// Everything is MP only: outside a session nothing is written to saves and nothing changes.
+    /// Not handled here: unsynced UI actions (drafted-pawn toggles, gene picker dialog, resource
+    /// sliders, recolor window) and render-thread cache creation; see the lane report.
+    /// </remarks>
+    [MpCompatFor("RedMattis.BetterPrerequisites")]
+    public class BigAndSmall
+    {
+        private const string LogPrefix = "[MPCompat - Big and Small] ";
+        private const string TickKey = "MpCompat_BS_internalTick";
+        private const string RandBitsKey = "MpCompat_BS_globalRandNumBits";
+        // BigAndSmallCache.globalRandNum's field initializer.
+        private const float DefaultGlobalRandNum = 1f;
+        private static readonly int DefaultRandBits = BitConverter.SingleToInt32Bits(DefaultGlobalRandNum);
+
+        // BigAndSmall.BS
+        private static FieldInfo internalTickField;
+        private static FieldInfo internalTick10Field;
+        private static FieldInfo internalTick100Field;
+
+        // BigAndSmall.BigAndSmallCache
+        private static FieldInfo globalRandNumField;
+        private static FieldInfo regenerationAttemptedField;
+        private static FieldInfo refreshQueueField;
+        private static FieldInfo frequentUpdateGenesField;
+
+        public BigAndSmall(ModContentPack mod)
+        {
+            PatchTickCounter();
+            PatchRefreshOrder();
+            PatchInvalidateLater();
+        }
+
+        #region Tick counter, globalRandNum, stale statics
+
+        private static void PatchTickCounter()
+        {
+            var bsType = FindType("BigAndSmall.BS");
+            var cacheType = FindType("BigAndSmall.BigAndSmallCache");
+
+            internalTickField = GetStaticField(bsType, "internalTick", typeof(int));
+            internalTick10Field = GetStaticField(bsType, "internalTick10", typeof(int));
+            internalTick100Field = GetStaticField(bsType, "internalTick100", typeof(int));
+            globalRandNumField = GetStaticField(cacheType, "globalRandNum", typeof(float));
+            regenerationAttemptedField = GetStaticField(cacheType, "regenerationAttempted", typeof(bool));
+            refreshQueueField = GetStaticField(cacheType, "refreshQueue", typeof(Queue<Pawn>));
+            frequentUpdateGenesField = GetStaticField(cacheType, "frequentUpdateGenes", null);
+            if (!typeof(IDictionary).IsAssignableFrom(frequentUpdateGenesField.FieldType))
+                throw new MissingFieldException($"{LogPrefix}BigAndSmallCache.frequentUpdateGenes is {frequentUpdateGenesField.FieldType}, expected a dictionary");
+
+            MpCompat.harmony.Patch(AccessTools.DeclaredMethod(typeof(Game), nameof(Game.LoadGame)),
+                prefix: new HarmonyMethod(typeof(BigAndSmall), nameof(PreLoadGame)));
+            MpCompat.harmony.Patch(GetDeclaredMethod(cacheType, nameof(GameComponent.ExposeData)),
+                postfix: new HarmonyMethod(typeof(BigAndSmall), nameof(PostCacheExposeData)));
+        }
+
+        // Runs before Game.ExposeSmallComponents, so everything the new game registers while loading is kept.
+        private static void PreLoadGame()
+        {
+            if (!MP.IsInMultiplayer)
+                return;
+
+            SetCounter(0);
+            globalRandNumField.SetValue(null, DefaultGlobalRandNum);
+            regenerationAttemptedField.SetValue(null, false);
+            RefreshQueue.Clear();
+            ((IDictionary)frequentUpdateGenesField.GetValue(null))?.Clear();
+        }
+
+        private static void PostCacheExposeData()
+        {
+            if (!MP.IsInMultiplayer)
+                return;
+
+            if (Scribe.mode == LoadSaveMode.Saving)
+            {
+                var tick = (int)internalTickField.GetValue(null);
+                var randBits = BitConverter.SingleToInt32Bits((float)globalRandNumField.GetValue(null));
+                Scribe_Values.Look(ref tick, TickKey, 0);
+                Scribe_Values.Look(ref randBits, RandBitsKey, DefaultRandBits);
+            }
+            else if (Scribe.mode == LoadSaveMode.LoadingVars)
+            {
+                var tick = 0;
+                var randBits = DefaultRandBits;
+                Scribe_Values.Look(ref tick, TickKey, 0);
+                Scribe_Values.Look(ref randBits, RandBitsKey, DefaultRandBits);
+
+                SetCounter(tick);
+                var rand = BitConverter.Int32BitsToSingle(randBits);
+                globalRandNumField.SetValue(null, rand);
+                Log.Message($"{LogPrefix}load: BS tick = {tick}, globalRandNum bits = {randBits:X8} ({rand:R})");
+            }
+        }
+
+        // Same derived values BS.IncrementTick writes.
+        private static void SetCounter(int tick)
+        {
+            internalTickField.SetValue(null, tick);
+            internalTick10Field.SetValue(null, tick / 10);
+            internalTick100Field.SetValue(null, tick / 100);
+        }
+
+        #endregion
+
+        #region Refresh queue order
+
+        private static void PatchRefreshOrder()
+        {
+            var cacheType = FindType("BigAndSmall.BigAndSmallCache");
+            refreshQueueField ??= GetStaticField(cacheType, "refreshQueue", typeof(Queue<Pawn>));
+
+            MpCompat.harmony.Patch(GetDeclaredMethod(cacheType, "SlowUpdate"),
+                prefix: new HarmonyMethod(typeof(BigAndSmall), nameof(PreSlowUpdate)),
+                postfix: new HarmonyMethod(typeof(BigAndSmall), nameof(PostSlowUpdate)));
+        }
+
+        // SlowUpdate fills the queue only when it is empty, and does nothing else with it in that call.
+        private static void PreSlowUpdate(out bool __state) => __state = MP.IsInMultiplayer && RefreshQueue.Count == 0;
+
+        private static void PostSlowUpdate(bool __state)
+        {
+            if (!__state)
+                return;
+
+            var queue = RefreshQueue;
+            if (queue.Count < 2)
+                return;
+
+            // Stable sort: the same pawn twice keeps its relative order (identical work either way).
+            var ordered = queue.OrderBy(p => p == null ? int.MinValue : p.thingIDNumber).ToList();
+            queue.Clear();
+            foreach (var pawn in ordered)
+                queue.Enqueue(pawn);
+        }
+
+        #endregion
+
+        #region Pause checks in GetInvalidateLater
+
+        private static void PatchInvalidateLater()
+        {
+            var type = FindType("BigAndSmall.HumanoidPawnScaler");
+            MpCompat.harmony.Patch(GetDeclaredMethod(type, "GetInvalidateLater"),
+                transpiler: new HarmonyMethod(typeof(BigAndSmall), nameof(ReplacePauseChecks)));
+        }
+
+        private static IEnumerable<CodeInstruction> ReplacePauseChecks(IEnumerable<CodeInstruction> instr, MethodBase baseMethod)
+        {
+            var paused = AccessTools.PropertyGetter(typeof(TickManager), nameof(TickManager.Paused));
+            var notPlaying = AccessTools.PropertyGetter(typeof(TickManager), nameof(TickManager.NotPlaying));
+            var syncedPaused = AccessTools.DeclaredMethod(typeof(BigAndSmall), nameof(SyncedPaused));
+            var syncedNotPlaying = AccessTools.DeclaredMethod(typeof(BigAndSmall), nameof(SyncedNotPlaying));
+            var replacedPaused = 0;
+            var replacedNotPlaying = 0;
+
+            var list = instr.ToList();
+            foreach (var ci in list)
+            {
+                if ((ci.opcode != System.Reflection.Emit.OpCodes.Call && ci.opcode != System.Reflection.Emit.OpCodes.Callvirt) || ci.operand is not MethodInfo method)
+                    continue;
+
+                if (method == paused)
+                {
+                    ci.opcode = System.Reflection.Emit.OpCodes.Call;
+                    ci.operand = syncedPaused;
+                    replacedPaused++;
+                }
+                else if (method == notPlaying)
+                {
+                    ci.opcode = System.Reflection.Emit.OpCodes.Call;
+                    ci.operand = syncedNotPlaying;
+                    replacedNotPlaying++;
+                }
+            }
+
+            // The decompiled method reads each property once; anything else means the mod changed.
+            if (replacedPaused != 1 || replacedNotPlaying != 1)
+                throw new Exception($"{LogPrefix}{baseMethod.DeclaringType?.FullName}.{baseMethod.Name}: replaced Paused x{replacedPaused}, NotPlaying x{replacedNotPlaying}, expected 1 and 1");
+
+            return list;
+        }
+
+        // MP's PreContext sets CurTimeSpeed to the synced speed of the map/world being ticked or executing a command.
+        private static bool SyncedPaused(TickManager tickManager)
+            => MP.IsInMultiplayer ? tickManager.CurTimeSpeed == TimeSpeed.Paused : tickManager.Paused;
+
+        // The escape menu does not pause Multiplayer; it is local UI state.
+        private static bool SyncedNotPlaying(TickManager tickManager)
+            => !MP.IsInMultiplayer && tickManager.NotPlaying;
+
+        #endregion
+
+        #region Helpers
+
+        private static Queue<Pawn> RefreshQueue => (Queue<Pawn>)refreshQueueField.GetValue(null);
+
+        private static Type FindType(string name)
+            => AccessTools.TypeByName(name) ?? throw new TypeLoadException($"{LogPrefix}type {name} not found");
+
+        private static MethodInfo GetDeclaredMethod(Type type, string name)
+            => AccessTools.DeclaredMethod(type, name) ?? throw new MissingMethodException(type.FullName, name);
+
+        private static FieldInfo GetStaticField(Type type, string name, Type expectedType)
+        {
+            var field = AccessTools.DeclaredField(type, name);
+            if (field == null || !field.IsStatic)
+                throw new MissingFieldException(type.FullName, name);
+            if (expectedType != null && field.FieldType != expectedType)
+                throw new MissingFieldException($"{LogPrefix}{type.FullName}.{name} is {field.FieldType}, expected {expectedType}");
+            return field;
+        }
+
+        #endregion
+    }
+}
