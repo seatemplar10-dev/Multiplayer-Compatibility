@@ -103,6 +103,8 @@ namespace Multiplayer.Compat
                     MpCompat.harmony.Patch(tick, postfix: postfix);
             }
             MpCompat.harmony.Patch(AccessTools.DeclaredMethod(typeof(Game), nameof(Game.FinalizeInit)), postfix: postfix);
+            // A map condition disappears with its map without End(); recompute so no process keeps a stale tag.
+            MpCompat.harmony.Patch(AccessTools.DeclaredMethod(typeof(Game), nameof(Game.DeinitAndRemoveMap)), postfix: postfix);
 
             // Defs and DefOfs are ready only after the startup load; read the XML state before any game exists.
             LongEventHandler.ExecuteWhenFinished(CaptureXmlTargetTags);
