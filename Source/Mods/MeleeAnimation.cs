@@ -31,6 +31,8 @@ namespace Multiplayer.Compat
     /// 5. Player actions (float menu execute/lasso/skills, Assign tab auto options, duel spot gizmos) run
     ///    locally, and PawnMeleeData is created lazily from UI code. Fix: synced commands, UI never creates data.
     /// 6. Mod settings change simulation (chances, MTBs, gore, scan interval). Fix: settings window locked in MP.
+    /// 7. Render-time statics (IsRendering, ForcedHasHeadValue) are read by the simulation and stay set when a draw
+    ///    throws. Fix: reset after every frame draw (finally) and at every map tick in MP.
     /// </remarks>
     [MpCompatFor("co.uk.epicguru.meleeanimation")]
     public class MeleeAnimation
@@ -58,6 +60,11 @@ namespace Multiplayer.Compat
         private static FieldInfo cullingPaddingField;
         private static AccessTools.FieldRef<object, List<Action>> toDrawField;
         private static readonly ConditionalWeakTable<object, Action<Pawn, Vector2>> labelDelegates = new();
+
+        // N3 (r4): render-time statics of the mod that the SIMULATION reads (IsPsychologicallyInvisible prefix,
+        // HediffSet.HasHead prefix). Null = field not found: only the reset is lost (warning), never the clock.
+        private static AccessTools.FieldRef<bool> isRenderingField;
+        private static AccessTools.FieldRef<bool?> forcedHasHeadValueField;
 
         // Settings
         private static FieldInfo coreSettingsField;
@@ -212,6 +219,9 @@ namespace Multiplayer.Compat
             drawNamesInAnimationField = AccessTools.FieldRefAccess<bool>(settingsType, "DrawNamesInAnimation");
             warnOfFriendlyExecutionField = AccessTools.FieldRefAccess<bool>(settingsType, "WarnOfFriendlyExecution");
 
+            isRenderingField = TryStaticRef<bool>("AM.Patches.Patch_InvisibilityUtility_IsPsychologicallyInvisible", "IsRendering");
+            forcedHasHeadValueField = TryStaticRef<bool?>("AM.Patches.Patch_HediffSet_HasHead", "ForcedHasHeadValue");
+
             // All three or none (every lookup above and in the argument list runs before the first patch): a tick
             // postfix left behind without the frame-clock prefix would advance animations on BOTH clocks in co-op.
             PatchAllOrNone(
@@ -263,20 +273,50 @@ namespace Multiplayer.Compat
             if (!MP.IsInMultiplayer)
                 return true;
 
-            renderHeadsMethod.Invoke(__instance, null);
+            try
+            {
+                renderHeadsMethod.Invoke(__instance, null);
 
-            ((IList)labelsField.GetValue(__instance)).Clear();
-            var padding = (int)cullingPaddingField.GetValue(null);
-            var viewBounds = Find.CameraDriver.CurrentViewRect.ExpandedBy(padding);
-            var labelDraw = drawNamesInAnimationField(Settings) ? GetLabelDelegate(__instance) : null;
-            clock.DrawMap(__instance.map, viewBounds, labelDraw);
+                ((IList)labelsField.GetValue(__instance)).Clear();
+                var padding = (int)cullingPaddingField.GetValue(null);
+                var viewBounds = Find.CameraDriver.CurrentViewRect.ExpandedBy(padding);
+                var labelDraw = drawNamesInAnimationField(Settings) ? GetLabelDelegate(__instance) : null;
+                clock.DrawMap(__instance.map, viewBounds, labelDraw);
 
-            var toDraw = toDrawField(__instance);
-            foreach (var action in toDraw)
-                action?.Invoke();
-            toDraw.Clear();
+                var toDraw = toDrawField(__instance);
+                foreach (var action in toDraw)
+                    action?.Invoke();
+                toDraw.Clear();
+            }
+            finally
+            {
+                // N3: AnimRenderer.DrawPawns (IsRendering) and the dropped-head draw (ForcedHasHeadValue, set in the
+                // RenderPawnAt prefix) set these around RenderPawnAt with no try/finally, and DrawSingle/RenderHeads
+                // catch the exception, so one failed draw would leave them set on this client only.
+                ResetRenderStatics();
+            }
 
             return false;
+        }
+
+        // In MP the simulation must see the not-rendering values: IsRendering false, ForcedHasHeadValue null.
+        private static void ResetRenderStatics()
+        {
+            if (isRenderingField != null)
+                isRenderingField() = false;
+            if (forcedHasHeadValueField != null)
+                forcedHasHeadValueField() = null;
+        }
+
+        private static AccessTools.FieldRef<T> TryStaticRef<T>(string typeName, string fieldName)
+        {
+            var type = AccessTools.TypeByName(typeName);
+            var field = type == null ? null : AccessTools.DeclaredField(type, fieldName);
+            if (field != null && field.IsStatic && field.FieldType == typeof(T))
+                return AccessTools.StaticFieldRefAccess<T>(field);
+
+            Log.Warning(LogPrefix + $"{typeName}.{fieldName} not found; it is not reset after a render exception.");
+            return null;
         }
 
         private static Action<Pawn, Vector2> GetLabelDelegate(object manager)
@@ -288,6 +328,9 @@ namespace Multiplayer.Compat
             if (!MP.IsInMultiplayer)
                 return;
 
+            // N3: also clears a value left by a draw outside the frame draw above (the mod's ParallelPreDraw patch
+            // sets IsRendering for portraits, e.g. the colonist bar in OnGUI) at this map tick, not at the next frame.
+            ResetRenderStatics();
             addFromPostLoad();
             clock.TickMap(__instance.map);
         }
