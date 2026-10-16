@@ -28,6 +28,12 @@ namespace Multiplayer.Compat
 
         private static readonly Dictionary<Type, FieldInfo> weightedSelectionRandFields = new();
 
+        // Per module (log prefix): how many sites were patched / found already deterministic. Logged once by RunSteps.
+        private static readonly Dictionary<string, (int replaced, int alreadyRand)> siteCounts = new();
+
+        // null = not looked up yet. See WeightedSelectionUsesSystemRandom.
+        private static bool? weightedSelectionUsesSystemRandom;
+
         internal static Type FindType(string logPrefix, string name)
             => AccessTools.TypeByName(name) ?? throw new TypeLoadException($"{logPrefix}type {name} not found");
 
@@ -41,6 +47,71 @@ namespace Multiplayer.Compat
             if (found.Length > 1)
                 throw new AmbiguousMatchException($"{logPrefix}{typeName}.{methodName} has {found.Length} overloads, expected 1");
             return found[0];
+        }
+
+        /// <summary>
+        /// True when <paramref name="method"/> still contains a <c>newobj System.Random::.ctor</c>. Core40k 1.2.112+ and Genes40k 1.1.95+ (the 1.7 Workshop builds)
+        /// draw from Verse.Rand themselves and have no System.Random left (IL listing of both dlls, r25), so there is nothing for
+        /// <see cref="PatchingUtilities.FixRNG"/> to replace; the older 1.6 builds (Core40k 1.2.32 / Genes40k 1.1.14) have 7 + 10 such constructors.
+        /// </summary>
+        internal static bool UsesSystemRandom(MethodBase method)
+        {
+            foreach (var ci in PatchProcessor.GetOriginalInstructions(method))
+            {
+                if (ci.opcode == OpCodes.Newobj && ci.operand is ConstructorInfo { DeclaringType: { } declaring } && declaring == typeof(Random))
+                    return true;
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Patches one site. When the method still builds a <c>System.Random</c> it goes through
+        /// <see cref="PatchingUtilities.PatchSystemRand(MethodBase, bool)"/> as before. When it does not (the mod already calls Verse.Rand) the
+        /// transpiler is not installed at all (it would only log a "nothing patched" warning), but a site that was patched WITH push/pop is still
+        /// wrapped in Rand.PushState/PopState: it can be reached from UI code (gene previews, pawn generation for dialogs), and a Verse.Rand draw
+        /// made on one client only would move the shared state.
+        /// </summary>
+        internal static void PatchSite(string logPrefix, MethodBase method, bool pushPop)
+        {
+            var counts = siteCounts.TryGetValue(logPrefix, out var c) ? c : default;
+            if (UsesSystemRandom(method))
+            {
+                PatchingUtilities.PatchSystemRand(method, pushPop);
+                counts.replaced++;
+            }
+            else
+            {
+                if (pushPop)
+                    PatchingUtilities.PatchPushPopRand(method);
+                counts.alreadyRand++;
+            }
+
+            siteCounts[logPrefix] = counts;
+        }
+
+        /// <summary>
+        /// Whether Core40k.WeightedSelection&lt;T&gt; still owns a private <c>System.Random rand</c> field. The 1.6 builds do; the 1.7 Workshop build
+        /// (Core40k 1.2.112) has no such field and picks with Rand.Range, so the callers must NOT get <see cref="RedirectWeightedSelectionRandom"/>:
+        /// <see cref="UseRedirector"/> would have nothing to write to. Throws when the type itself cannot be found (lookups keep failing loudly).
+        /// </summary>
+        internal static bool WeightedSelectionUsesSystemRandom(string logPrefix)
+        {
+            if (weightedSelectionUsesSystemRandom is { } known)
+                return known;
+
+            var type = AccessTools.TypeByName(WeightedSelectionName)
+                ?? AccessTools.AllTypes().FirstOrDefault(t => t.FullName == WeightedSelectionName)
+                ?? throw new TypeLoadException($"{logPrefix}type {WeightedSelectionName} not found");
+            var field = AccessTools.DeclaredField(type, "rand");
+            return (weightedSelectionUsesSystemRandom = field != null && field.FieldType == typeof(Random)).Value;
+        }
+
+        /// <summary>Installs <see cref="RedirectWeightedSelectionRandom"/> on a caller of <c>new WeightedSelection&lt;T&gt;()</c>, but only for builds whose WeightedSelection still has a System.Random.</summary>
+        internal static void PatchWeightedSelectionCaller(string logPrefix, MethodBase method)
+        {
+            if (WeightedSelectionUsesSystemRandom(logPrefix))
+                MpCompat.harmony.Patch(method, transpiler: new HarmonyMethod(typeof(RimDark40kRng), nameof(RedirectWeightedSelectionRandom)));
         }
 
         /// <summary>Runs every step even if an earlier one failed (one missing method must not leave the other sites unpatched), then throws if any failed so the loader logs the module as failed.</summary>
@@ -59,6 +130,9 @@ namespace Multiplayer.Compat
                     (failed ??= []).Add(name);
                 }
             }
+
+            if (siteCounts.TryGetValue(logPrefix, out var counts))
+                Log.Message($"{logPrefix}{counts.replaced} System.Random site(s) redirected to Verse.Rand, {counts.alreadyRand} already deterministic in this version of the mod.");
 
             if (failed != null)
                 throw new InvalidOperationException($"{logPrefix}{failed.Count} of {steps.Length} patch steps failed: {string.Join(", ", failed)}");
@@ -97,14 +171,15 @@ namespace Multiplayer.Compat
             var type = selection.GetType();
             if (!weightedSelectionRandFields.TryGetValue(type, out var field))
             {
-                field = AccessTools.DeclaredField(type, "rand")
-                    ?? throw new MissingFieldException(type.FullName, "rand");
-                if (field.FieldType != typeof(Random))
-                    throw new MissingFieldException($"{type.FullName}.rand is {field.FieldType}, expected System.Random");
+                field = AccessTools.DeclaredField(type, "rand");
+                // Builds without the field (Core40k 1.2.112+) already draw from Verse.Rand: nothing to redirect. This transpiler is not
+                // installed for them (see PatchWeightedSelectionCaller); the null entry keeps a stale one harmless instead of throwing in a tick.
+                if (field != null && field.FieldType != typeof(Random))
+                    field = null;
                 weightedSelectionRandFields[type] = field;
             }
 
-            field.SetValue(selection, PatchingUtilities.RandRedirector.Instance);
+            field?.SetValue(selection, PatchingUtilities.RandRedirector.Instance);
         }
     }
 }

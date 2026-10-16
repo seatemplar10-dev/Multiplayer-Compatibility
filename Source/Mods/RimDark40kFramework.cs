@@ -27,6 +27,11 @@ namespace Multiplayer.Compat
     /// context. The damage workers run in the synced simulation and are patched without push/pop; the gene and pawn-generation sites
     /// can also be reached from UI code (gene previews, pawn generation for dialogs) and are patched WITH Rand.PushState/PopState, so
     /// a draw made on one client only cannot move the shared state. Callers of WeightedSelection also get its <c>rand</c> field redirected.
+    /// 16 Oct (r25): the 1.7 Workshop build (Core40k 1.2.112, <c>1.7/Assemblies/Core40k.dll</c> 678,400 bytes, .NET 10) has NO System.Random any more - an IL
+    /// listing of the whole dll has 0 <c>System.Random::.ctor</c>/<c>Next</c>/<c>NextDouble</c> (the 1.6 build above: 7/7/2), every site above calls Verse.Rand and
+    /// WeightedSelection&lt;T&gt; (now <c>Rand.Range</c> in PickIndex, no <c>rand</c> field) has been rewritten. So <see cref="RimDark40kRng.PatchSite"/> only installs the
+    /// System.Random transpiler on methods that still have the constructor and <see cref="RimDark40kRng.PatchWeightedSelectionCaller"/> only when the field exists;
+    /// the sites that were patched with push/pop keep that wrapper either way. Both builds work; the module logs how many sites it replaced / found already deterministic.
     /// Status: [unverified] - compiled only, not run in game yet; the transpilers log a warning when a method has nothing to replace.
     /// Everything is MP-agnostic and harmless outside a session (Rand is just the normal game RNG there).
     /// </remarks>
@@ -46,19 +51,19 @@ namespace Multiplayer.Compat
         }
 
         private static void PatchSystemRand(string typeName, string methodName, bool pushPop)
-            => PatchingUtilities.PatchSystemRand(RimDark40kRng.FindMethod(LogPrefix, typeName, methodName), pushPop);
+            => RimDark40kRng.PatchSite(LogPrefix, RimDark40kRng.FindMethod(LogPrefix, typeName, methodName), pushPop);
 
         private static void PatchRandomGeneAndTrait()
         {
             const string typeName = "Core40k.Gene_AddRandomGeneAndOrTraitByWeight";
-            var redirect = new HarmonyMethod(typeof(RimDark40kRng), nameof(RimDark40kRng.RedirectWeightedSelectionRandom));
 
-            // Both methods have `new Random().Next(0, 100)` for the chance roll and build a WeightedSelection<T> locally.
+            // Both methods build a WeightedSelection<T> locally; in the 1.6 builds each also has `new Random().Next(0, 100)` for the chance roll
+            // and WeightedSelection owns a System.Random. Core40k 1.2.112+ (1.7 Workshop build) uses Rand for both, see RimDark40kRng.
             foreach (var name in new[] { "SelectGeneToGive", "SelectTraitToGive" })
             {
                 var method = RimDark40kRng.FindMethod(LogPrefix, typeName, name);
-                PatchingUtilities.PatchSystemRand(method, true);
-                MpCompat.harmony.Patch(method, transpiler: redirect);
+                RimDark40kRng.PatchSite(LogPrefix, method, true);
+                RimDark40kRng.PatchWeightedSelectionCaller(LogPrefix, method);
             }
         }
     }

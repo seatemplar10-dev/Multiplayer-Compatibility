@@ -29,6 +29,11 @@ namespace Multiplayer.Compat
     /// (<see cref="PatchingUtilities.PatchSystemRand(MethodBase, bool)"/>, without push/pop: all of these run in the synced simulation -
     /// ticks, surgery jobs, ability casts, mental states, Pawn.Kill, births - where Verse.Rand is the synced state). The two birth postfixes
     /// also get the WeightedSelection redirect, so the gene pick that follows the roll is deterministic too.
+    /// 16 Oct (r25): the 1.7 Workshop build (Genes40k 1.1.95, <c>1.7/Assemblies/Genes40k.dll</c> 454,144 bytes, .NET 10) has no System.Random either (IL listing: 0 constructors,
+    /// 0 <c>Next</c>; the 1.6 build above: 10/10) - all nine sites call Verse.Rand now and WeightedSelection has no <c>rand</c> field. The module then installs nothing for
+    /// them (see <see cref="RimDark40kRng.PatchSite"/>) and still works unchanged against the 1.6 build. NEW desync risk in 1.1.95, not covered here: custom chapter genes
+    /// (<c>CustomChapterGeneDefBuilder.NewDefName</c> = prefix + <c>Guid.NewGuid()</c>, called from <c>GameComponent_CustomChapterGenes.Add</c> by the chapter dialogs) create
+    /// GeneDefs at runtime with a per-machine name and unsynced game-component state - that needs a sync module of its own.
     /// Status: [unverified] - compiled only, not run in game yet; PatchingUtilities.FixRNG logs a warning when a method has nothing to replace.
     /// Not done here: the Core40k side (damage workers, gene PostMake) is in <see cref="RimDark40kFramework"/>.
     /// </remarks>
@@ -56,13 +61,13 @@ namespace Multiplayer.Compat
         }
 
         private static void PatchSystemRand(string typeName, string methodName)
-            => PatchingUtilities.PatchSystemRand(RimDark40kRng.FindMethod(LogPrefix, typeName, methodName), false);
+            => RimDark40kRng.PatchSite(LogPrefix, RimDark40kRng.FindMethod(LogPrefix, typeName, methodName), false);
 
         private static void PatchBirth(string typeName)
         {
             var method = RimDark40kRng.FindMethod(LogPrefix, typeName, "Postfix");
-            PatchingUtilities.PatchSystemRand(method, false);
-            MpCompat.harmony.Patch(method, transpiler: new HarmonyMethod(typeof(RimDark40kRng), nameof(RimDark40kRng.RedirectWeightedSelectionRandom)));
+            RimDark40kRng.PatchSite(LogPrefix, method, false);
+            RimDark40kRng.PatchWeightedSelectionCaller(LogPrefix, method);
         }
     }
 }
