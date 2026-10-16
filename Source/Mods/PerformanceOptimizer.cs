@@ -88,6 +88,15 @@ namespace Multiplayer.Compat
                     postfix: new HarmonyMethod(typeof(PerformanceOptimizer), nameof(RefreshCachePrefix)));
             }
 
+            // Simulation context for the interface/simulation cache split (see IsSimulation)
+            {
+                var ticking = AccessTools.Property(AccessTools.TypeByName("Multiplayer.Client.Multiplayer"), "Ticking")?.GetGetMethod(true);
+                if (ticking != null)
+                    tickingGetter = (Func<bool>)Delegate.CreateDelegate(typeof(Func<bool>), ticking);
+                else
+                    Log.Error("Couldn't find Multiplayer.Client.Multiplayer:Ticking, Performance Optimizer's cache split falls back to MP.InInterface and will likely cause desyncs while windows update outside the interface.");
+            }
+
             // Late patch, needs to run after Performance Optimizer init call.
             // The usual LongEventHandler call won't work here.
             {
@@ -152,39 +161,16 @@ namespace Multiplayer.Compat
                 }
                 else Log.Error("PerformanceOptimizer.PerformanceOptimizerSettings:throttles was null or empty, the patch was likely called too early.");
             }
-
-            RemoveMoodCache();
         }
 
         #endregion
 
-        #region Mood cache
-
-        // Optimization_ThoughtHandler_TotalMoodOffset caches ThoughtHandler.TotalMoodOffset() per pawn for 500 ticks and refreshes it on the FIRST
-        // QUERY after the expiry, whoever asks. That total is the instant mood Need_Mood.NeedInterval seeks towards, so it decides when a thought
-        // change reaches the mood level, and the mood level gates Rand draws (InspirationHandler.CheckStartRandomInspiration needs mood >= 0.5,
-        // mental breaks need their thresholds). A client that draws a mood widget (colonist bar mood bar: Need.CurInstantLevelPercentage ->
-        // Need_Mood.CurInstantLevel -> TotalMoodOffset, every ~60 ticks) refreshes that cache at other ticks than the headless arbiter, which only
-        // asks from the 150-tick NeedInterval.
-        // Lab runs mp29/mp31/mp32 (FIXES row 23): same cached situational thoughts, same tick, instant mood 0.5556 on the host and 0.6157 on the
-        // arbiter (NeedFood -6 counted by one side only), mood level one 0.0048 step apart; the arbiter then draws the inspiration MTB at mood
-        // 0.5068, the host (0.5020, then 0.4972) does not -> "Wrong random state".
-        // The interface/simulation split above is present in the IL (ReturnCorrectCache after both ldsfld cachedResults in Prefix, checked in the
-        // 1.7 lab) but the simulation still saw the interface refreshes, so this module does not rely on it for the mood total: it removes the
-        // optimization's Harmony patches from TotalMoodOffset. Every other Performance Optimizer optimization is untouched.
-        private static void RemoveMoodCache()
-        {
-            var totalMoodOffset = AccessTools.DeclaredMethod(typeof(ThoughtHandler), nameof(ThoughtHandler.TotalMoodOffset));
-            if (totalMoodOffset == null)
-            {
-                Log.Error("Couldn't find ThoughtHandler:TotalMoodOffset, Performance Optimizer's mood cache will cause desyncs.");
-                return;
-            }
-
-            MpCompat.harmony.Unpatch(totalMoodOffset, HarmonyPatchType.All, "PerformanceOptimizer.Main");
-        }
-
-        #endregion
+        // History (FIXES rows 23/28/34): Optimization_ThoughtHandler_TotalMoodOffset (500-tick per-pawn cache of ThoughtHandler.TotalMoodOffset, the instant
+        // mood the mood level seeks towards, which gates mood-dependent Rand draws) was first removed here (ceb74bb) because the host's UI queries reached the
+        // simulation cache. The cause was not the transpiler (it runs, ReturnCorrectCache is called from every patched prefix, lab probe mp43p/mp44p) but how
+        // ReturnCorrectCache told the simulation from the interface: "not MP.InInterface" is also true while a long event runs or Multiplayer.reloading is set,
+        // and windows (Moody's WindowUpdate -> DataCache.UpdateCache) keep running then. See IsSimulation below. With the simulation decided positively the
+        // optimization is kept (its interface twin serves the UI), so no Performance Optimizer optimization is removed any more.
 
         #region Cache clearing patch
 
@@ -250,13 +236,31 @@ namespace Multiplayer.Compat
                 cache.Clear();
         }
 
+        private static Func<bool> tickingGetter;
+
+        // The simulation is decided POSITIVELY: Multiplayer.Ticking (a map, the world or the constant ticker is ticking) or a synced command is
+        // executing. MP.InInterface is NOT the opposite of that: it is also false while a long event runs, while Multiplayer.reloading is set and
+        // outside ProgramState.Playing, but windows still run their WindowUpdate/OnGUI code then (Moody's DataCache.UpdateCache during the join-point
+        // reload: lab runs mp43p/mp44p, FIXES rows 23/28/34). With "!InInterface = simulation" every such UI query was served from the SIMULATION
+        // cache on the windowed host only (the headless arbiter has no windows), so the host's caches held UI-time values and refresh ticks the arbiter's
+        // did not -> different mood totals, mental break thresholds, ... -> "Wrong random state".
+        private static bool IsSimulation()
+        {
+            if (!MP.IsInMultiplayer)
+                return true;
+            if (MP.IsExecutingSyncCommand)
+                return true;
+            // Without the getter fall back to the old rule (every non-interface context counts as simulation)
+            return tickingGetter != null ? tickingGetter() : !MP.InInterface;
+        }
+
         private static IDictionary ReturnCorrectCache(IDictionary simulationCache)
         {
             if (simulationCache == null)
                 return null;
 
             // If simulation, return normal cache
-            if (!MP.InInterface)
+            if (IsSimulation())
                 return simulationCache;
 
             // If interface, try to return the cache from our dictionary
