@@ -63,6 +63,24 @@ namespace Multiplayer.Compat
                 }
                 else Log.Error("Couldn't find MP SaveGameToFile method, PerformanceOptimizer will now likely cause desyncs because the patch failed.");
 
+                // MP 1.7: Autosaving.DoAutosave builds its snapshot with SaveLoad.SaveGameData() BEFORE it calls
+                // SaveGameToFile_Overwrite(string, GameDataSnapshot) (Autosaving.cs:18-20), so isAutoSaving is still false
+                // while the save runs World.ExposeData -> ExposeComponents -> World.FillComponents (also in Saving mode),
+                // which PerformanceOptimizer prefixes with ResetStaticData: the HOST alone cleared every cache, incl.
+                // Optimization_Plant_TickLong.cachedResults -> host-only TickLong bodies (age +6000, Dying -> Rand)
+                // -> "Wrong random state on map 0" a few hundred ticks after each autosave (FIXES row 18, lab runs mp21/mp22).
+                // Flag every save that is not part of a save-and-reload (join points reload on all clients, so clearing
+                // there stays symmetric).
+                var saveGameData = AccessTools.DeclaredMethod("Multiplayer.Client.SaveLoad:SaveGameData");
+                reloadingField = AccessTools.DeclaredField("Multiplayer.Client.Multiplayer:reloading");
+                if (saveGameData != null && reloadingField != null)
+                {
+                    MpCompat.harmony.Patch(saveGameData,
+                        prefix: new HarmonyMethod(typeof(PerformanceOptimizer), nameof(PreSaveGameData)),
+                        finalizer: new HarmonyMethod(typeof(PerformanceOptimizer), nameof(FinalizeSaveGameData)));
+                }
+                else Log.Error("Couldn't find MP SaveLoad.SaveGameData or Multiplayer.reloading, PerformanceOptimizer will now likely cause desyncs on autosave.");
+
                 // Big shoutout to NotFood for pointing me to the correct method to clear the cache in.
                 // I spent hours trying to find a correct method where to clear the cache but failed.
                 MpCompat.harmony.Patch(AccessTools.DeclaredMethod(typeof(GameComponentUtility), nameof(GameComponentUtility.FinalizeInit)),
@@ -175,6 +193,18 @@ namespace Multiplayer.Compat
 
         private static void PreSaveToFile() => isAutoSaving = true;
         private static void PostSaveToFile() => isAutoSaving = false;
+
+        private static FieldInfo reloadingField;
+
+        // A plain save (autosave, save window) runs on the host only; a save inside SaveAndReload runs on every client.
+        private static void PreSaveGameData(out bool __state)
+        {
+            __state = isAutoSaving;
+            if (!(bool)reloadingField.GetValue(null))
+                isAutoSaving = true;
+        }
+
+        private static void FinalizeSaveGameData(bool __state) => isAutoSaving = __state;
 
         #endregion
 
