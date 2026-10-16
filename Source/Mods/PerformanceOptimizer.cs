@@ -6,6 +6,7 @@ using System.Reflection;
 using System.Reflection.Emit;
 using HarmonyLib;
 using Multiplayer.API;
+using RimWorld;
 using Verse;
 
 namespace Multiplayer.Compat
@@ -151,6 +152,36 @@ namespace Multiplayer.Compat
                 }
                 else Log.Error("PerformanceOptimizer.PerformanceOptimizerSettings:throttles was null or empty, the patch was likely called too early.");
             }
+
+            RemoveMoodCache();
+        }
+
+        #endregion
+
+        #region Mood cache
+
+        // Optimization_ThoughtHandler_TotalMoodOffset caches ThoughtHandler.TotalMoodOffset() per pawn for 500 ticks and refreshes it on the FIRST
+        // QUERY after the expiry, whoever asks. That total is the instant mood Need_Mood.NeedInterval seeks towards, so it decides when a thought
+        // change reaches the mood level, and the mood level gates Rand draws (InspirationHandler.CheckStartRandomInspiration needs mood >= 0.5,
+        // mental breaks need their thresholds). A client that draws a mood widget (colonist bar mood bar: Need.CurInstantLevelPercentage ->
+        // Need_Mood.CurInstantLevel -> TotalMoodOffset, every ~60 ticks) refreshes that cache at other ticks than the headless arbiter, which only
+        // asks from the 150-tick NeedInterval.
+        // Lab runs mp29/mp31/mp32 (FIXES row 23): same cached situational thoughts, same tick, instant mood 0.5556 on the host and 0.6157 on the
+        // arbiter (NeedFood -6 counted by one side only), mood level one 0.0048 step apart; the arbiter then draws the inspiration MTB at mood
+        // 0.5068, the host (0.5020, then 0.4972) does not -> "Wrong random state".
+        // The interface/simulation split above is present in the IL (ReturnCorrectCache after both ldsfld cachedResults in Prefix, checked in the
+        // 1.7 lab) but the simulation still saw the interface refreshes, so this module does not rely on it for the mood total: it removes the
+        // optimization's Harmony patches from TotalMoodOffset. Every other Performance Optimizer optimization is untouched.
+        private static void RemoveMoodCache()
+        {
+            var totalMoodOffset = AccessTools.DeclaredMethod(typeof(ThoughtHandler), nameof(ThoughtHandler.TotalMoodOffset));
+            if (totalMoodOffset == null)
+            {
+                Log.Error("Couldn't find ThoughtHandler:TotalMoodOffset, Performance Optimizer's mood cache will cause desyncs.");
+                return;
+            }
+
+            MpCompat.harmony.Unpatch(totalMoodOffset, HarmonyPatchType.All, "PerformanceOptimizer.Main");
         }
 
         #endregion
