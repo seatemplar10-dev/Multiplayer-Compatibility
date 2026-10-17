@@ -5,6 +5,7 @@ using System.Reflection;
 using Verse;
 using Multiplayer.API;
 using HarmonyLib;
+using RimWorld;
 using RimWorld.Planet;
 
 namespace Multiplayer.Compat
@@ -58,6 +59,28 @@ namespace Multiplayer.Compat
             var tickInterval = AccessTools.DeclaredMethod(caravanCampType, "TickInterval");
             if (tick != null) MpCompat.harmony.Patch(tick, postfix: postfix);
             if (tickInterval != null) MpCompat.harmony.Patch(tickInterval, postfix: postfix);
+
+            // Autumn leaves (lab row 66): CompAutumnLeavesSpawner.CheckShouldSpawn needs
+            // PlantFallColors_GetFallColorFactor_Patch.fallColorFactor > 0.48, and that static is only the last
+            // PlantFallColors.GetFallColorFactor result, which vanilla computes in Map.MapUpdate for the map this
+            // PC is drawing (never on a headless arbiter). In MP, set it from the tree's own map before each check.
+            fallColorFactorField = AccessTools.Field(AccessTools.TypeByName("ReGrowthCore.PlantFallColors_GetFallColorFactor_Patch"), "fallColorFactor");
+            var autumnCheck = AccessTools.DeclaredMethod(AccessTools.TypeByName("ReGrowthCore.CompAutumnLeavesSpawner"), "CheckShouldSpawn");
+            if (fallColorFactorField != null && autumnCheck != null)
+                MpCompat.harmony.Patch(autumnCheck, prefix: new HarmonyMethod(typeof(ReGrowthCore), nameof(PreAutumnLeavesCheck)));
+            else
+                Log.Warning("MPCompat :: ReGrowth autumn leaves fall-color fix not applied (field " + (fallColorFactorField != null) + ", method " + (autumnCheck != null) + ")");
+        }
+
+        private static FieldInfo fallColorFactorField;
+
+        private static void PreAutumnLeavesCheck(ThingComp __instance)
+        {
+            if (!MP.IsInMultiplayer) return;
+            var map = __instance.parent?.Map;
+            if (map == null) return;
+            float latitude = Find.WorldGrid.LongLatOf(map.Tile).y;
+            fallColorFactorField.SetValue(null, PlantFallColors.GetFallColorFactor(latitude, GenLocalDate.DayOfYear(map)));
         }
 
         private static void SyncSmartFarmingComp(SyncWorker sync, ref object comp)
