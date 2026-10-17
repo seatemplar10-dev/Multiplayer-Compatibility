@@ -36,7 +36,11 @@ namespace Multiplayer.Compat
             if (!typeof(IDictionary).IsAssignableFrom(boundMapField.FieldType))
                 throw new MissingFieldException($"{LogPrefix}BoundsInjector.boundMap is {boundMapField.FieldType}, expected a dictionary");
 
-            MpCompat.harmony.Patch(AccessTools.DeclaredMethod(typeof(Game), nameof(Game.ExposeData)),
+            // ExposeSmallComponents, not ExposeData: saving goes ExposeData -> ExposeSmallComponents, but loading goes
+            // Game.LoadGame -> ExposeSmallComponents (decomp17 Game.cs:401, :571), so an ExposeData postfix never loads
+            // (lab mp65: host table saved, never read back).
+            MpCompat.harmony.Patch(AccessTools.DeclaredMethod(typeof(Game), "ExposeSmallComponents")
+                                   ?? throw new MissingMethodException(typeof(Game).FullName, "ExposeSmallComponents"),
                 postfix: new HarmonyMethod(typeof(CombatExtendedBounds), nameof(ExposeHostBounds)));
         }
 
