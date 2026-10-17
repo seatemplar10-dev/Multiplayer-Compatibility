@@ -86,7 +86,44 @@ namespace Multiplayer.Compat
             MpCompat.harmony.Patch(GetDeclaredMethod(cacheType, "Reset"),
                 prefix: new HarmonyMethod(typeof(Lightsaber), nameof(PreReset)),
                 finalizer: new HarmonyMethod(typeof(Lightsaber), nameof(FinalizeReset)));
+
+            // Fix 3 (FIXES row 47, 17 Oct): a thrown saber homing on a moving pawn steps `origin += dir * speed *
+            // Time.deltaTime` inside TickInterval - real frame time, so impact tick and cell differ per PC. In MP one
+            // fixed tick length is used instead.
+            var projectileType = FindType("Lightsaber.LightSaberProjectile");
+            MpCompat.harmony.Patch(GetDeclaredMethod(projectileType, "UpdateTrajectory"),
+                transpiler: new HarmonyMethod(typeof(Lightsaber), nameof(FixedDeltaTimeTranspiler)));
+
+            // Fix 4 (row 47): default blade and core colours come from UnityEngine.Random (the blade colour feeds the
+            // glow grid). Run on PostSpawnSetup / Notify_Equipped on every PC -> draw from a pushed Verse Rand instead.
+            var bladeType = FindType("Lightsaber.Comp_LightsaberBlade");
+            PatchingUtilities.PatchUnityRand(GetDeclaredMethod(bladeType, "GetRandomRGBColor"));
+            PatchingUtilities.PatchUnityRand(GetDeclaredMethod(bladeType, "GetBlackOrWhiteCore"));
         }
+
+        private static readonly MethodInfo TimeDeltaTimeGetter =
+            AccessTools.PropertyGetter(typeof(UnityEngine.Time), nameof(UnityEngine.Time.deltaTime));
+
+        private static System.Collections.Generic.IEnumerable<CodeInstruction> FixedDeltaTimeTranspiler(
+            System.Collections.Generic.IEnumerable<CodeInstruction> instr, MethodBase original)
+        {
+            var replaced = 0;
+            foreach (var ci in instr)
+            {
+                if (ci.Calls(TimeDeltaTimeGetter))
+                {
+                    ci.operand = AccessTools.Method(typeof(Lightsaber), nameof(TickDeltaTime));
+                    replaced++;
+                }
+                yield return ci;
+            }
+
+            if (replaced != 1)
+                Log.Error($"{LogPrefix}expected 1 Time.deltaTime read in {original?.FullDescription()}, replaced {replaced}");
+        }
+
+        // One tick at normal speed in MP; real frame time otherwise (single player unchanged).
+        private static float TickDeltaTime() => MP.IsInMultiplayer ? 1f / 60f : UnityEngine.Time.deltaTime;
 
         private static void PreGameStart()
         {
