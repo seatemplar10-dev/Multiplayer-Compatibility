@@ -38,6 +38,43 @@ namespace Multiplayer.Compat
                 throw new MissingMethodException($"{LogPrefix}{tickListType.FullName}.Shuffle is {shuffle}, expected static int[] Shuffle(int[])");
 
             MpCompat.harmony.Patch(shuffle, prefix: new HarmonyMethod(typeof(GlitterNet), nameof(PreShuffle)));
+
+            // FIXES row 50 (17 Oct, REA sweep): GlitterNetSystemWakeEnforcer.GameComponentTick times its listener ticks,
+            // the goodbye letter and the next storyline quest with (TicksGame + this.GetHashCode()) % N. The class has no
+            // GetHashCode override, so it is the per-process identity hash -> different ticks per PC. Use 0 instead.
+            var enforcerType = AccessTools.TypeByName("GlitterNet.Events.GlitterNetSystemWakeEnforcer")
+                ?? throw new TypeLoadException($"{LogPrefix}type GlitterNet.Events.GlitterNetSystemWakeEnforcer not found");
+            var tick = AccessTools.DeclaredMethod(enforcerType, "GameComponentTick")
+                ?? throw new MissingMethodException(enforcerType.FullName, "GameComponentTick");
+            MpCompat.harmony.Patch(tick, transpiler: new HarmonyMethod(typeof(GlitterNet), nameof(NoIdentityHash)));
+        }
+
+        private static readonly System.Reflection.MethodInfo ObjectGetHashCode =
+            AccessTools.Method(typeof(object), nameof(GetHashCode));
+
+        // `this.GetHashCode()` -> `pop; ldc.i4.0` (the receiver is popped, the hash is a constant). The original has exactly
+        // three such calls, all on `this` (REA call edges of the lab dll, decompiled lines 3837/3848/3860).
+        private static System.Collections.Generic.IEnumerable<CodeInstruction> NoIdentityHash(
+            System.Collections.Generic.IEnumerable<CodeInstruction> instr, System.Reflection.MethodBase original)
+        {
+            var replaced = 0;
+            foreach (var ci in instr)
+            {
+                if (ci.Calls(ObjectGetHashCode))
+                {
+                    var pop = new CodeInstruction(System.Reflection.Emit.OpCodes.Pop);
+                    pop.labels.AddRange(ci.labels);
+                    pop.blocks.AddRange(ci.blocks);
+                    yield return pop;
+                    yield return new CodeInstruction(System.Reflection.Emit.OpCodes.Ldc_I4_0);
+                    replaced++;
+                    continue;
+                }
+                yield return ci;
+            }
+
+            if (replaced != 3)
+                Log.Error($"{LogPrefix}expected 3 GetHashCode calls in {original?.FullDescription()}, replaced {replaced}");
         }
 
         // Same shape as the original loop (for i = Length - 1; i > 1; i--: swap(i, Next(i))), with a fixed generator.
