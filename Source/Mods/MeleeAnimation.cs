@@ -337,8 +337,17 @@ namespace Multiplayer.Compat
 
         private static void PostGameFinalizeInit()
         {
-            if (MP.IsInMultiplayer)
+            if (!MP.IsInMultiplayer)
+                return;
+            // 1.7 lab (FIXES row 93): a rejoin / resync loads the game OFF the main thread. AnimRenderer.AddPawn reads
+            // Thing.Graphic, which may build a graphic (main thread only: "Attempted to load a graphic off the main thread",
+            // then a NullReferenceException that fails the whole load). Off the main thread, register right after the load
+            // event on the main thread instead: queued here, before Multiplayer's post-load cache tick (LoadPatch queues it
+            // after LoadGame returns), so the animators are in place before any tick on every client.
+            if (UnityData.IsInMainThread)
                 addFromPostLoad();
+            else
+                LongEventHandler.ExecuteWhenFinished(() => addFromPostLoad());
         }
 
         private interface IAnimClock
