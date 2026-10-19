@@ -113,6 +113,20 @@ public class VanillaAspirationsExpanded
 
     #endregion
 
+    #region Aspiration checks only in the simulation
+
+    // 1.7 lab (FIXES rows 110, 114): VAspirE runs Need_Fulfillment.CheckCompletion - which can complete an aspiration: need level,
+    // completedTicks, a message - as a postfix on ~15 methods, one of them SituationalThoughtHandler.UpdateAllMoodThoughts.
+    // Multiplayer skips that method in interface code with a prefix, but Harmony still runs postfixes, so every mood readout on
+    // one PC completed aspirations on that PC only (lab mp84 join-point diff; mp86 desync on the same pawn's inspiration roll).
+    // In MP the checks run in ticks and commands only, where every PC makes them.
+    [MpCompatPrefix("VAspirE.SatisfactionPatches", "CheckGeneral")]
+    [MpCompatPrefix("VAspirE.SatisfactionPatches", "CheckGeneralDaily")]
+    [MpCompatPrefix("VAspirE.SatisfactionPatches", "CheckArgP")]
+    private static bool CheckOnlyInSimulation() => !MP.IsInMultiplayer || !MP.InInterface;
+
+    #endregion
+
     #region Don't close dialog when drawing it
 
     // Patches to not remove the letter if it's in the process of being drawn.
