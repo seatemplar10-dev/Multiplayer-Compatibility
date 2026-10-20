@@ -29,6 +29,9 @@ public class MiliraRace
             finalizer: new HarmonyMethod(typeof(MiliraRace), nameof(PostMilianGear)));
     }
 
+    // 1.7 lab, FIXES row 145: the Ancot Library gizmo syncs (Milira turrets and weapons) moved to AncotLibrary.cs, keyed on
+    // Ancot.AncotLibrary (its own mod and packageId), so they are registered once and not tied to Milira Race being active.
+
     private sealed class KindState
     {
         public PawnKindDef kind;

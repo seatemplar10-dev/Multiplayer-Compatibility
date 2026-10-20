@@ -104,7 +104,54 @@ namespace Multiplayer.Compat
                     AccessTools.DeclaredMethod("PerformanceOptimizer.PerformanceOptimizerSettings:Initialize"),
                     postfix: new HarmonyMethod(typeof(PerformanceOptimizer), nameof(PostPerformanceOptimizerInitialize)));
             }
+
+            // 1.7 lab, FIXES row 146: no overview letter at map load in a session (see PreMapFinalizeInit)
+            {
+                overviewLetterSentField = AccessTools.DeclaredField("PerformanceOptimizer.PerformanceOptimizerSettings:overviewLetterSent");
+                var mapFinalizeInit = AccessTools.DeclaredMethod(typeof(Map), nameof(Map.FinalizeInit));
+                if (overviewLetterSentField != null && mapFinalizeInit != null)
+                {
+                    MpCompat.harmony.Patch(mapFinalizeInit,
+                        prefix: new HarmonyMethod(typeof(PerformanceOptimizer), nameof(PreMapFinalizeInit)),
+                        finalizer: new HarmonyMethod(typeof(PerformanceOptimizer), nameof(FinalizeMapFinalizeInit)));
+                }
+                else Log.Error("Couldn't find PerformanceOptimizerSettings:overviewLetterSent or Map:FinalizeInit, a Performance Optimizer config without the flag will make a letter on one PC only and desync.");
+            }
         }
+
+        #region Overview letter
+
+        // 1.7 lab, FIXES row 146 (20 Oct 2026, d146_loadsweep finding R-2): Map_FinalizeInit.Postfix (a Harmony postfix of Map.FinalizeInit,
+        // which runs inside Game.LoadGame on every PC) does
+        //   if (!PerformanceOptimizerSettings.overviewLetterSent) { Find.LetterStack.ReceiveLetter(...); overviewLetterSent = true; WriteSettings(); }
+        // The flag lives in the PC's OWN config file (Mod_2664723367_PerformanceOptimizerMod.xml), not in the save. A PC whose config lacks it
+        // (a fresh install: the second player's) makes the letter at its first load in a session and takes the next letter id (UniqueIDsManager.nextLetterID)
+        // and an archive entry that the other PCs never get -> every later letter has another id on that PC. Load is a long event, so
+        // MP does not turn the id into a local one (UniqueIds.UseLocalIds) and Seeds.cs only seeds the Rand, not the id counters.
+        // Fix: while a session is on (MP.IsInMultiplayer = Multiplayer.session != null, set by HostUtil/ClientUtil before any session load) the flag reads
+        // as "already sent" for the duration of Map.FinalizeInit, so the mod's postfix does nothing, and it is put back afterwards (finalizer, which
+        // runs after all postfixes), so the config file is not marked and single player keeps its letter. Outside a session (including the
+        // host's first load of its single-player save, before it hosts) nothing changes: that letter, if any, is part of the host's save and reaches
+        // everybody with the join-point snapshot. The prefix patch is on Map.FinalizeInit, not on the mod's small Postfix, so JIT inlining of the
+        // postfix into the patched method cannot bypass it.
+        private static FieldInfo overviewLetterSentField;
+
+        private static void PreMapFinalizeInit(out bool __state)
+        {
+            __state = false;
+            if (!MP.IsInMultiplayer || (bool)overviewLetterSentField.GetValue(null))
+                return;
+            overviewLetterSentField.SetValue(null, true);
+            __state = true;
+        }
+
+        private static void FinalizeMapFinalizeInit(bool __state)
+        {
+            if (__state)
+                overviewLetterSentField.SetValue(null, false);
+        }
+
+        #endregion
 
         private static void PostPerformanceOptimizerInitialize()
         {
