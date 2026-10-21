@@ -1,4 +1,5 @@
-﻿using System.Collections;
+﻿using System;
+using System.Collections;
 using System.Linq;
 using HarmonyLib;
 using Multiplayer.API;
@@ -123,6 +124,9 @@ namespace Multiplayer.Compat
 
             // CompAbilityUser
             compAbilityUserAbilityDataField = AccessTools.FieldRefAccess<object>("AbilityUser.CompAbilityUser:abilityData");
+            abilityDataType = AccessTools.TypeByName("AbilityUser.AbilityData");
+            MpCompat.harmony.Patch(AccessTools.PropertyGetter("AbilityUser.CompAbilityUser:AbilityData"),
+                prefix: new HarmonyMethod(typeof(JecsTools), nameof(AbilityDataReadOnlyInInterface)));
 
             // AbilityData
             abilityDataAllPowersGetter = MethodInvoker.GetHandler(AccessTools.PropertyGetter("AbilityUser.AbilityData:AllPowers"));
@@ -131,6 +135,21 @@ namespace Multiplayer.Compat
             abilityUserUtilityGetCompsMethod = MethodInvoker.GetHandler(AccessTools.Method("AbilityUser.AbilityUserUtility:GetCompAbilityUsers"));
 
             return true;
+        }
+
+        // 1.7 lab (FIXES row 163, live save-state checksum run SS-A4 at MP 12,500): CompAbilityUser.AbilityData is
+        // `abilityData ?? (abilityData = new AbilityData(this))`, and the field is saved (PostExposeData). CompGetGizmosExtra reads it,
+        // so selecting any pawn with the comp on a drawing PC created and saved an empty container there (a dead raider's
+        // ProjectJedi.CompForceUser: host empty AbilityData, arbiter null); the simulation reads it only once the user is initialized
+        // (CompTick). In interface code an existing container is returned as is, a missing one is a throwaway, never stored.
+        private static Type abilityDataType;
+
+        private static bool AbilityDataReadOnlyInInterface(object __instance, ref object __result)
+        {
+            if (!MP.IsInMultiplayer || !MP.InInterface)
+                return true;
+            __result = compAbilityUserAbilityDataField(__instance) ?? Activator.CreateInstance(abilityDataType, __instance);
+            return false;
         }
 
         private static void StopTargeting(object instance, object[] args)
