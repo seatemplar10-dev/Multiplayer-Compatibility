@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using HarmonyLib;
 using Multiplayer.API;
 using Verse;
@@ -24,7 +24,12 @@ namespace Multiplayer.Compat
             MP.RegisterSyncWorker<ThingComp>(SyncComp, type);
             shouldUnloadSyncField = MP.RegisterSyncField(AccessTools.Field(type, "ShouldUnload"));
             // The GetChecker method either gets an existing, or creates a new comp
-            getCompUnlockerCheckerMethod = AccessTools.MethodDelegate<GetChecker>(AccessTools.Method(type, "GetChecker"));
+            var getCheckerMethod = AccessTools.Method(type, "GetChecker")
+                                   ?? throw new MissingMethodException(type.FullName, "GetChecker(Thing, bool, bool)");
+            getCompUnlockerCheckerMethod = AccessTools.MethodDelegate<GetChecker>(getCheckerMethod);
+
+            // WasInInventory is set by drawing (see GetCheckerPrefix)
+            MpCompat.harmony.Patch(getCheckerMethod, prefix: new HarmonyMethod(typeof(CommonSense), nameof(GetCheckerPrefix)));
 
             // RNG Patch
             PatchingUtilities.PatchUnityRand("CommonSense.JobGiver_Wander_TryGiveJob_CommonSensePatch:Postfix", false);
@@ -59,6 +64,27 @@ namespace Multiplayer.Compat
                 postfix: new HarmonyMethod(typeof(CommonSense), nameof(CommonSensePatchPostfix)));
         }
 
+        /// <summary>
+        /// CompUnloadChecker.WasInInventory ("CommonSenseWasInInventory" in the save) is only read by
+        /// CommonSense.PCT.SneakyMoveToInventory, which Pawn_JobTracker.CleanupCurrentJob runs in the simulation: a pawn whose job
+        /// ends while it carries a thing with the flag puts the thing back in its inventory, without the flag it drops it on the map.
+        /// The flag is set by the ThingOwner TryAdd postfix for a Pawn_InventoryTracker owner (simulation, the same on every
+        /// machine) and also by merely DRAWING: Utility.DrawThingRow (the vanilla Gear tab, and the RPG Style Inventory tab's DrawThingRow, which
+        /// CommonSense patches with the same prefix) and the RPG Style Inventory popup menu postfix both call
+        /// GetChecker(thing, false, true). That runs only on the machine that draws (MP.InInterface); the headless arbiter never
+        /// draws, so the machine that opened a pawn's Gear tab saved the flag and the others did not (lab run SS-A3, MP timer 12,500:
+        /// 3 items of one colonist, host True / arbiter absent), and the next time such an item is carried the machines diverge.
+        /// A draw must not change the simulation, so the draw-time request is ignored here. Items keep the flag the simulation gave
+        /// them (the TryAdd postfix, and the value loaded from the save); the only thing that changes in multiplayer is that an item
+        /// that is in an inventory but was never flagged is not flagged by a player looking at it.
+        /// Ticks, synced commands, loading and reloading are not MP.InInterface and keep the mod's own behaviour on every machine.
+        /// </summary>
+        private static void GetCheckerPrefix(ref bool InitWasInInventory)
+        {
+            if (InitWasInInventory && MP.IsInMultiplayer && MP.InInterface)
+                InitWasInInventory = false;
+        }
+
         private static void CommonSensePatchPrefix(Thing thing, ref bool __state)
         {
             if (!MP.IsInMultiplayer)
@@ -82,7 +108,7 @@ namespace Multiplayer.Compat
         private static void RpgStyleCompatPrefix(ref object _____instance)
         {
             // Yes, it should have 5 `_` symbols. The field has 2 in name, and we need to add 3 to access it through harmony argument
-            // The __instance field used by the mod 
+            // The __instance field used by the mod
             if (MP.IsInMultiplayer)
                 _____instance ??= Activator.CreateInstance(rpgStyleInventoryTabType);
         }

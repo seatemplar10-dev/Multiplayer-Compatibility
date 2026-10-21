@@ -1,10 +1,12 @@
-﻿using System;
+using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
 using HarmonyLib;
 using Multiplayer.API;
 using RimWorld;
+using RimWorld.Planet;
 using Verse;
 
 namespace Multiplayer.Compat;
@@ -16,7 +18,7 @@ namespace Multiplayer.Compat;
 public class VanillaAspirationsExpanded
 {
     #region Fields
-    
+
     // MP Compat
     private static bool isDrawingDialog = false;
 
@@ -31,6 +33,9 @@ public class VanillaAspirationsExpanded
     private static AccessTools.FieldRef<ChoiceLetter_GrowthMoment, int> aspirationGainsCountField;
     private static FastInvokeHandler trySetAspirationChoicesMethod;
     private static FastInvokeHandler makeAspirationChoicesMethod;
+
+    // WorldComponent_PawnList.colonists_with_fulfillment_need, read only (FIXES row 161 diagnostics)
+    private static FieldInfo pawnListField;
 
     #endregion
 
@@ -70,6 +75,9 @@ public class VanillaAspirationsExpanded
         MP.RegisterSyncMethod(makeAspirationChoices);
         // Letter timeout handling
         MP.RegisterDefaultLetterChoice(MpMethodUtil.MethodOf(PickRandomAspirationsTraitPassions), type);
+
+        // Diagnostics only: the list VAspirE tests ShowOnNeedList against
+        pawnListField = AccessTools.Field(AccessTools.TypeByName("VAspirE.WorldComponent_PawnList"), "colonists_with_fulfillment_need");
     }
 
     #endregion
@@ -124,6 +132,101 @@ public class VanillaAspirationsExpanded
     [MpCompatPrefix("VAspirE.SatisfactionPatches", "CheckGeneralDaily")]
     [MpCompatPrefix("VAspirE.SatisfactionPatches", "CheckArgP")]
     private static bool CheckOnlyInSimulation() => !MP.IsInMultiplayer || !MP.InInterface;
+
+    // 1.7 lab (FIXES row 161): the same rule at the two points every route into an aspiration passes through, so that a hook
+    // that is not in the list above (or a new one in a later VAspirE) cannot change the need level, completedTicks or send the
+    // message from interface code. Interface code never completes an aspiration, whatever called it.
+    [MpCompatPrefix("VAspirE.Need_Fulfillment", "CheckCompletion")]
+    [MpCompatPrefix("VAspirE.Need_Fulfillment", "Complete")]
+    private static bool CompleteOnlyInSimulation() => !MP.IsInMultiplayer || !MP.InInterface;
+
+    #endregion
+
+    #region The need's population is a function of the pawn, not of a shared list
+
+    // 1.7 lab (FIXES row 161, SS-A3 at MP 12,500: Human1929 completed "Get some lovin'" on the host only).
+    //
+    // Need_Fulfillment.CheckCompletion starts with `if (!ShowOnNeedList) return;` and
+    // `ShowOnNeedList => WorldComponent_PawnList.colonists_with_fulfillment_need.Contains(pawn)`. That static field is
+    // ASSIGNED (not copied) the list returned by PawnsFinder.AllMapsCaravansAndTravellingTransporters_AliveSpawned_FreeColonistsAndPrisoners,
+    // which is one of PawnsFinder's scratch lists: cleared and refilled by every call from anybody, filtered by IsFreeColonist,
+    // which Multiplayer's PawnIsColonistPatch turns into "faction == Find.FactionManager.OfPlayer" (the current faction context).
+    // In the game's own code (decompile 4981) the only reader of that getter chain outside PawnsFinder is
+    // Alert_LifeThreateningHediff (through ..._FreeColonistsAndPrisoners_NoCryptosleep) - an alert, i.e. interface code - so the
+    // host's windowed PC refills the list in its own faction context every few frames while a PC that draws no alerts keeps
+    // whatever the last FinalizeInit / StoryWatcher_PopAdaptation event (in whatever faction context that ran) left in it. The
+    // need's population can therefore differ per PC, and so can every completion check behind it.
+    //
+    // The population is now computed from the pawn alone, the same on every PC, and without the faction context: alive, on a
+    // map or in a caravan, and a free colonist of ANY player faction or a prisoner of one (what the list was meant to hold).
+    // The list itself stays in VAspirE (nothing reads it any more).
+    [MpCompatPrefix("VAspirE.Need_Fulfillment", "ShowOnNeedList", MethodType.Getter)]
+    private static bool ShowOnNeedListFromThePawn(Pawn ___pawn, ref bool __result)
+    {
+        if (!MP.IsInMultiplayer)
+            return true;
+
+        var result = InFulfillmentPopulation(___pawn);
+
+        if (LogShowOnNeedListMismatch)
+            NoteListMismatch(___pawn, result);
+
+        __result = result;
+        return false;
+    }
+
+    private static bool InFulfillmentPopulation(Pawn pawn)
+    {
+        if (pawn == null || pawn.Dead || pawn.Destroyed)
+            return false;
+
+        // PawnsFinder.AllMapsCaravansAndTravellingTransporters_AliveSpawned: pawns spawned on a map, or in a caravan.
+        if (!pawn.Spawned && !pawn.IsCaravanMember())
+            return false;
+
+        // Prisoners of a player faction (PawnsFinder.AllMapsCaravansAndTravellingTransporters_AliveSpawned_PrisonersOfColony).
+        // Pawn.IsPrisonerOfColony reads guest.HostFaction.IsPlayer, the faction's own def flag: no faction context in it.
+        if (pawn.IsPrisonerOfColony)
+            return true;
+
+        // Free colonists. Pawn.IsFreeColonist / IsColonist would compare the faction with Faction.OfPlayer, which is the
+        // current faction context (the viewing player's outside ticks, the map's during them) - spell the rest out with the
+        // same conditions as Pawn.IsColonist (Verse/Pawn.cs:518) but "any player faction".
+        var faction = pawn.Faction;
+        return faction is { IsPlayer: true }
+               && pawn.HostFaction == null
+               && pawn.RaceProps.Humanlike
+               && (!pawn.IsSlave || pawn.guest.SlaveIsSecure)
+               && !pawn.IsSubhuman;
+    }
+
+    // Diagnostics (no effect on the simulation): the first time a pawn's answer from VAspirE's own list differs from the
+    // answer above, say so once per (pawn, list answer, answer) with the numbers that explain it. Run this on host and arbiter
+    // and compare the lines: a pawn the arbiter's list lacks and the host's has is row 161's per-PC input.
+    private const bool LogShowOnNeedListMismatch = true;
+    private static readonly HashSet<(int, bool, bool)> loggedMismatches = new();
+
+    private static void NoteListMismatch(Pawn pawn, bool deterministic)
+    {
+        try
+        {
+            if (pawn == null || pawnListField == null)
+                return;
+
+            var list = pawnListField.GetValue(null) as List<Pawn>;
+            var inList = list != null && list.Contains(pawn);
+            if (inList == deterministic || !loggedMismatches.Add((pawn.thingIDNumber, inList, deterministic)))
+                return;
+
+            Log.Message($"[MPCompat] VAspirE row 161: ShowOnNeedList of {pawn.ThingID} would be {inList} from VAspirE's list " +
+                        $"({list?.Count ?? -1} pawns, offered by the pawn's own state: {deterministic}) at tick {Find.TickManager?.TicksGame}, " +
+                        $"InInterface {MP.InInterface}, Faction.OfPlayer {Faction.OfPlayer?.loadID}");
+        }
+        catch (Exception e)
+        {
+            Log.Warning($"[MPCompat] VAspirE row 161 diagnostics failed: {e.Message}");
+        }
+    }
 
     #endregion
 
