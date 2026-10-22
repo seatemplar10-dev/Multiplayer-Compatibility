@@ -1,8 +1,10 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Reflection;
 using HarmonyLib;
 using Multiplayer.API;
+using RimWorld;
 using Verse;
 
 namespace Multiplayer.Compat
@@ -33,6 +35,13 @@ namespace Multiplayer.Compat
     /// <c>CanDesignateMilking</c> is not touched: its writer only ever stores false and nothing calls it. Outside MP every patch runs the original untouched.
     /// Status: [unverified] - compiled, and the patch mechanics ran against a stand-in copy of the RJW bodies on Harmony 3.0 / .NET 10 (waylith/_lanes/d95_rjw/test, 21,019 checks
     /// incl. a 3,000-state equivalence sweep against the unpatched code); not run in game yet.
+    ///
+    /// Right-click sex orders (FIXES row 209). RJW 6.2.1 registers its own <c>[SyncMethod] rjw.RMB.RMB_Menu.HaveSex(Pawn, JobDef, LocalTargetInfo, InteractionDef,
+    /// SexInteractionResolved)</c>; the last argument was added after RJW's MP support was written and MP has no writer for it, so every right-click sex order threw
+    /// "No writer for type ...SexInteractionResolved" on the clicking PC and was never sent (live 22 Oct). Fix: a sync worker for <c>SexInteractionResolved</c>
+    /// (pawns, interaction def, score, the chosen parts as part hediffs or body parts, penetrations as indices into those lists). Every PC runs the clicker's
+    /// choice; letting each PC resolve it again would read each PC's own RJW preference settings. A part that is gone when the command runs throws on every PC
+    /// (order lost, no split). Status: [unverified] - compiled only, not run in game yet.
     /// </remarks>
     [MpCompatFor("rim.job.world")]
     public class RimJobWorld
@@ -87,6 +96,8 @@ namespace Multiplayer.Compat
             PatchingUtilities.PatchSystemRand(method, false);
 
             PatchPermissionFlags();
+
+            SetupSexInteractionResolved();
         }
 
         private static void PatchPermissionFlags()
@@ -197,5 +208,259 @@ namespace Multiplayer.Compat
         {
             __state.flag?.Set(__state.data, __state.value);
         }
+
+        #region SexInteractionResolved (row 209)
+
+        // rjw.Modules.Interactions.SexInteractionResolved and the part types it holds
+        private static FieldInfo resolvedInitiator, resolvedRecipient, resolvedInteraction, resolvedInitiatorParts, resolvedRecipientParts, resolvedPenetrations, resolvedScore;
+        private static FieldInfo[] scoreFields;
+        private static MethodInfo interactionDefGetter, partFamilyGetter, partOwnerGetter, partBodyPartGetter, sexPartAsHediffGetter, penetratorGetter, orificeGetter;
+        private static ConstructorInfo interactionCtor, rjwPartCtor, vanillaPartCtor, penetrationCtor;
+        private static FieldInfo rjwPartSexPart;
+        private static Type sexPartHediffType, rjwPartType, vanillaPartType, partFamilyType;
+
+        // Part kinds on the wire
+        private const byte NoPart = 0, RjwPart = 1, VanillaPart = 2;
+        // Penetration ends on the wire: an index into one of the two part lists, or the part itself (Sex_Sixtynine picks mouths that are in neither list)
+        private const byte NoRef = 0, InitiatorRef = 1, RecipientRef = 2, InlineRef = 3;
+
+        private static void SetupSexInteractionResolved()
+        {
+            const string ns = "rjw.Modules.Interactions.";
+            var resolvedType = TypeOrThrow(ns + "SexInteractionResolved");
+            var interactionType = TypeOrThrow(ns + "SexInteraction");
+            var partType = TypeOrThrow(ns + "ILewdablePart");
+            rjwPartType = TypeOrThrow(ns + "RJWLewdablePart");
+            vanillaPartType = TypeOrThrow(ns + "VanillaLewdablePart");
+            partFamilyType = TypeOrThrow(ns + "LewdablePartFamily");
+            sexPartHediffType = TypeOrThrow("rjw.ISexPartHediff");
+
+            resolvedInitiator = FieldOrThrow(resolvedType, "Initiator");
+            resolvedRecipient = FieldOrThrow(resolvedType, "Recipient");
+            resolvedInteraction = FieldOrThrow(resolvedType, "Interaction");
+            resolvedInitiatorParts = FieldOrThrow(resolvedType, "InitiatorParts");
+            resolvedRecipientParts = FieldOrThrow(resolvedType, "RecipientParts");
+            resolvedPenetrations = FieldOrThrow(resolvedType, "Penetrations");
+            resolvedScore = FieldOrThrow(resolvedType, "Score");
+            scoreFields =
+            [
+                FieldOrThrow(resolvedScore.FieldType, "initiatorScore"),
+                FieldOrThrow(resolvedScore.FieldType, "recieverScore"),
+                FieldOrThrow(resolvedScore.FieldType, "settingsScore"),
+                FieldOrThrow(resolvedScore.FieldType, "totalScore"),
+            ];
+
+            interactionDefGetter = AccessTools.PropertyGetter(interactionType, "Def") ?? throw new MissingMethodException(interactionType.FullName, "get_Def");
+            interactionCtor = AccessTools.DeclaredConstructor(interactionType, [typeof(InteractionDef)]) ?? throw new MissingMethodException(interactionType.FullName, ".ctor(InteractionDef)");
+            partFamilyGetter = AccessTools.PropertyGetter(partType, "Family") ?? throw new MissingMethodException(partType.FullName, "get_Family");
+            partOwnerGetter = AccessTools.PropertyGetter(partType, "Owner") ?? throw new MissingMethodException(partType.FullName, "get_Owner");
+            partBodyPartGetter = AccessTools.PropertyGetter(partType, "BodyPart") ?? throw new MissingMethodException(partType.FullName, "get_BodyPart");
+            sexPartAsHediffGetter = AccessTools.PropertyGetter(sexPartHediffType, "AsHediff") ?? throw new MissingMethodException(sexPartHediffType.FullName, "get_AsHediff");
+            rjwPartSexPart = FieldOrThrow(rjwPartType, "SexPart");
+            rjwPartCtor = AccessTools.DeclaredConstructor(rjwPartType, [sexPartHediffType, partFamilyType]) ?? throw new MissingMethodException(rjwPartType.FullName, ".ctor");
+            vanillaPartCtor = AccessTools.DeclaredConstructor(vanillaPartType, [typeof(Pawn), typeof(BodyPartRecord), partFamilyType]) ?? throw new MissingMethodException(vanillaPartType.FullName, ".ctor");
+
+            // List<Tuple<ILewdablePart, ILewdablePart>> = (penetrator, orifice)
+            var penetrationType = resolvedPenetrations.FieldType.GetGenericArguments()[0];
+            penetratorGetter = AccessTools.PropertyGetter(penetrationType, "Item1") ?? throw new MissingMethodException(penetrationType.FullName, "get_Item1");
+            orificeGetter = AccessTools.PropertyGetter(penetrationType, "Item2") ?? throw new MissingMethodException(penetrationType.FullName, "get_Item2");
+            penetrationCtor = AccessTools.DeclaredConstructor(penetrationType, [partType, partType]) ?? throw new MissingMethodException(penetrationType.FullName, ".ctor");
+
+            MP.RegisterSyncWorker<object>(SyncSexInteractionResolved, resolvedType, shouldConstruct: true);
+        }
+
+        private static Type TypeOrThrow(string name) => AccessTools.TypeByName(name) ?? throw new TypeLoadException($"{LogPrefix}type {name} not found");
+
+        private static FieldInfo FieldOrThrow(Type type, string name) => AccessTools.DeclaredField(type, name) ?? throw new MissingFieldException(type.FullName, name);
+
+        private static void SyncSexInteractionResolved(SyncWorker sync, ref object resolved)
+        {
+            if (sync.isWriting)
+            {
+                // HaveSex's argument defaults to null; MP gives a registered class type no null marker of its own
+                sync.Write(resolved != null);
+                if (resolved == null)
+                    return;
+
+                sync.Write((Pawn)resolvedInitiator.GetValue(resolved));
+                sync.Write((Pawn)resolvedRecipient.GetValue(resolved));
+                var interaction = resolvedInteraction.GetValue(resolved);
+                sync.Write(interaction == null ? null : (InteractionDef)interactionDefGetter.Invoke(interaction, []));
+
+                var initiatorParts = (IList)resolvedInitiatorParts.GetValue(resolved);
+                var recipientParts = (IList)resolvedRecipientParts.GetValue(resolved);
+                WritePartList(sync, initiatorParts);
+                WritePartList(sync, recipientParts);
+
+                var penetrations = (IList)resolvedPenetrations.GetValue(resolved);
+                sync.Write(penetrations?.Count ?? -1);
+                if (penetrations != null)
+                {
+                    foreach (var penetration in penetrations)
+                    {
+                        WritePartRef(sync, penetratorGetter.Invoke(penetration, []), initiatorParts, recipientParts);
+                        WritePartRef(sync, orificeGetter.Invoke(penetration, []), initiatorParts, recipientParts);
+                    }
+                }
+
+                var score = resolvedScore.GetValue(resolved);
+                sync.Write(score != null);
+                if (score != null)
+                {
+                    foreach (var field in scoreFields)
+                        sync.Write((float)field.GetValue(score));
+                }
+            }
+            else
+            {
+                if (!sync.Read<bool>())
+                {
+                    resolved = null;
+                    return;
+                }
+
+                resolvedInitiator.SetValue(resolved, sync.Read<Pawn>());
+                resolvedRecipient.SetValue(resolved, sync.Read<Pawn>());
+                var def = sync.Read<InteractionDef>();
+                resolvedInteraction.SetValue(resolved, def == null ? null : interactionCtor.Invoke([def]));
+
+                var initiatorParts = ReadPartList(sync, resolvedInitiatorParts.FieldType);
+                var recipientParts = ReadPartList(sync, resolvedRecipientParts.FieldType);
+                resolvedInitiatorParts.SetValue(resolved, initiatorParts);
+                resolvedRecipientParts.SetValue(resolved, recipientParts);
+
+                var count = sync.Read<int>();
+                if (count >= 0)
+                {
+                    var penetrations = (IList)Activator.CreateInstance(resolvedPenetrations.FieldType);
+                    for (var i = 0; i < count; i++)
+                    {
+                        var penetrator = ReadPartRef(sync, initiatorParts, recipientParts);
+                        var orifice = ReadPartRef(sync, initiatorParts, recipientParts);
+                        penetrations.Add(penetrationCtor.Invoke([penetrator, orifice]));
+                    }
+                    resolvedPenetrations.SetValue(resolved, penetrations);
+                }
+
+                if (sync.Read<bool>())
+                {
+                    var score = Activator.CreateInstance(resolvedScore.FieldType);
+                    foreach (var field in scoreFields)
+                        field.SetValue(score, sync.Read<float>());
+                    resolvedScore.SetValue(resolved, score);
+                }
+            }
+        }
+
+        private static void WritePartList(SyncWorker sync, IList parts)
+        {
+            sync.Write(parts?.Count ?? -1);
+            if (parts == null)
+                return;
+            foreach (var part in parts)
+                WritePart(sync, part);
+        }
+
+        private static IList ReadPartList(SyncWorker sync, Type listType)
+        {
+            var count = sync.Read<int>();
+            if (count < 0)
+                return null;
+            var parts = (IList)Activator.CreateInstance(listType);
+            for (var i = 0; i < count; i++)
+                parts.Add(ReadPart(sync));
+            return parts;
+        }
+
+        private static void WritePart(SyncWorker sync, object part)
+        {
+            var kind = part == null ? NoPart : rjwPartType.IsInstanceOfType(part) ? RjwPart : VanillaPart;
+            sync.Write(kind);
+            if (kind == NoPart)
+                return;
+
+            sync.Write(Convert.ToInt32(partFamilyGetter.Invoke(part, [])));
+            if (kind == RjwPart)
+            {
+                var sexPart = rjwPartSexPart.GetValue(part);
+                sync.Write(sexPart == null ? null : (Hediff)sexPartAsHediffGetter.Invoke(sexPart, []));
+            }
+            else
+            {
+                sync.Write((Pawn)partOwnerGetter.Invoke(part, []));
+                sync.Write((BodyPartRecord)partBodyPartGetter.Invoke(part, []));
+            }
+        }
+
+        private static object ReadPart(SyncWorker sync)
+        {
+            var kind = sync.Read<byte>();
+            if (kind == NoPart)
+                return null;
+
+            var family = Enum.ToObject(partFamilyType, sync.Read<int>());
+            if (kind == RjwPart)
+            {
+                // the same on every PC: a part hediff gone by the time the command runs loses the order everywhere
+                var hediff = sync.Read<Hediff>();
+                if (!sexPartHediffType.IsInstanceOfType(hediff))
+                    throw new InvalidOperationException($"{LogPrefix}sex part hediff {hediff?.ToStringSafe() ?? "null"} not found");
+                return rjwPartCtor.Invoke([hediff, family]);
+            }
+
+            var owner = sync.Read<Pawn>();
+            var bodyPart = sync.Read<BodyPartRecord>();
+            if (owner == null || bodyPart == null)
+                throw new InvalidOperationException($"{LogPrefix}body part {bodyPart?.ToStringSafe() ?? "null"} of {owner?.ToStringSafe() ?? "null"} not found");
+            return vanillaPartCtor.Invoke([owner, bodyPart, family]);
+        }
+
+        // Reference equality: the resolver adds the same part object twice for parts tagged "Multiple"
+        private static void WritePartRef(SyncWorker sync, object part, IList initiatorParts, IList recipientParts)
+        {
+            int index;
+            if (part == null)
+                sync.Write(NoRef);
+            else if ((index = IndexOfReference(initiatorParts, part)) >= 0)
+            {
+                sync.Write(InitiatorRef);
+                sync.Write(index);
+            }
+            else if ((index = IndexOfReference(recipientParts, part)) >= 0)
+            {
+                sync.Write(RecipientRef);
+                sync.Write(index);
+            }
+            else
+            {
+                sync.Write(InlineRef);
+                WritePart(sync, part);
+            }
+        }
+
+        private static object ReadPartRef(SyncWorker sync, IList initiatorParts, IList recipientParts)
+        {
+            return sync.Read<byte>() switch
+            {
+                NoRef => null,
+                InitiatorRef => initiatorParts[sync.Read<int>()],
+                RecipientRef => recipientParts[sync.Read<int>()],
+                _ => ReadPart(sync),
+            };
+        }
+
+        private static int IndexOfReference(IList list, object item)
+        {
+            if (list == null)
+                return -1;
+            for (var i = 0; i < list.Count; i++)
+            {
+                if (ReferenceEquals(list[i], item))
+                    return i;
+            }
+            return -1;
+        }
+
+        #endregion
     }
 }
