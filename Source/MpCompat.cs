@@ -24,6 +24,8 @@ namespace Multiplayer.Compat
 
             MpCompatLoader.Load(content);
             harmony.PatchAll();
+            // FIXES row 180: the dev-mode-only ConfigErrors side effects on every PC (DeterministicConfigErrors.cs)
+            LongEventHandler.ExecuteWhenFinished(DeterministicConfigErrors.Run);
         }
 
         static IEnumerable<ISyncMethod> RegisterLambdaMethod_Impl(Type parentType, string parentMethod, MethodType methodType, params int[] lambdaOrdinals)
