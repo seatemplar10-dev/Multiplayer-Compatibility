@@ -101,7 +101,20 @@ public class ResearchReinvented
             finalizer: new HarmonyMethod(typeof(ResearchReinvented), nameof(LeaveScope)));
         harmony.Patch(delayed, prefix: new HarmonyMethod(typeof(ResearchReinvented), nameof(PreSkipInInterface)));
         harmony.Patch(reset, prefix: new HarmonyMethod(typeof(ResearchReinvented), nameof(PreSkipInInterface)));
+
+        // FIXES row 173 (22 Oct 2026, live desync D1): a loaded research job builds its toils in Scribe PostLoadInit (decomp4981
+        // JobDriver.cs:268-270), and JobDriver_ResearchRR.MakeNewToils takes its opportunity from WorkGiver_ResearcherRR.OpportunityCache,
+        // whose statics are keyed only by the project. RR clears them in ResearchOpportunityManager.FinalizeInit, which runs after that, so
+        // after an in-process reload with the same project the job held the previous game's opportunity object and its progress went to an
+        // object no save holds. Multiplayer reloads in process on the host (hosting, every join point, every desync); a fresh joiner loads
+        // once, so the two split (lab run B1, MP 80,000; the same clear as a test flag in run C1 kept them equal). Cleared before every
+        // Game.LoadGame; Multiplayer's reloads load through it too (LoadPatch.cs:27).
+        if (clearCaches != null)
+            harmony.Patch(AccessTools.DeclaredMethod(typeof(Game), nameof(Game.LoadGame)),
+                prefix: new HarmonyMethod(typeof(ResearchReinvented), nameof(PreLoadGame)));
     }
+
+    private static void PreLoadGame() => clearCaches();
 
     private static bool ResolveMultiplayerInternals()
     {
