@@ -1,5 +1,7 @@
+using System;
 using System.Reflection;
 using HarmonyLib;
+using RimWorld;
 using Verse;
 
 namespace Multiplayer.Compat
@@ -34,6 +36,12 @@ namespace Multiplayer.Compat
     /// them (see <see cref="RimDark40kRng.PatchSite"/>) and still works unchanged against the 1.6 build. NEW desync risk in 1.1.95, not covered here: custom chapter genes
     /// (<c>CustomChapterGeneDefBuilder.NewDefName</c> = prefix + <c>Guid.NewGuid()</c>, called from <c>GameComponent_CustomChapterGenes.Add</c> by the chapter dialogs) create
     /// GeneDefs at runtime with a per-machine name and unsynced game-component state - that needs a sync module of its own.
+    /// 22 Oct (err_mf_settle lane e, not a determinism fix): Genes40k's Harmony postfix <c>OffworldMarineMimicPlayerRelation.Postfix(Faction __instance, Faction other)</c>
+    /// on <c>Faction.Notify_RelationKindChanged</c> copies "the player's" relation with the changed faction onto its Offworld Marines faction and assumes only one
+    /// side of the change is a player faction. With two player factions (multifaction) both are: <c>Faction.OfPlayer</c> is then one of them, so
+    /// <c>RelationWith(itself)</c> logs "Tried to get relation between faction ... and itself." / "Relation is missing faction." and a player-vs-player change
+    /// would be mirrored onto the marines (the 20:32 autosave had them Hostile to the second faction). <see cref="SkipPlayerVersusPlayerMimic"/> skips the postfix
+    /// when both factions are player factions; single player never has that case.
     /// Status: [unverified] - compiled only, not run in game yet; PatchingUtilities.FixRNG logs a warning when a method has nothing to replace.
     /// Not done here: the Core40k side (damage workers, gene PostMake) is in <see cref="RimDark40kFramework"/>.
     /// </remarks>
@@ -57,8 +65,25 @@ namespace Multiplayer.Compat
                 ("Induce fear", () => PatchSystemRand("Genes40k.Gene_InduceFear", "AffectPawns")),
                 ("Unstable organs", () => PatchSystemRand("Genes40k.Gene_UnstableOrgans", "TickInterval")),
                 ("Natural birth: Perpetual", () => PatchBirth("Genes40k.NaturalBirthPerpetual")),
-                ("Natural birth: Psyker / Pariah", () => PatchBirth("Genes40k.NaturalBirthPsykerPariah")));
+                ("Natural birth: Psyker / Pariah", () => PatchBirth("Genes40k.NaturalBirthPsykerPariah")),
+                ("Offworld Marines relation mirror: skip player-vs-player (multifaction)", PatchOffworldMimicRelation));
         }
+
+        private static void PatchOffworldMimicRelation()
+        {
+            // Throws (-> logged by RunSteps as a failed step, the other steps still ran) when the type / method is missing in this build of the mod.
+            var method = RimDark40kRng.FindMethod(LogPrefix, "Genes40k.OffworldMarineMimicPlayerRelation", "Postfix");
+            var parameters = method.GetParameters();
+            if (!method.IsStatic || parameters.Length != 2 || parameters[0].ParameterType != typeof(Faction) || parameters[1].ParameterType != typeof(Faction))
+                throw new MissingMethodException($"{LogPrefix}{method.DeclaringType?.FullName}.Postfix is not static Postfix(Faction, Faction): {method}");
+
+            MpCompat.harmony.Patch(method, prefix: new HarmonyMethod(typeof(RimDark40kMankindsFinest), nameof(SkipPlayerVersusPlayerMimic)));
+        }
+
+        // Prefix on the Genes40k postfix. The patched method is static and its first parameter is called __instance (it is a postfix itself):
+        // in a prefix of ours the name __instance would mean "instance of a static method" = null, so both factions are read by position.
+        private static bool SkipPlayerVersusPlayerMimic(Faction __0, Faction __1)
+            => !(__0 != null && __1 != null && __0.IsPlayer && __1.IsPlayer);
 
         private static void PatchSystemRand(string typeName, string methodName)
             => RimDark40kRng.PatchSite(LogPrefix, RimDark40kRng.FindMethod(LogPrefix, typeName, methodName), false);
