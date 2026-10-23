@@ -1,6 +1,7 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Linq;
 using System.Reflection;
 using HarmonyLib;
 using Multiplayer.API;
@@ -59,6 +60,14 @@ namespace Multiplayer.Compat
     ///    flips it back, only to ask the vanilla menu what a drafted pawn could do; that stays a direct write.
     ///    b) Tools.CancelDrafting (Escape while dragging) called priorityWork.Clear() and EndCurrentJob(InterruptForced)
     ///    directly. It is a synced method now (pawn, original draft state), sounds stay local.
+    /// 7. FIXED (all modes): the "Rescuing" work type. DynamicWorkTypes.AddWorkTypeDef puts a WorkTypeDef made at runtime
+    ///    (Tools.RescuingWorkTypeDef = new WorkTypeDef) into DefDatabase on World.ExposeData, after the game handed out
+    ///    short hashes, so its shortHash stays 0; MP writes a Def as its shortHash and no peer can read 0 back, so every
+    ///    priority click in the Rescuing column (MP's synced Pawn_WorkSettings.SetPriority) threw on every PC (row 207).
+    ///    Every work type left at hash 0 now gets the hash ShortHashGiver would give it, after every game load
+    ///    (Game.FinalizeInit) and after AddWorkTypeDef (finalizer: the settings toggle mid-game); a log line per def lets
+    ///    the peers be compared. Needs Achtung's "rescueEnabled" equal on every PC (a PC without the column has no such
+    ///    def, so the click would run on one PC and throw on the other).
     /// Not handled here (a lower bound of what may still desync):
     /// - Achtung settings (Achtung.Settings: ignoreForbidden, ignoreRestrictions, ignoreAssignments, buildingSmart,
     ///   maxForcedItems, breakLevel, healthLevel, forcedEndedLetter) are read by simulation code from each machine's own
@@ -128,6 +137,7 @@ namespace Multiplayer.Compat
             PatchTargetExpansion();
             PatchWorldTick();
             PatchDisabledOptions();
+            PatchRuntimeWorkType(mod);
 
             try
             {
@@ -368,6 +378,59 @@ namespace Multiplayer.Compat
         {
             if (MP.IsInMultiplayer)
                 __result = null;
+        }
+
+        #endregion
+
+        #region Runtime work type short hash (point 7)
+
+        // Two triggers for one pass, so a PC never depends on Achtung's own call completing: Game.FinalizeInit (after every
+        // load; Achtung adds the def in World.ExposeData during the load) and a finalizer on DynamicWorkTypes.AddWorkTypeDef
+        // (the settings toggle adds it mid-game; a finalizer also runs when the original throws after DefDatabase.Add).
+        private static void PatchRuntimeWorkType(ModContentPack mod)
+        {
+            MpCompat.harmony.Patch(GetDeclaredMethod(typeof(Game), nameof(Game.FinalizeInit)),
+                postfix: new HarmonyMethod(typeof(Achtung), nameof(GiveRuntimeWorkTypesShortHashes)));
+
+            try
+            {
+                // Achtung's own copy: Brrainz helper classes are shared source, other mods can carry a type of the same name
+                var dynamicWorkTypes = mod.assemblies.loadedAssemblies
+                                           .Select(assembly => assembly.GetType("Brrainz.DynamicWorkTypes"))
+                                           .FirstOrDefault(type => type != null)
+                                       ?? throw new TypeLoadException($"{LogPrefix}Brrainz.DynamicWorkTypes not found in Achtung's assemblies");
+                var addWorkTypeDef = GetDeclaredMethod(dynamicWorkTypes, "AddWorkTypeDef", typeof(WorkTypeDef), typeof(WorkTypeDef), typeof(WorkGiverDef));
+                MpCompat.harmony.Patch(addWorkTypeDef, finalizer: new HarmonyMethod(typeof(Achtung), nameof(GiveRuntimeWorkTypesShortHashes)));
+            }
+            catch (Exception e)
+            {
+                Log.Error($"{LogPrefix}a Rescuing work type turned on in Achtung's settings during a game gets its short hash only at the next load: {e}");
+            }
+        }
+
+        // Every WorkTypeDef still at short hash 0 (made after startup hashing) gets the hash Verse.ShortHashGiver.GiveShortHash
+        // would give it, in defName order like the game: the same work type list on every peer gives the same hashes, and no
+        // def is left at 0 (InitializeShortHashDictionary adds every def, so one left at 0 would answer GetByShortHash(0)).
+        private static void GiveRuntimeWorkTypesShortHashes()
+        {
+            var defs = DefDatabase<WorkTypeDef>.AllDefsListForReading;
+            var unhashed = defs.Where(def => def.shortHash == 0).OrderBy(def => def.defName, StringComparer.Ordinal).ToList();
+            if (unhashed.Count == 0)
+                return;
+
+            var taken = new HashSet<ushort>(defs.Select(def => def.shortHash).Where(hash => hash != 0));
+            foreach (var def in unhashed)
+            {
+                var hash = (ushort)(GenText.StableStringHash(def.defName) % 65535);
+                while (hash == 0 || taken.Contains(hash))
+                    hash++;
+
+                def.shortHash = hash;
+                taken.Add(hash);
+                Log.Message($"{LogPrefix}runtime work type {def.defName} given short hash {hash} ({defs.Count} work types); every PC must log the same");
+            }
+
+            DefDatabase<WorkTypeDef>.InitializeShortHashDictionary();
         }
 
         #endregion

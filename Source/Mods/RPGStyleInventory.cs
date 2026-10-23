@@ -17,10 +17,15 @@ namespace Multiplayer.Compat
     class RPGStyleInventory
     {
         private static Type tabType;
+        // Revamped only: the tab's own pawn, set when the tab is drawn (FillTab); InterfaceDrop reads it instead of the selection
+        private static AccessTools.FieldRef<object, Pawn> cachedPawnField;
 
         public RPGStyleInventory(ModContentPack mod)
         {
             tabType = AccessTools.TypeByName("Sandy_Detailed_RPG_Inventory.Sandy_Detailed_RPG_GearTab");
+
+            if (AccessTools.DeclaredField(tabType, "cachedPawn")?.FieldType == typeof(Pawn))
+                cachedPawnField = AccessTools.FieldRefAccess<Pawn>(tabType, "cachedPawn");
 
             MP.RegisterSyncWorker<ITab_Pawn_Gear>(SyncITab, tabType);
 
@@ -44,8 +49,24 @@ namespace Multiplayer.Compat
 
         private static void SyncITab(SyncWorker sync, ref ITab_Pawn_Gear gearITab)
         {
-            if (!sync.isWriting)
-                gearITab = Activator.CreateInstance(tabType) as ITab_Pawn_Gear;
+            if (sync.isWriting)
+            {
+                // The tab the player clicked in has its pawn cached; a fresh tab would not (NRE in InterfaceDrop on every PC, row 208)
+                if (cachedPawnField != null)
+                    sync.Write(gearITab == null ? null : cachedPawnField(gearITab));
+                return;
+            }
+
+            gearITab = Activator.CreateInstance(tabType) as ITab_Pawn_Gear;
+            if (cachedPawnField == null)
+                return;
+
+            var pawn = sync.Read<Pawn>();
+            // Pawn gone before the command ran: a null target cancels the command on every PC instead of throwing
+            if (pawn == null)
+                gearITab = null;
+            else
+                cachedPawnField(gearITab) = pawn;
         }
     }
 }
