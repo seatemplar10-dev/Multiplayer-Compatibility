@@ -118,29 +118,52 @@ namespace Multiplayer.Compat
 
             // 5. Stop VF's targeters before MP clears the old game (every MP reload path goes through ClearAllMapsAndWorld),
             //    as vanilla's load does through Game.Dispose (Vehicles.Targeters: GameEvent.OnGameDisposing += ClearAllTargeters).
-            var landingTargeterType = FindType("Vehicles.LandingTargeter");
-            clearAllTargeters = MethodInvoker.GetHandler(GetDeclaredMethod(FindType("Vehicles.Targeters"), "ClearAllTargeters", Type.EmptyTypes));
-            landingInstanceGetter = AccessTools.DeclaredPropertyGetter(landingTargeterType, "Instance")
-                                    ?? throw new MissingMethodException(landingTargeterType.FullName, "get_Instance");
-            landingTargeterInstance = MethodInvoker.GetHandler(landingInstanceGetter);
-            landingTargeterQueueField = AccessTools.FieldRefAccess<Queue<Action>>(landingTargeterType, "targeterQueue");
-            MpCompat.harmony.Patch(AccessTools.DeclaredMethod(typeof(MemoryUtility), nameof(MemoryUtility.ClearAllMapsAndWorld)),
-                prefix: new HarmonyMethod(typeof(VehicleFramework), nameof(StopTargetersBeforeReload)));
+            //    Steps 5, 6 and 7 come from separate fixes (FIXES rows 216, 217, 204): each in its own try so one failing patch
+            //    cannot leave the others uninstalled (live22 merge review, 23 Oct).
+            try
+            {
+                var landingTargeterType = FindType("Vehicles.LandingTargeter");
+                clearAllTargeters = MethodInvoker.GetHandler(GetDeclaredMethod(FindType("Vehicles.Targeters"), "ClearAllTargeters", Type.EmptyTypes));
+                landingInstanceGetter = AccessTools.DeclaredPropertyGetter(landingTargeterType, "Instance")
+                                        ?? throw new MissingMethodException(landingTargeterType.FullName, "get_Instance");
+                landingTargeterInstance = MethodInvoker.GetHandler(landingInstanceGetter);
+                landingTargeterQueueField = AccessTools.FieldRefAccess<Queue<Action>>(landingTargeterType, "targeterQueue");
+                MpCompat.harmony.Patch(AccessTools.DeclaredMethod(typeof(MemoryUtility), nameof(MemoryUtility.ClearAllMapsAndWorld)),
+                    prefix: new HarmonyMethod(typeof(VehicleFramework), nameof(StopTargetersBeforeReload)));
+            }
+            catch (Exception e)
+            {
+                Log.Error("MPCompat :: Vehicle Framework step 5 (stop targeters before reload, FIXES row 216) not installed: " + e);
+            }
 
             // 6. The landing picker's state is not read by game logic in MP.
-            var baseTargeterType = FindType("Vehicles.BaseTargeter");
-            isTargetingGetter = AccessTools.DeclaredPropertyGetter(baseTargeterType, "IsTargeting")
-                                ?? throw new MissingMethodException(baseTargeterType.FullName, "get_IsTargeting");
-            isTargeting = MethodInvoker.GetHandler(isTargetingGetter);
-            // Postfixes on MapPawns.AnyPawnBlockingMapRemoval and GameEnder.CheckOrUpdateGameOver
-            MpCompat.harmony.Patch(GetDeclaredMethod(FindType("Vehicles.Patch_MapHandling"), "AnyVehicleBlockingMapRemoval"),
-                transpiler: new HarmonyMethod(typeof(VehicleFramework), nameof(PickerStateNotInSim)));
-            MpCompat.harmony.Patch(GetDeclaredMethod(FindType("Vehicles.Patch_WorldHandling"), "GameEnderWithVehicles"),
-                transpiler: new HarmonyMethod(typeof(VehicleFramework), nameof(PickerStateNotInSim)));
+            try
+            {
+                var baseTargeterType = FindType("Vehicles.BaseTargeter");
+                isTargetingGetter = AccessTools.DeclaredPropertyGetter(baseTargeterType, "IsTargeting")
+                                    ?? throw new MissingMethodException(baseTargeterType.FullName, "get_IsTargeting");
+                isTargeting = MethodInvoker.GetHandler(isTargetingGetter);
+                // Postfixes on MapPawns.AnyPawnBlockingMapRemoval and GameEnder.CheckOrUpdateGameOver
+                MpCompat.harmony.Patch(GetDeclaredMethod(FindType("Vehicles.Patch_MapHandling"), "AnyVehicleBlockingMapRemoval"),
+                    transpiler: new HarmonyMethod(typeof(VehicleFramework), nameof(PickerStateNotInSim)));
+                MpCompat.harmony.Patch(GetDeclaredMethod(FindType("Vehicles.Patch_WorldHandling"), "GameEnderWithVehicles"),
+                    transpiler: new HarmonyMethod(typeof(VehicleFramework), nameof(PickerStateNotInSim)));
+            }
+            catch (Exception e)
+            {
+                Log.Error("MPCompat :: Vehicle Framework step 6 (picker state out of game logic, FIXES row 217) not installed: " + e);
+            }
 
             // 7. Caravan forming through Multiplayer's CaravanFormingProxy window: VF's Send / Change route code reads a static that is
             // null for that window.
-            PatchCaravanDialog();
+            try
+            {
+                PatchCaravanDialog();
+            }
+            catch (Exception e)
+            {
+                Log.Error("MPCompat :: Vehicle Framework step 7 (caravan forming window, FIXES row 204) not installed: " + e);
+            }
         }
 
         private static void PatchCaravanDialog()
