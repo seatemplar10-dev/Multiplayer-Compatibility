@@ -33,6 +33,22 @@ namespace Multiplayer.Compat
                 else Log.Error("Could not find TimeControlPatch:DoTimeControlsHotkeys, speed control hot keys won't work with disabled/hidden speed control UI.");
             }
 
+            // Plant TickLong throttle off in MP (FIXES row 222, the live 22 Oct 20:19 desync from James's Desync-06): Optimization_Plant_TickLong
+            // skips most TickLongs of wild plants through a per-process cache (thingID -> last full TickLong) and makes the ones that run step
+            // age/growth by the throttle interval instead of 2000. One dandelion ran its full TickLong ("dying" damage, 2 Rand draws) on the
+            // joiner's PC only. In MP the prefix always lets TickLong run and ShouldBeThrottled is false, so ThrottleRateInt/Float give
+            // vanilla's 2000 and every plant ticks as in vanilla on every PC. Single player keeps the optimization.
+            {
+                var plantPrefix = AccessTools.DeclaredMethod("PerformanceOptimizer.Optimization_Plant_TickLong:Prefix");
+                var shouldBeThrottled = AccessTools.DeclaredMethod("PerformanceOptimizer.Optimization_Plant_TickLong:ShouldBeThrottled");
+                if (plantPrefix != null && shouldBeThrottled != null)
+                {
+                    MpCompat.harmony.Patch(plantPrefix, prefix: new HarmonyMethod(typeof(PerformanceOptimizer), nameof(PlantTickLongAlwaysRunsInMp)));
+                    MpCompat.harmony.Patch(shouldBeThrottled, prefix: new HarmonyMethod(typeof(PerformanceOptimizer), nameof(PlantNeverThrottledInMp)));
+                }
+                else Log.Error("Could not find Optimization_Plant_TickLong Prefix/ShouldBeThrottled, the plant throttle stays on in MP and can desync (FIXES row 222).");
+            }
+
             // Clear cache on join, etc.
             {
                 var resetDataMethod = AccessTools.DeclaredMethod("PerformanceOptimizer.PerformanceOptimizerMod:ResetStaticData");
@@ -218,6 +234,26 @@ namespace Multiplayer.Compat
         // ReturnCorrectCache told the simulation from the interface: "not MP.InInterface" is also true while a long event runs or Multiplayer.reloading is set,
         // and windows (Moody's WindowUpdate -> DataCache.UpdateCache) keep running then. See IsSimulation below. With the simulation decided positively the
         // optimization is kept (its interface twin serves the UI), so no Performance Optimizer optimization is removed any more.
+
+        #region Plant throttle (FIXES row 222)
+
+        private static bool PlantTickLongAlwaysRunsInMp(ref bool __result)
+        {
+            if (!MP.IsInMultiplayer)
+                return true;
+            __result = true;
+            return false;
+        }
+
+        private static bool PlantNeverThrottledInMp(ref bool __result)
+        {
+            if (!MP.IsInMultiplayer)
+                return true;
+            __result = false;
+            return false;
+        }
+
+        #endregion
 
         #region Cache clearing patch
 
