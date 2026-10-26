@@ -22,7 +22,9 @@ namespace Multiplayer.Compat
     /// does not: lab C2 soak, host 38 entries vs joiner 33 at the joiner's first checkpoint. Removals also leave holes in the dictionary that
     /// later adds fill, so the save order can differ after a load. Nothing in the game reads these entries (lookups are by a live pawn), so
     /// only saves differed. In MP, before the save, the entries a load would not get back are dropped and the rest are put back sorted by
-    /// thing id: every PC writes what a PC that just loaded writes.
+    /// thing id: every PC writes what a PC that just loaded writes. The dictionary is static and the mod never clears it on a game load, so a PC
+    /// that reloads in-process (the host at every join point) also keeps the previous load's entries: in MP it is cleared when a game loads,
+    /// and the load fills it from the save alone, like a fresh process (the joiner).
     /// </remarks>
     [MpCompatFor("VanillaExpanded.VanillaFoodVarietyExpanded")]
     internal class VanillaFoodVarietyExpanded
@@ -47,9 +49,14 @@ namespace Multiplayer.Compat
 
         private static void PreExposeData()
         {
-            if (!MP.IsInMultiplayer || Scribe.mode != LoadSaveMode.Saving)
+            if (!MP.IsInMultiplayer || pawnsAndDietField.GetValue(null) is not IDictionary dict || dict.Count == 0)
                 return;
-            if (pawnsAndDietField.GetValue(null) is not IDictionary dict || dict.Count == 0)
+            if (Scribe.mode == LoadSaveMode.LoadingVars)
+            {
+                dict.Clear();   // entries of the previous load; PostLoadInit refills it from the save
+                return;
+            }
+            if (Scribe.mode != LoadSaveMode.Saving)
                 return;
 
             var keep = new List<DictionaryEntry>(dict.Count);
