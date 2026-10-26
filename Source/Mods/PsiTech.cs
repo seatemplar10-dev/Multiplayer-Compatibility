@@ -109,6 +109,24 @@ namespace Multiplayer.Compat
         private static Game uiTrackersGame;
         private static bool loggedWatchError, loggedPlaceholderError, loggedPatchError;
 
+        // LAB ONLY (26 Oct, tempdiag t3: nextTrackerId host 7817 vs joiner 7774 right after a Settle): MPLAB_PSITRACE=1 logs every real
+        // tracker creation and every placeholder, to diff host and joiner. Never set outside the lab.
+        private static readonly bool psiTrace = Environment.GetEnvironmentVariable("MPLAB_PSITRACE") == "1";
+
+        private static void TracePsi(string kind, Pawn pawn)
+        {
+            var frames = new System.Diagnostics.StackTrace(2, false).GetFrames();
+            var sb = new System.Text.StringBuilder();
+            for (int i = 0; i < frames.Length && i < 8; i++)
+            {
+                var m = frames[i].GetMethod();
+                if (m != null) sb.Append(" < ").Append(m.DeclaringType?.Name).Append('.').Append(m.Name);
+            }
+            Log.Message($"{LogPrefix}PSITRACE {kind} tick={Find.TickManager?.TicksGame} pawn={pawn.ThingID} faction={pawn.Faction?.loadID} " +
+                        $"map={pawn.MapHeld?.uniqueID} state={Current.ProgramState} thread={Environment.CurrentManagedThreadId} " +
+                        $"interface={MP.InInterface} longEvent={LongEventHandler.currentEvent?.eventTextKey}{sb}");
+        }
+
         public PsiTech(ModContentPack mod) => LongEventHandler.ExecuteWhenFinished(LatePatch);
 
         #region Registration
@@ -657,6 +675,8 @@ namespace Multiplayer.Compat
                 // The real tracker is (or is about to be) made by the original on every PC; drop the placeholder of this pawn.
                 if (uiTrackers.Count != 0)
                     uiTrackers.Remove(pawn);
+                if (psiTrace && managerTrackersField.GetValue(__instance) is IDictionary existing && !existing.Contains(pawn))
+                    TracePsi("REAL", pawn);
                 return true;
             }
 
@@ -677,6 +697,8 @@ namespace Multiplayer.Compat
                     // saved id counter and the manager's dictionary.
                     placeholder = trackerCtor.Invoke([pawn, -1]);
                     uiTrackers[pawn] = placeholder;
+                    if (psiTrace)
+                        TracePsi("PLACEHOLDER", pawn);
                     trackerInitializeCaches.Invoke(placeholder, null);
                     trackerNotifyEssenceDirty.Invoke(placeholder, null);
                 }
