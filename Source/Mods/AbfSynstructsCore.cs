@@ -33,6 +33,10 @@ namespace Multiplayer.Compat
     /// <c>dest.SetFaction(oldFaction)</c> (Pawn.cs:2702: adaptDays reset, ClearMind, surgery bills cleared, GameEnder check...) on the PCs that
     /// reloaded after building (the host at every join point) and not on the PC that built after loading. With the cache dropped every PC rebuilds it
     /// after its latest load, under (1) and (2) at no cost to the shared state.
+    /// <para/>
+    /// FIXES row 245 (26 Oct 2026, DetScan reload-residue mode): <c>JobGiver_BuildCoherenceIdle.cachedPawnCoherenceSpots</c> is a static cache
+    /// keyed by the pawn's thingIDNumber, never cleared: after the reload the host reuses its cached spot while a joiner calls FindCoherenceSpot,
+    /// so the job target can differ. It is cleared on the same hook as the blank.
     /// </remarks>
     [MpCompatFor("killathon.artificialbeings.syncore")]
     internal class AbfSynstructsCore
@@ -43,6 +47,7 @@ namespace Multiplayer.Compat
         private static FieldInfo[] idFields;
         private static FieldInfo blankPawnField;
         private static FieldInfo adaptDaysField;
+        private static FieldInfo coherenceSpotsField;
 
         private static bool building;
         private static int[] savedIds;
@@ -60,6 +65,8 @@ namespace Multiplayer.Compat
                 ?? throw new MissingFieldException("ArtificialBeings.SC_Utils", "blankPawn");
             adaptDaysField = AccessTools.DeclaredField(typeof(StoryWatcher_PopAdaptation), "adaptDays")
                 ?? throw new MissingFieldException(nameof(StoryWatcher_PopAdaptation), "adaptDays");
+            coherenceSpotsField = AccessTools.DeclaredField("ArtificialBeings.JobGiver_BuildCoherenceIdle:cachedPawnCoherenceSpots")
+                ?? throw new MissingFieldException("ArtificialBeings.JobGiver_BuildCoherenceIdle", "cachedPawnCoherenceSpots");
 
             // 1.7 lab, FIXES row 145: save/restore ids, adaptDays and Rand around the one-per-process blank pawn build
             var getBlank = AccessTools.DeclaredMethod("ArtificialBeings.SC_Utils:GetBlank")
@@ -73,7 +80,12 @@ namespace Multiplayer.Compat
                 postfix: new HarmonyMethod(typeof(AbfSynstructsCore), nameof(ForgetBlank)));
         }
 
-        private static void ForgetBlank() => blankPawnField.SetValue(null, null);
+        private static void ForgetBlank()
+        {
+            blankPawnField.SetValue(null, null);
+            // FIXES row 245: read the field each time, it is not readonly
+            (coherenceSpotsField.GetValue(null) as System.Collections.IDictionary)?.Clear();
+        }
 
         private static void BeginBlank(out bool __state)
         {
