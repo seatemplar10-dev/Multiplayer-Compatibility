@@ -111,6 +111,41 @@ namespace Multiplayer.Compat
             PatchStaleCaches();
             PatchInterfaceReadOnly();
             PatchGeneSaveHook();
+            PatchBsTrace();
+        }
+
+        // LAB ONLY (26 Oct, FIXES row 248, tempdiag t4: a joiner's Settle pawn saved BS_ApparentAge one float step apart): MPLAB_BSTRACE=1 logs
+        // every BSCache.RegenerateCache of a player-faction or negative-id pawn, to diff host and joiner. Never set outside the lab.
+        private static readonly bool bsTrace = Environment.GetEnvironmentVariable("MPLAB_BSTRACE") == "1";
+        private static FieldInfo bsTraceAgeField;
+
+        private static void PatchBsTrace()
+        {
+            if (!bsTrace)
+                return;
+            var bsCacheType = FindType("BigAndSmall.BSCache");
+            bsTraceAgeField = AccessTools.DeclaredField(bsCacheType, "apparentAge");
+            bsCachePawnField ??= AccessTools.Field(bsCacheType, "pawn");
+            MpCompat.harmony.Patch(GetDeclaredMethod(bsCacheType, "RegenerateCache"),
+                postfix: new HarmonyMethod(typeof(BigAndSmall), nameof(PostRegenerateTrace)));
+        }
+
+        private static void PostRegenerateTrace(object __instance, bool __result)
+        {
+            if (bsCachePawnField.GetValue(__instance) is not Pawn pawn || (pawn.thingIDNumber >= 0 && pawn.Faction is not { IsPlayer: true }))
+                return;
+            var frames = new System.Diagnostics.StackTrace(2, false).GetFrames();
+            var sb = new System.Text.StringBuilder();
+            for (int i = 0; i < frames.Length && i < 8; i++)
+            {
+                var m = frames[i].GetMethod();
+                if (m != null) sb.Append(" < ").Append(m.DeclaringType?.Name).Append('.').Append(m.Name);
+            }
+            float age = (float)bsTraceAgeField.GetValue(__instance);
+            Log.Message($"{LogPrefix}BSTRACE regen tick={Find.TickManager?.TicksGame} bsTick={internalTickField.GetValue(null)} pawn={pawn.ThingID} " +
+                        $"obj={System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(pawn)} faction={pawn.Faction?.loadID} " +
+                        $"ageTicks={pawn.ageTracker?.AgeBiologicalTicks} apparent={age:R} result={__result} interface={MP.InInterface} " +
+                        $"state={Current.ProgramState}{sb}");
         }
 
         #region Tick counter, globalRandNum, stale statics
