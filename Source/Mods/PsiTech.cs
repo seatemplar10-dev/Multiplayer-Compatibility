@@ -60,6 +60,13 @@ namespace Multiplayer.Compat
     /// 3 stale trackers on the host only, nextTrackerId 4656 vs 4661). The placeholder dictionary compares by reference, so a page pawn and
     /// its rebuilt copy (Pawn.Equals = def + id) never share a placeholder and a renumbered key is still found.
     ///
+    /// D. FIXES row 247 (26 Oct 2026): <c>PsiTechManager.ExposeData</c> prunes every non-activated tracker and non-psychic equipment tracker on
+    /// EVERY save, and turns each dead psion's tracker into a DeadTracker (detached from its pawn). The next lookup then makes a new tracker
+    /// with <c>nextTrackerId++</c>, so the counter counts saves. A save on one PC only (the Esc menu Save: <c>SaveLoad.SaveGameData</c>; the lab's
+    /// checkpoint while it skipped one PC) split the counter, and with it the tick phase of every later tracker. In MP a Saving pass now puts
+    /// the manager's live state back afterwards (a finalizer, so a failed save does too). The file is written as before, and a load (join point,
+    /// joiner) still gets the pruned state on every PC.
+    ///
     /// Per-PC reads inside the synced bodies: none (they use only the objects found above, Defs and DefDatabase lists, no selection, no
     /// <c>Find.CurrentMap</c>, no settings, no Rand).
     /// NOT covered: the rest of <c>PawnPsiCard</c> / <c>ITab_Pawn_Psi</c> (energy and focus nodes, training queue, ability slots) edits the tracker
@@ -80,6 +87,7 @@ namespace Multiplayer.Compat
 
         // PsiTechManager / PsiTechTracker
         private static FieldInfo managerTrackersField, trackerAbilitiesField, trackerPawnField;
+        private static FieldInfo managerEquipmentField, managerDeadTrackersField;
         private static ConstructorInfo trackerCtor;
         private static MethodInfo trackerInitializeCaches, trackerNotifyEssenceDirty;
 
@@ -210,6 +218,12 @@ namespace Multiplayer.Compat
             Try("tracker placeholder", () =>
                 MpCompat.harmony.Patch(AccessTools.DeclaredMethod(managerType, "get_Item", [typeof(Pawn)]),
                     prefix: new HarmonyMethod(typeof(PsiTech), nameof(PreGetTracker))));
+
+            // FIXES row 247 (point D): a save leaves the manager's live state as it was.
+            Try("save keeps the live trackers", () =>
+                MpCompat.harmony.Patch(AccessTools.DeclaredMethod(managerType, "ExposeData"),
+                    prefix: new HarmonyMethod(typeof(PsiTech), nameof(PreManagerExposeData)),
+                    finalizer: new HarmonyMethod(typeof(PsiTech), nameof(FinalManagerExposeData))));
         }
 
         private static void Resolve()
@@ -230,6 +244,8 @@ namespace Multiplayer.Compat
             var conditionDefType = Req(NS + "AutocastConditionDef");
 
             managerTrackersField = Fld(managerType, "trackers");
+            managerEquipmentField = Fld(managerType, "equipmentTrackers");
+            managerDeadTrackersField = Fld(managerType, "deadTrackers");
             trackerAbilitiesField = Fld(trackerType, "Abilities");
             trackerPawnField = Fld(trackerType, "pawn");
             trackerCtor = AccessTools.DeclaredConstructor(trackerType, [typeof(Pawn), typeof(int)])
@@ -708,6 +724,78 @@ namespace Multiplayer.Compat
             }
         }
 
+        // FIXES row 247 (point D): the manager's live state before a Saving pass, put back by the finalizer.
+        private sealed class ManagerLiveState
+        {
+            public DictionaryEntry[] trackers, equipment, dead;
+            public (object tracker, object pawn, IList abilities, object[] users)[] attachments;
+        }
+
+        private static int restoredSaves;
+
+        private static void PreManagerExposeData(object __instance, out ManagerLiveState __state)
+        {
+            __state = null;
+            if (Scribe.mode != LoadSaveMode.Saving || !MP.IsInMultiplayer)
+                return;
+
+            try
+            {
+                var state = new ManagerLiveState
+                {
+                    trackers = Entries(managerTrackersField.GetValue(__instance)),
+                    equipment = Entries(managerEquipmentField.GetValue(__instance)),
+                    dead = Entries(managerDeadTrackersField.GetValue(__instance)),
+                };
+                // the save detaches a dead psion's tracker (tracker.pawn and every ability's User set to null): keep both to put back
+                state.attachments = new (object, object, IList, object[])[state.trackers?.Length ?? 0];
+                for (int i = 0; i < state.attachments.Length; i++)
+                {
+                    object tracker = state.trackers[i].Value;
+                    var abilities = tracker == null ? null : trackerAbilitiesField.GetValue(tracker) as IList;
+                    var users = new object[abilities?.Count ?? 0];
+                    for (int j = 0; j < users.Length; j++)
+                        users[j] = abilities[j] == null ? null : abilityUserField.GetValue(abilities[j]);
+                    state.attachments[i] = (tracker, tracker == null ? null : trackerPawnField.GetValue(tracker), abilities, users);
+                }
+                __state = state;
+            }
+            catch (Exception e)
+            {
+                LogPatchError("row 247: reading the manager before a save failed, this save may prune trackers on this PC", e);
+            }
+        }
+
+        private static void FinalManagerExposeData(object __instance, ManagerLiveState __state)
+        {
+            if (__state == null)
+                return;
+
+            try
+            {
+                int pruned = (__state.trackers?.Length ?? 0) - ((managerTrackersField.GetValue(__instance) as IDictionary)?.Count ?? 0);
+                Restore(managerTrackersField.GetValue(__instance), __state.trackers);
+                Restore(managerEquipmentField.GetValue(__instance), __state.equipment);
+                Restore(managerDeadTrackersField.GetValue(__instance), __state.dead);
+                foreach (var (tracker, pawn, abilities, users) in __state.attachments)
+                {
+                    if (tracker == null || ReferenceEquals(trackerPawnField.GetValue(tracker), pawn))
+                        continue;
+                    trackerPawnField.SetValue(tracker, pawn);
+                    for (int j = 0; j < users.Length && j < abilities.Count; j++)
+                        if (abilities[j] != null)
+                            abilityUserField.SetValue(abilities[j], users[j]);
+                }
+
+                if (++restoredSaves <= 3)
+                    Log.Message($"{LogPrefix}FIXES row 247: save {restoredSaves} in MP kept the live trackers ({pruned} would have been pruned)");
+            }
+            catch (Exception e)
+            {
+                LogPatchError("row 247: putting the manager back after a save failed", e);
+            }
+        }
+
         private static void LogPatchError(string what, Exception e)
         {
             if (loggedPatchError)
@@ -715,6 +803,24 @@ namespace Multiplayer.Compat
 
             loggedPatchError = true;
             Log.Error($"{LogPrefix}{what} (logged once): {e}");
+        }
+
+        private static DictionaryEntry[] Entries(object value)
+        {
+            if (value is not IDictionary dict)
+                return null;
+            var entries = new DictionaryEntry[dict.Count];
+            dict.CopyTo(entries, 0);
+            return entries;
+        }
+
+        private static void Restore(object value, DictionaryEntry[] entries)
+        {
+            if (entries == null || value is not IDictionary dict)
+                return;
+            dict.Clear();
+            foreach (var e in entries)
+                dict.Add(e.Key, e.Value);
         }
 
         #endregion
