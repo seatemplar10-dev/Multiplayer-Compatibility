@@ -52,6 +52,13 @@ namespace Multiplayer.Compat
     /// (same constructor, <c>InitializeCaches</c> and <c>Notify_EssenceDirty</c> as the original, id -1, kept in a private dictionary of this module, not in
     /// the manager and not counted). When the sim needs the pawn's tracker it gets the real one made by the original code, and the placeholder is dropped.
     /// Same idea and shape as the Big and Small module's <c>PreGetCache</c>.
+    /// FIXES row 192 (26 Oct 2026): a pawn with a NEGATIVE thing id gets the placeholder too, inside or outside the interface. Two kinds exist:
+    /// the multifaction starting-pawn page's pawns (generated on the joiner only, under ProgramState.Entry, so MP.InInterface is false) and a
+    /// SendPawn pawn while its command rebuilds it on every PC (Multiplayer renumbers it at the end of cross-ref resolution, UniqueIds.cs:134).
+    /// Before: the joiner made real trackers for all 8 page pawns (nextTrackerId +8 there), and on the host the rebuilt pawn's tracker went
+    /// into the dictionary under hash -4, then the pawn became Human33138 = an entry the save-time prune can no longer remove (lab round 1:
+    /// 3 stale trackers on the host only, nextTrackerId 4656 vs 4661). The placeholder dictionary compares by reference, so a page pawn and
+    /// its rebuilt copy (Pawn.Equals = def + id) never share a placeholder and a renumbered key is still found.
     ///
     /// Per-PC reads inside the synced bodies: none (they use only the objects found above, Defs and DefDatabase lists, no selection, no
     /// <c>Find.CurrentMap</c>, no settings, no Rand).
@@ -98,7 +105,7 @@ namespace Multiplayer.Compat
         private static ISyncField additionalInvertedSync, addThresholdIntSync, addThresholdPercentSync;
 
         // UI placeholders (point C)
-        private static readonly Dictionary<Pawn, object> uiTrackers = new();
+        private static readonly Dictionary<Pawn, object> uiTrackers = new(ReferenceEqualityComparer.Instance);
         private static Game uiTrackersGame;
         private static bool loggedWatchError, loggedPlaceholderError, loggedPatchError;
 
@@ -638,13 +645,14 @@ namespace Multiplayer.Compat
                 MP.WatchEnd();
         }
 
-        // PsiTechManager[Pawn] (point C). Only while MP.InInterface; ticks, synced commands and loading run the original, which creates the real tracker.
+        // PsiTechManager[Pawn] (point C). Only while MP.InInterface or for a pawn with a negative thing id (row 192); ticks, synced commands and
+        // loading run the original for every other pawn, which creates the real tracker.
         private static bool PreGetTracker(object __instance, Pawn pawn, ref object __result)
         {
             if (pawn == null || !MP.IsInMultiplayer)
                 return true;
 
-            if (!MP.InInterface)
+            if (!MP.InInterface && pawn.thingIDNumber >= 0)
             {
                 // The real tracker is (or is about to be) made by the original on every PC; drop the placeholder of this pawn.
                 if (uiTrackers.Count != 0)
@@ -678,11 +686,22 @@ namespace Multiplayer.Compat
             }
             catch (Exception e)
             {
-                uiTrackers.Remove(pawn);
+                // Row 192: a negative-id pawn must never reach the original (it would register a tracker under its pre-renumber id).
+                // If the constructor ran but InitializeCaches / Notify_EssenceDirty threw (e.g. mid-load), it keeps the bare placeholder.
+                bool keepBare = pawn.thingIDNumber < 0 && uiTrackers.TryGetValue(pawn, out var bare) && bare != null;
+                if (!keepBare)
+                    uiTrackers.Remove(pawn);
                 if (!loggedPlaceholderError)
                 {
                     loggedPlaceholderError = true;
-                    Log.Error($"{LogPrefix}placeholder tracker failed, falling back to the mod's own behaviour (logged once): {e}");
+                    Log.Error($"{LogPrefix}placeholder tracker failed, " +
+                              (keepBare ? "negative-id pawn keeps a bare placeholder" : "falling back to the mod's own behaviour") + $" (logged once): {e}");
+                }
+
+                if (keepBare)
+                {
+                    __result = uiTrackers[pawn];
+                    return false;
                 }
 
                 return true;

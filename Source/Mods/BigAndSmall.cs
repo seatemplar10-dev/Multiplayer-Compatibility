@@ -54,6 +54,15 @@ namespace Multiplayer.Compat
     /// 8. The Gene.ExposeData postfix registers every gene with a frequent-update extension into
     ///    frequentUpdateGenes with its current Active value, also when SAVING - only the host saves (join
     ///    points, autosaves). Fix: in MP, a save leaves frequentUpdateGenes as it was.
+    /// 9. FIXES row 192 (26 Oct 2026): ScribedCache kept entries of pawns that exist on one PC only or no longer at all:
+    ///    the multifaction starting-pawn page's pawns (generated on the joiner only, under ProgramState.Entry, so
+    ///    MP.InInterface is false; GeneratePawns_Patch registers all 8) and a SendPawn pawn's junk entry made while its
+    ///    command rebuilt it ("Human-4" on the host: Multiplayer renumbers the pawn only at the end of cross-ref
+    ///    resolution). Lab round 1: ScribedCache 433 (host) vs 438 (joiner) at the first checkpoint after a Settle.
+    ///    The page keeps B&S's normal caches (they shape the starting pawns: size, gear limits, race); in MP every save
+    ///    first drops entries whose pawn has a negative thing id or no longer carries the entry's id, and entries
+    ///    without a pawn whose id ends in a negative number. The set is rebuilt in its own order, so the PCs that keep
+    ///    the same entries write them in the same order.
     /// Everything is MP only: outside a session nothing is written to saves and nothing changes.
     /// Not handled here: unsynced UI actions (drafted-pawn toggles, gene picker dialog, resource
     /// sliders, recolor window), and stale pre-reload Pawns that other mods' statics hand to Big and Small.
@@ -88,6 +97,11 @@ namespace Multiplayer.Compat
         private static FieldInfo defaultCacheField;
         private static ConstructorInfo bsCacheCtor;
 
+        // Row 192 save-time purge (point 9)
+        private static PropertyInfo scribedCacheProp;
+        private static FieldInfo bsCachePawnField, bsCacheIdField;
+        private static int purgeLogged;
+
         public BigAndSmall(ModContentPack mod)
         {
             PatchTickCounter();
@@ -118,7 +132,55 @@ namespace Multiplayer.Compat
             MpCompat.harmony.Patch(AccessTools.DeclaredMethod(typeof(Game), nameof(Game.LoadGame)),
                 prefix: new HarmonyMethod(typeof(BigAndSmall), nameof(PreLoadGame)));
             MpCompat.harmony.Patch(GetDeclaredMethod(cacheType, nameof(GameComponent.ExposeData)),
+                prefix: new HarmonyMethod(typeof(BigAndSmall), nameof(PreCacheExposeData)),
                 postfix: new HarmonyMethod(typeof(BigAndSmall), nameof(PostCacheExposeData)));
+
+            var bsCacheType = FindType("BigAndSmall.BSCache");
+            scribedCacheProp = AccessTools.Property(cacheType, "ScribedCache")
+                               ?? throw new MissingMemberException(cacheType.FullName, "ScribedCache");
+            bsCachePawnField = AccessTools.Field(bsCacheType, "pawn");
+            bsCacheIdField = AccessTools.Field(bsCacheType, "id");
+            if (bsCachePawnField?.FieldType != typeof(Pawn) || bsCacheIdField?.FieldType != typeof(string))
+                throw new MissingFieldException($"{LogPrefix}BSCache.pawn (Pawn) / BSCache.id (string) not found");
+        }
+
+        // Point 9: before the cache component writes ScribedCache, drop the entries of pawns that are not (or no longer) the entry's pawn.
+        private static void PreCacheExposeData()
+        {
+            if (!MP.IsInMultiplayer || Scribe.mode != LoadSaveMode.Saving)
+                return;
+
+            if (scribedCacheProp.GetValue(null) is not IEnumerable set)
+                return;
+
+            var keep = new List<object>();
+            var dropped = new List<string>();
+            foreach (var entry in set)
+            {
+                if (entry == null) continue;
+                var pawn = (Pawn)bsCachePawnField.GetValue(entry);
+                var id = (string)bsCacheIdField.GetValue(entry);
+                bool ghost = pawn != null
+                    ? pawn.thingIDNumber < 0 || id != pawn.ThingID
+                    : id != null && System.Text.RegularExpressions.Regex.IsMatch(id, @"-\d+$");
+                if (ghost) dropped.Add(id); else keep.Add(entry);
+            }
+
+            if (dropped.Count == 0)
+                return;
+
+            // Rebuilt in enumeration order: Clear resets the set's slots, so the kept entries are written in the order they had.
+            var setType = set.GetType();
+            setType.GetMethod("Clear")!.Invoke(set, null);
+            var add = setType.GetMethod("Add")!;
+            foreach (var entry in keep)
+                add.Invoke(set, new[] { entry });
+
+            if (purgeLogged < 20)
+            {
+                purgeLogged++;
+                Log.Message($"{LogPrefix}row 192: {dropped.Count} ScribedCache entr(ies) of page / pre-renumber pawns not saved: {string.Join(", ", dropped)}");
+            }
         }
 
         // Runs before Game.ExposeSmallComponents, so everything the new game registers while loading is kept.
@@ -215,7 +277,6 @@ namespace Multiplayer.Compat
             bsCacheCtor = bsCacheType.GetConstructor(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
                               null, new[] { typeof(Pawn) }, null)
                           ?? throw new MissingMethodException(bsCacheType.FullName, ".ctor(Pawn)");
-
             var getCache = AccessTools.DeclaredMethod(scalerType, "GetCache",
                                new[] { typeof(Pawn), typeof(bool), typeof(bool), typeof(int), typeof(bool) })
                            ?? throw new MissingMethodException(scalerType.FullName, "GetCache(Pawn, bool, bool, int, bool)");

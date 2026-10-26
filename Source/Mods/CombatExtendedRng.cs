@@ -19,6 +19,11 @@ namespace Multiplayer.Compat
     /// the pawn renderer patch writes (the headless arbiter never draws), gated by <c>position.Walkable</c> and by the
     /// per-PC setting <c>CreateCasingsFilth</c> -> one PC makes an extra filth thing and every later thing id shifts.
     /// In MP no casing filth is made (the visual casing flecks are unchanged).
+    /// FIXES row 192 lead (26 Oct 2026, lab round 1 run B): <c>WorldObjectTrackerCE.TryRegister</c> (WorldObjects/WorldObjectTrackerCE.cs:119)
+    /// puts a new world object into one of 15 throttled tick buckets, breaking ties with <c>Rand.Chance(0.5f)</c> on the shared stream.
+    /// The settlement of a new multifaction player faction landed in different buckets on host and joiner (its HostilityRaider ticksToRaid
+    /// -4036 vs -4021 at the next checkpoint), and every draw there moves the stream for what follows. In MP the tie-breaks draw from a state
+    /// seeded by the object's synced ID inside Push/PopState: same bucket on every PC, shared stream untouched.
     /// </remarks>
     [MpCompatFor("CETeam.CombatExtended")]
     internal class CombatExtendedRng
@@ -32,8 +37,28 @@ namespace Multiplayer.Compat
                 ?? throw new System.MissingMethodException("CombatExtended.CE_Utility", "MakeCasingFilth");
             MpCompat.harmony.Patch(makeCasingFilth,
                 prefix: new HarmonyLib.HarmonyMethod(typeof(CombatExtendedRng), nameof(NoCasingFilthInMp)));
+
+            var tryRegister = HarmonyLib.AccessTools.DeclaredMethod("CombatExtended.WorldObjects.WorldObjectTrackerCE:TryRegister",
+                                  new[] { typeof(RimWorld.Planet.WorldObject) })
+                              ?? throw new System.MissingMethodException("CombatExtended.WorldObjects.WorldObjectTrackerCE", "TryRegister(WorldObject)");
+            MpCompat.harmony.Patch(tryRegister,
+                prefix: new HarmonyLib.HarmonyMethod(typeof(CombatExtendedRng), nameof(PreTryRegister)),
+                finalizer: new HarmonyLib.HarmonyMethod(typeof(CombatExtendedRng), nameof(FinalTryRegister)));
         }
 
         private static bool NoCasingFilthInMp() => !Multiplayer.API.MP.IsInMultiplayer;
+
+        private static void PreTryRegister(RimWorld.Planet.WorldObject worldObject, out bool __state)
+        {
+            __state = Multiplayer.API.MP.IsInMultiplayer && worldObject != null;
+            if (__state)
+                Rand.PushState(Gen.HashCombineInt(worldObject.ID, 0x5EA192));
+        }
+
+        private static void FinalTryRegister(bool __state)
+        {
+            if (__state)
+                Rand.PopState();
+        }
     }
 }
