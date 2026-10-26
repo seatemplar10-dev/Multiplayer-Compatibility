@@ -61,8 +61,9 @@ namespace Multiplayer.Compat
     ///    resolution). Lab round 1: ScribedCache 433 (host) vs 438 (joiner) at the first checkpoint after a Settle.
     ///    The page keeps B&S's normal caches (they shape the starting pawns: size, gear limits, race); in MP every save
     ///    first drops entries whose pawn has a negative thing id or no longer carries the entry's id, and entries
-    ///    without a pawn whose id ends in a negative number. The set is rebuilt in its own order, so the PCs that keep
-    ///    the same entries write them in the same order.
+    ///    without a pawn whose id ends in a negative number. The set is then rebuilt sorted by the entry's id (ordinal,
+    ///    stable): lab run r192_S2_1 had the same 432 entries on both PCs but the joiner's rebuilt pawns in another order
+    ///    (Human33170 before Human33166). B&S finds entries by id only (CheckForScribedEntry), so the order is not read.
     /// Everything is MP only: outside a session nothing is written to saves and nothing changes.
     /// Not handled here: unsynced UI actions (drafted-pawn toggles, gene picker dialog, resource
     /// sliders, recolor window), and stale pre-reload Pawns that other mods' statics hand to Big and Small.
@@ -166,17 +167,15 @@ namespace Multiplayer.Compat
                 if (ghost) dropped.Add(id); else keep.Add(entry);
             }
 
-            if (dropped.Count == 0)
-                return;
-
-            // Rebuilt in enumeration order: Clear resets the set's slots, so the kept entries are written in the order they had.
+            // Rebuilt sorted by id (stable, ordinal): Clear resets the set's slots, so the entries are written in exactly this order.
+            var sorted = keep.OrderBy(e => (string)bsCacheIdField.GetValue(e), StringComparer.Ordinal).ToList();
             var setType = set.GetType();
             setType.GetMethod("Clear")!.Invoke(set, null);
             var add = setType.GetMethod("Add")!;
-            foreach (var entry in keep)
+            foreach (var entry in sorted)
                 add.Invoke(set, new[] { entry });
 
-            if (purgeLogged < 20)
+            if (dropped.Count > 0 && purgeLogged < 20)
             {
                 purgeLogged++;
                 Log.Message($"{LogPrefix}row 192: {dropped.Count} ScribedCache entr(ies) of page / pre-renumber pawns not saved: {string.Join(", ", dropped)}");
