@@ -21,6 +21,7 @@ namespace Multiplayer.Compat
         private static FieldInfo managerInstanceField;
         private static FieldInfo[] managerPawnFields = Array.Empty<FieldInfo>();
         private static int pageDropLogged;
+        private static int compactLogged;
 
         public VanillaTraitsExpanded(ModContentPack mod)
         {
@@ -52,6 +53,15 @@ namespace Multiplayer.Compat
                     Log.Warning("[MPCompat - Vanilla Traits Expanded] FactionSidebar.RestoreGameStateAfterPages not found: page pawns stay in the trait lists (FIXES row 249)");
                 else
                     MpCompat.harmony.Patch(restore, prefix: new HarmonyMethod(typeof(VanillaTraitsExpanded), nameof(PreRestoreGameStateAfterPages)));
+
+                // A removal leaves a free slot that the next insert reuses, so the issuer's later inserts would enumerate (and save)
+                // in another order than the other PCs' (lab rgC6h_1: wanderLustersWithLastMapExitedTick same entries, other order).
+                // The Settle command rebuilds every list in place on all PCs, so all of them continue from the same compact layout.
+                var createFaction = AccessTools.Method("Multiplayer.Client.FactionCreator:CreateFaction");
+                if (createFaction == null)
+                    Log.Warning("[MPCompat - Vanilla Traits Expanded] FactionCreator.CreateFaction not found: trait lists are not compacted on Settle (FIXES row 249)");
+                else
+                    MpCompat.harmony.Patch(createFaction, prefix: new HarmonyMethod(typeof(VanillaTraitsExpanded), nameof(PreCreateFaction)));
             }
         }
 
@@ -88,20 +98,58 @@ namespace Multiplayer.Compat
                 switch (field.GetValue(manager))
                 {
                     case IDictionary dict:
-                        foreach (var pawn in dict.Keys.OfType<Pawn>().Where(IsPagePawn).ToList())
-                        {
+                        var pageKeys = dict.Keys.OfType<Pawn>().Where(IsPagePawn).ToList();
+                        foreach (var pawn in pageKeys)
                             dict.Remove(pawn);
-                            dropped++;
-                        }
+                        if (pageKeys.Count > 0)
+                            Compact(dict);
+                        dropped += pageKeys.Count;
                         break;
                     case ICollection<Pawn> pawns:
+                        int before = dropped;
                         foreach (var pawn in pawns.Where(IsPagePawn).ToList())
                             dropped += pawns.Remove(pawn) ? 1 : 0;
+                        if (dropped > before)
+                            Compact(pawns);
                         break;
                 }
             }
             if (pageDropLogged++ < 3)
                 Log.Message($"[MPCompat - Vanilla Traits Expanded] FIXES row 249: Settle pages done, {dropped} page pawn entries dropped from {managerPawnFields.Length} trait lists");
+        }
+
+        private static void PreCreateFaction()
+        {
+            if (!MP.IsInMultiplayer || !MP.IsExecutingSyncCommand)
+                return;
+            var manager = managerInstanceField?.GetValue(null);
+            if (manager == null)
+                return;
+
+            foreach (var field in managerPawnFields)
+                Compact(field.GetValue(manager));
+            if (compactLogged++ < 3)
+                Log.Message($"[MPCompat - Vanilla Traits Expanded] FIXES row 249: Settle command, {managerPawnFields.Length} trait lists compacted");
+        }
+
+        // Clear and re-add in enumeration order: same entries, same order, no free slots.
+        private static void Compact(object collection)
+        {
+            switch (collection)
+            {
+                case IDictionary dict:
+                    var entries = dict.Cast<DictionaryEntry>().ToList();
+                    dict.Clear();
+                    foreach (var entry in entries)
+                        dict.Add(entry.Key, entry.Value);
+                    break;
+                case ICollection<Pawn> pawns:
+                    var items = pawns.ToList();
+                    pawns.Clear();
+                    foreach (var pawn in items)
+                        pawns.Add(pawn);
+                    break;
+            }
         }
     }
 }
