@@ -64,6 +64,13 @@ namespace Multiplayer.Compat
     ///    without a pawn whose id ends in a negative number. The set is then rebuilt sorted by the entry's id (ordinal,
     ///    stable): lab run r192_S2_1 had the same 432 entries on both PCs but the joiner's rebuilt pawns in another order
     ///    (Human33170 before Human33166). B&S finds entries by id only (CheckForScribedEntry), so the order is not read.
+    /// 10. FIXES row 248 (27 Oct 2026): after the Settle pages send, the issuer still holds its page pawns (negative ids)
+    ///    in DictCache.Cache / JunkCache, the refresh queue (whose sorted refill puts them first) and the scheduled
+    ///    refreshes. The SendPawn commands rebuild each pawn with its page id (renumbered only at the end of cross-ref
+    ///    resolution), so on the issuer only its lookups hit the page pawn's entry. Lab run t6soak_1: a Settle pawn's
+    ///    first refresh ran 29 ticks apart, so its saved apparent age differed in the last float bit (t4, t5).
+    ///    Fix: in MP, a prefix on our Multiplayer build's FactionSidebar.RestoreGameStateAfterPages (pages sent or
+    ///    closed, issuer only, before any command of the Settle runs) drops every page pawn from those places.
     /// Everything is MP only: outside a session nothing is written to saves and nothing changes.
     /// Not handled here: unsynced UI actions (drafted-pawn toggles, gene picker dialog, resource
     /// sliders, recolor window), and stale pre-reload Pawns that other mods' statics hand to Big and Small.
@@ -111,6 +118,7 @@ namespace Multiplayer.Compat
             PatchStaleCaches();
             PatchInterfaceReadOnly();
             PatchGeneSaveHook();
+            PatchSettlePages();
         }
 
         #region Tick counter, globalRandNum, stale statics
@@ -428,6 +436,94 @@ namespace Multiplayer.Compat
         // The escape menu does not pause Multiplayer; it is local UI state.
         private static bool SyncedNotPlaying(TickManager tickManager)
             => !MP.IsInMultiplayer && tickManager.NotPlaying;
+
+        #endregion
+
+        #region Settle pages done (point 10)
+
+        private static FieldInfo currentlyQueuedField, scheduleFullUpdateField, schedulePostUpdateField;
+        private static int pageDropLogged;
+
+        private static void PatchSettlePages()
+        {
+            var cacheType = FindType("BigAndSmall.BigAndSmallCache");
+            currentlyQueuedField = GetStaticField(cacheType, "currentlyQueued", null);
+            scheduleFullUpdateField = GetStaticField(cacheType, "scheduleFullUpdate", null);
+            schedulePostUpdateField = GetStaticField(cacheType, "schedulePostUpdate", null);
+
+            // An MP build without the method gets no cleanup; every other fix here still applies.
+            var restore = AccessTools.Method("Multiplayer.Client.Factions.FactionSidebar:RestoreGameStateAfterPages");
+            if (restore == null)
+            {
+                Log.Warning($"{LogPrefix}FactionSidebar.RestoreGameStateAfterPages not found: page pawns stay in the caches (FIXES row 248)");
+                return;
+            }
+            MpCompat.harmony.Patch(restore, prefix: new HarmonyMethod(typeof(BigAndSmall), nameof(PreRestoreGameStateAfterPages)));
+        }
+
+        private static void PreRestoreGameStateAfterPages()
+        {
+            if (!MP.IsInMultiplayer)
+                return;
+            try
+            {
+                int cache = DropPagePawnKeys((IDictionary)pawnCacheGetter());
+                int junk = DropPagePawnKeys((IDictionary)junkCacheField.GetValue(null));
+                int full = DropFromSchedule(scheduleFullUpdateField), post = DropFromSchedule(schedulePostUpdateField);
+                int queued = DropPageCaches(currentlyQueuedField.GetValue(null));
+                var queue = RefreshQueue;
+                var kept = queue.Where(p => !IsPagePawn(p)).ToList();
+                int refresh = queue.Count - kept.Count;
+                queue.Clear();
+                foreach (var pawn in kept)
+                    queue.Enqueue(pawn);
+                int morph = (pawnsQueuedForMorphingField.GetValue(null) as HashSet<Pawn>)?.RemoveWhere(IsPagePawn) ?? 0;
+                if (pageDropLogged++ < 3)
+                    Log.Message($"{LogPrefix}FIXES row 248: Settle pages done, page pawns dropped (cache {cache}, junk {junk}, " +
+                                $"refresh queue {refresh}, full {full}, post {post}, queued {queued}, morph {morph})");
+            }
+            catch (Exception e)
+            {
+                Log.Error($"{LogPrefix}FIXES row 248: page pawn cleanup failed: {e}");
+            }
+        }
+
+        private static bool IsPagePawn(Pawn pawn) => pawn != null && pawn.thingIDNumber < 0;
+
+        private static int DropPagePawnKeys(IDictionary dict)
+        {
+            var keys = dict.Keys.OfType<Pawn>().Where(IsPagePawn).ToList();
+            foreach (var key in keys)
+                dict.Remove(key);
+            return keys.Count;
+        }
+
+        // A HashSet<BSCache>: drops the caches whose pawn is a page pawn.
+        private static int DropPageCaches(object set)
+        {
+            if (set == null)
+                return 0;
+            var drop = ((IEnumerable)set).Cast<object>()
+                .Where(c => c != null && IsPagePawn((Pawn)bsCachePawnField.GetValue(c))).ToList();
+            var remove = set.GetType().GetMethod("Remove");
+            foreach (var c in drop)
+                remove.Invoke(set, new[] { c });
+            return drop.Count;
+        }
+
+        // Dictionary<int, HashSet<BSCache>> keyed by BS tick: a tick left without caches is removed too.
+        private static int DropFromSchedule(FieldInfo field)
+        {
+            var dict = (IDictionary)field.GetValue(null);
+            int dropped = 0;
+            foreach (var tick in dict.Keys.Cast<object>().ToList())
+            {
+                dropped += DropPageCaches(dict[tick]);
+                if (!((IEnumerable)dict[tick]).Cast<object>().Any())
+                    dict.Remove(tick);
+            }
+            return dropped;
+        }
 
         #endregion
 
