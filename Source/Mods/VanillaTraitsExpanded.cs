@@ -57,7 +57,7 @@ namespace Multiplayer.Compat
                 // A removal leaves a free slot that the next insert reuses, so the issuer's later inserts would enumerate (and save)
                 // in another order than the other PCs' (lab rgC6h_1: wanderLustersWithLastMapExitedTick same entries, other order).
                 // The Settle command rebuilds every list in place on all PCs, so all of them continue from the same compact layout.
-                var createFaction = AccessTools.Method("Multiplayer.Client.FactionCreator:CreateFaction");
+                var createFaction = AccessTools.Method("Multiplayer.Client.Factions.FactionCreator:CreateFaction");
                 if (createFaction == null)
                     Log.Warning("[MPCompat - Vanilla Traits Expanded] FactionCreator.CreateFaction not found: trait lists are not compacted on Settle (FIXES row 249)");
                 else
