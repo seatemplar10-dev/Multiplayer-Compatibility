@@ -138,7 +138,11 @@ namespace Multiplayer.Compat
             switch (collection)
             {
                 case IDictionary dict:
-                    var entries = dict.Cast<DictionaryEntry>().ToList();
+                    // foreach over IDictionary gives DictionaryEntry; Cast<DictionaryEntry>() goes through IEnumerable and gets
+                    // KeyValuePair (lab rgC6j_1: InvalidCastException in the page drop, the Settle failed)
+                    var entries = new List<DictionaryEntry>();
+                    foreach (DictionaryEntry entry in dict)
+                        entries.Add(entry);
                     dict.Clear();
                     foreach (var entry in entries)
                         dict.Add(entry.Key, entry.Value);
