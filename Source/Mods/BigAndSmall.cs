@@ -65,9 +65,10 @@ namespace Multiplayer.Compat
     ///    stable): lab run r192_S2_1 had the same 432 entries on both PCs but the joiner's rebuilt pawns in another order
     ///    (Human33170 before Human33166). B&S finds entries by id only (CheckForScribedEntry), so the order is not read.
     /// 10. FIXES row 248 (27 Oct 2026): after the Settle pages send, the issuer still holds its page pawns (negative ids)
-    ///    in DictCache.Cache / JunkCache, the refresh queue (whose sorted refill puts them first) and the scheduled
-    ///    refreshes. The SendPawn commands rebuild each pawn with its page id (renumbered only at the end of cross-ref
-    ///    resolution), so on the issuer only its lookups hit the page pawn's entry. Lab run t6soak_1: a Settle pawn's
+    ///    in DictCache.Cache / JunkCache, ScribedCache, the refresh queue (whose sorted refill puts them first) and the
+    ///    scheduled refreshes. The SendPawn commands rebuild each pawn with its page id (renumbered only at the end of
+    ///    cross-ref resolution), so on the issuer only its lookups hit the page pawn's entry (CheckForScribedEntry
+    ///    matches ScribedCache by ThingID: lab run rgC6g_1, ScribedCache alone left, two Settle pawns still split). Lab run t6soak_1: a Settle pawn's
     ///    first refresh ran 29 ticks apart, so its saved apparent age differed in the last float bit (t4, t5).
     ///    Fix: in MP, a prefix on our Multiplayer build's FactionSidebar.RestoreGameStateAfterPages (pages sent or
     ///    closed, issuer only, before any command of the Settle runs) drops every page pawn from those places.
@@ -471,6 +472,9 @@ namespace Multiplayer.Compat
                 int junk = DropPagePawnKeys((IDictionary)junkCacheField.GetValue(null));
                 int full = DropFromSchedule(scheduleFullUpdateField), post = DropFromSchedule(schedulePostUpdateField);
                 int queued = DropPageCaches(currentlyQueuedField.GetValue(null));
+                // A Settle copy keeps its page id until MP renumbers it, and CheckForScribedEntry matches by that ThingID:
+                // left here, the issuer's copy takes the page pawn's entry (no regen) while every other PC makes a new one.
+                int scribed = DropPageCaches(scribedCacheProp.GetValue(null));
                 var queue = RefreshQueue;
                 var kept = queue.Where(p => !IsPagePawn(p)).ToList();
                 int refresh = queue.Count - kept.Count;
@@ -480,7 +484,7 @@ namespace Multiplayer.Compat
                 int morph = (pawnsQueuedForMorphingField.GetValue(null) as HashSet<Pawn>)?.RemoveWhere(IsPagePawn) ?? 0;
                 if (pageDropLogged++ < 3)
                     Log.Message($"{LogPrefix}FIXES row 248: Settle pages done, page pawns dropped (cache {cache}, junk {junk}, " +
-                                $"refresh queue {refresh}, full {full}, post {post}, queued {queued}, morph {morph})");
+                                $"refresh queue {refresh}, full {full}, post {post}, queued {queued}, scribed {scribed}, morph {morph})");
             }
             catch (Exception e)
             {
