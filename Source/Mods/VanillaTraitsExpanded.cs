@@ -47,7 +47,7 @@ namespace Multiplayer.Compat
                 managerPawnFields = AccessTools.GetDeclaredFields(managerType)
                     .Where(f => !f.IsStatic && f.IsPublic && (IsPawnDictionary(f.FieldType) || typeof(ICollection<Pawn>).IsAssignableFrom(f.FieldType)))
                     .ToArray();
-                var restore = AccessTools.Method("Multiplayer.Client.Factions.FactionSidebar:RestoreGameStateAfterPages");
+                var restore = AccessTools.Method("Multiplayer.Client.FactionSidebar:RestoreGameStateAfterPages");
                 if (restore == null)
                     Log.Warning("[MPCompat - Vanilla Traits Expanded] FactionSidebar.RestoreGameStateAfterPages not found: page pawns stay in the trait lists (FIXES row 249)");
                 else

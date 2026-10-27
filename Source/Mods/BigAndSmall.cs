@@ -452,7 +452,7 @@ namespace Multiplayer.Compat
             schedulePostUpdateField = GetStaticField(cacheType, "schedulePostUpdate", null);
 
             // An MP build without the method gets no cleanup; every other fix here still applies.
-            var restore = AccessTools.Method("Multiplayer.Client.Factions.FactionSidebar:RestoreGameStateAfterPages");
+            var restore = AccessTools.Method("Multiplayer.Client.FactionSidebar:RestoreGameStateAfterPages");
             if (restore == null)
             {
                 Log.Warning($"{LogPrefix}FactionSidebar.RestoreGameStateAfterPages not found: page pawns stay in the caches (FIXES row 248)");
