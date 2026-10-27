@@ -18,6 +18,7 @@ public class MiliraRace
     // every call, so each Milian starts from the def as loaded.
     public MiliraRace(ModContentPack mod)
     {
+        PatchFlyer();
         var postfix = AccessTools.DeclaredMethod("Milira.Milira_MilianPawnGenerator_Patch:Postfix");
         if (postfix == null)
         {
@@ -27,6 +28,35 @@ public class MiliraRace
         MpCompat.harmony.Patch(postfix,
             prefix: new HarmonyMethod(typeof(MiliraRace), nameof(PreMilianGear)),
             finalizer: new HarmonyMethod(typeof(MiliraRace), nameof(PostMilianGear)));
+    }
+
+    // 1.7 lab, FIXES row 256: MiliraPawnFlyer is a copy of vanilla PawnFlyer (not a subclass): its RecomputePosition sets the flyer's
+    // Position (saved) and runs only from DrawPos and DynamicDrawPhaseAt, so only a PC that draws the map moves it (row 255 is the
+    // vanilla case). In MP its Tick and SpawnSetup recompute on every PC; the draw then finds this tick's position already computed.
+    private static FastInvokeHandler miliraRecompute;
+
+    private static void PatchFlyer()
+    {
+        var type = AccessTools.TypeByName("Milira.MiliraPawnFlyer");
+        var recompute = type == null ? null : AccessTools.DeclaredMethod(type, "RecomputePosition", []);
+        var tick = type == null ? null : AccessTools.DeclaredMethod(type, "Tick", []);
+        var spawn = type == null ? null : AccessTools.DeclaredMethod(type, nameof(Thing.SpawnSetup));
+        if (recompute == null || tick == null || spawn == null)
+        {
+            Log.Warning("MPCompat: Milira.MiliraPawnFlyer RecomputePosition/Tick/SpawnSetup not found - Milira flight is not guarded (FIXES row 256)");
+            return;
+        }
+        miliraRecompute = MethodInvoker.GetHandler(recompute);
+        var post = new HarmonyMethod(typeof(MiliraRace), nameof(PostFlyerRecompute));
+        MpCompat.harmony.Patch(tick, postfix: post);
+        MpCompat.harmony.Patch(spawn, postfix: post);
+    }
+
+    private static void PostFlyerRecompute(Thing __instance)
+    {
+        if (!MP.IsInMultiplayer || __instance.Destroyed || !__instance.Spawned) return;
+        if (__instance is not IThingHolder holder || holder.GetDirectlyHeldThings().Count == 0) return;   // DestinationPos reads it
+        miliraRecompute(__instance);
     }
 
     // 1.7 lab, FIXES row 145: the Ancot Library gizmo syncs (Milira turrets and weapons) moved to AncotLibrary.cs, keyed on
