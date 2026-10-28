@@ -66,6 +66,69 @@ namespace Multiplayer.Compat
             MpCompat.harmony.Patch(generatePawn, postfix: new HarmonyMethod(typeof(NiceBillTab), nameof(CollectGhost)));
 
             PatchBillAdds();
+            PatchBillCardWatch();
+        }
+
+        // FIXES row 283 (28 Oct 2026, live co-op: "the bill for stone blocks, whenever he shift clicks, desyncs us"): Nice Bill Tab
+        // draws each bill card itself (TabBillsDrawer.DrawBillPreview) instead of vanilla Bill.DoInterface, so Multiplayer's watch on
+        // the bill fields (SyncFields.BillInterfaceCard, a prefix on Bill.DoInterface) never runs for it. The card's +/- buttons
+        // (PlusAction / MinusAction) write repeatMode, repeatCount, targetCount and unpauseWhenYouHave on the clicking PC only, by
+        // GenUI.CurrentAdjustmentMultiplier() steps: shift = x10, so one shift-click moves a 'do until you have X' bill far enough to
+        // turn it on (or off) on one PC, a pawn takes the job there only, and the game splits. The pause/play button and the classic
+        // suspend button (SuspendBill) write bill.suspended the same way. Now every bill card is a watch scope for those fields:
+        // a change is reverted locally and sent as a field command with the final value (the shift multiplier is read on the
+        // clicking PC only, so no PC needs the key state).
+        private static ISyncField syncSuspended;
+        private static ISyncField[] syncProduction;
+
+        private static void PatchBillCardWatch()
+        {
+            try
+            {
+                var drawBillPreview = AccessTools.DeclaredMethod("NiceBillTab.TabBillsDrawer:DrawBillPreview");
+                if (drawBillPreview == null)
+                {
+                    Log.Error("MPCompat - Nice Bill Tab: TabBillsDrawer.DrawBillPreview not found - bill card +/- and suspend stay unsynced (FIXES row 283)");
+                    return;
+                }
+
+                syncSuspended = MP.RegisterSyncField(typeof(Bill), nameof(Bill.suspended));
+                syncProduction =
+                [
+                    MP.RegisterSyncField(typeof(Bill_Production), nameof(Bill_Production.repeatMode)),
+                    MP.RegisterSyncField(typeof(Bill_Production), nameof(Bill_Production.repeatCount)),
+                    MP.RegisterSyncField(typeof(Bill_Production), nameof(Bill_Production.targetCount)),
+                    MP.RegisterSyncField(typeof(Bill_Production), nameof(Bill_Production.unpauseWhenYouHave)),
+                ];
+
+                MpCompat.harmony.Patch(drawBillPreview,
+                    prefix: new HarmonyMethod(typeof(NiceBillTab), nameof(PreDrawBillPreview)),
+                    finalizer: new HarmonyMethod(typeof(NiceBillTab), nameof(PostDrawBillPreview)));
+            }
+            catch (Exception e)
+            {
+                Log.Error($"MPCompat - Nice Bill Tab: patching the bill card watch failed (FIXES row 283): {e}");
+            }
+        }
+
+        private static void PreDrawBillPreview(Bill bill, out bool __state)
+        {
+            __state = false;
+            if (!MP.IsInMultiplayer || bill == null)
+                return;
+
+            MP.WatchBegin();
+            __state = true;
+            syncSuspended.Watch(bill);
+            if (bill is Bill_Production)
+                foreach (var field in syncProduction)
+                    field.Watch(bill);
+        }
+
+        private static void PostDrawBillPreview(bool __state)
+        {
+            if (__state)
+                MP.WatchEnd();
         }
 
         // FIXES row 275 (28 Oct 2026, live co-op): Nice Bill Tab adds bills outside Multiplayer's sync.
