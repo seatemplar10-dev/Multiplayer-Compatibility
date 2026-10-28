@@ -53,6 +53,15 @@ namespace Multiplayer.Compat
     /// Full vehicle caravans in co-op are NOT supported here (they would need VF's caravan creation synced).
     /// Status: [unverified] - compiled only, not run in game.
     /// </para>
+    /// <para>
+    /// Step 8 (FIXES row 285, live 28 Oct 2026 22:20): the same null <c>CaravanFormation.formation</c> (and no split dialog, so
+    /// <c>CaravanFormation.Current</c> is null) breaks the vehicle cards on VF's Vehicles tab of the proxy window. Ticking a vehicle opens
+    /// <c>Dialog_AssignSeats(CaravanFormation.Current, ...)</c>; its Confirm (<c>FinalizeSeats</c>) changes the transferables on this PC only
+    /// and then throws at <c>parent.NotifyTransferablesChanged()</c>. Unticking throws at
+    /// <c>CaravanFormation.Current.NotifyTransferablesChanged()</c> in <c>TransferableVehicleWidget.DrawCard</c>. In MP with no current
+    /// formation: the seat window does not open (same reject message as Send, since step 7 refuses vehicle caravans anyway, and its
+    /// unsynced seat writes could make the PCs send different caravans), and the untick skips the null notify.
+    /// </para>
     /// </remarks>
     [MpCompatFor("SmashPhil.VehicleFramework")]
     public class VehicleFramework
@@ -82,6 +91,11 @@ namespace Multiplayer.Compat
         private const string CaravanFormingProxyTypeName = "Multiplayer.Client.CaravanFormingProxy";
         // Vehicles.VehiclePawn
         private static Type vehiclePawnType;
+        // Step 8: Vehicles.World.CaravanFormation.get_Current(), Vehicles.World.ICaravanInfo.NotifyTransferablesChanged(),
+        // Vehicles.World.Dialog_AssignSeats
+        private static MethodInfo caravanFormationCurrent;
+        private static MethodInfo notifyTransferablesChanged;
+        private static Type assignSeatsType;
 
         public VehicleFramework(ModContentPack mod)
         {
@@ -164,6 +178,30 @@ namespace Multiplayer.Compat
             {
                 Log.Error("MPCompat :: Vehicle Framework step 7 (caravan forming window, FIXES row 204) not installed: " + e);
             }
+
+            // 8. Vehicle cards in Multiplayer's caravan window: seat window and untick read the null CaravanFormation.Current.
+            try
+            {
+                PatchVehicleCards();
+            }
+            catch (Exception e)
+            {
+                Log.Error("MPCompat :: Vehicle Framework step 8 (vehicle seat window in caravan forming, FIXES row 285) not installed: " + e);
+            }
+        }
+
+        private static void PatchVehicleCards()
+        {
+            var caravanFormationType = FindType("Vehicles.World.CaravanFormation");
+            caravanFormationCurrent = AccessTools.DeclaredPropertyGetter(caravanFormationType, "Current")
+                                      ?? throw new MissingMethodException(caravanFormationType.FullName, "get_Current");
+            notifyTransferablesChanged = GetDeclaredMethod(FindType("Vehicles.World.ICaravanInfo"), "NotifyTransferablesChanged", Type.EmptyTypes);
+            assignSeatsType = FindType("Vehicles.World.Dialog_AssignSeats");
+
+            MpCompat.harmony.Patch(AccessTools.DeclaredMethod(typeof(WindowStack), nameof(WindowStack.Add)),
+                prefix: new HarmonyMethod(typeof(VehicleFramework), nameof(NoSeatWindowWithoutFormation)));
+            MpCompat.harmony.Patch(GetDeclaredMethod(FindType("Vehicles.World.TransferableVehicleWidget"), "DrawCard"),
+                transpiler: new HarmonyMethod(typeof(VehicleFramework), nameof(NullSafeCurrentNotify)));
         }
 
         private static void PatchCaravanDialog()
@@ -333,6 +371,50 @@ namespace Multiplayer.Compat
 
             __0.Start(__1);
             return false;
+        }
+
+        // Prefix on WindowStack.Add. VF opens Dialog_AssignSeats only from the vehicle card checkbox, with CaravanFormation.Current as the
+        // window's parent; in MP that is null for Multiplayer's caravan window and the window's Confirm throws after writing unsynced counts.
+        // The window is not added (nothing changed yet: its constructor only reads). UI only, no game state.
+        private static bool NoSeatWindowWithoutFormation(Window window)
+        {
+            if (!MP.IsInMultiplayer || window == null || window.GetType() != assignSeatsType)
+                return true;
+            if (caravanFormationCurrent.Invoke(null, null) != null)
+                return true;
+
+            Messages.Message("Vehicle caravans are not supported in multiplayer yet", MessageTypeDefOf.RejectInput, false);
+            return false;
+        }
+
+        // Transpiler on TransferableVehicleWidget.DrawCard: "CaravanFormation.Current.NotifyTransferablesChanged()" (untick branch) becomes
+        // NotifyCurrentIfAny(). Single player: Current is never null there, so the behaviour is unchanged.
+        private static IEnumerable<CodeInstruction> NullSafeCurrentNotify(IEnumerable<CodeInstruction> instr, MethodBase baseMethod)
+        {
+            var list = instr.ToList();
+            var replaced = 0;
+            for (var i = 0; i < list.Count - 1; i++)
+            {
+                if (list[i].Calls(caravanFormationCurrent) && list[i + 1].Calls(notifyTransferablesChanged))
+                {
+                    list[i].opcode = OpCodes.Call;
+                    list[i].operand = AccessTools.DeclaredMethod(typeof(VehicleFramework), nameof(NotifyCurrentIfAny));
+                    list[i + 1].opcode = OpCodes.Nop;
+                    list[i + 1].operand = null;
+                    replaced++;
+                }
+            }
+
+            if (replaced != 1)
+                Log.Error($"{LogPrefix}DrawCard: expected 1 'CaravanFormation.Current.NotifyTransferablesChanged()', patched {replaced} ({baseMethod?.FullDescription()})");
+            return list;
+        }
+
+        private static void NotifyCurrentIfAny()
+        {
+            var current = caravanFormationCurrent.Invoke(null, null);
+            if (current != null)
+                notifyTransferablesChanged.Invoke(current, null);
         }
 
         private static Type FindType(string name)
