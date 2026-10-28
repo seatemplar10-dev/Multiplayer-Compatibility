@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
+using System.Reflection.Emit;
 using HarmonyLib;
 using Multiplayer.API;
 using RimWorld;
@@ -59,6 +60,70 @@ public class ResearchReinvented
         MpCompat.harmony.Patch(method, transpiler: new HarmonyMethod(AddSorting));
 
         PatchSavedListWriters();
+        PatchPopupsAndAvailability();
+    }
+
+    // FIXES row 276 (28 Oct 2026, James update 4 / PR #1): 'Prototype construction now ready' popped up every second on James's PC.
+    // ResearchOpportunityManager.GameComponentUpdate (per frame, interface) -> CheckForPopups compares each category's
+    // GetCurrentAvailability with the last value it saw and pops a message when it changes to Available. GetCurrentAvailability caches
+    // per (TicksAbs, project) in the def (_currentAvailabilitiesCached), and that cache is filled by sim code (in the context faction) and
+    // by interface code (the PC's own faction) alike: on the PC whose faction is not FixedFaction() the value flipped between the two,
+    // and a sim read could get the value interface code wrote on one PC only.
+    // (a) CheckForPopups runs only on the PC whose own faction is FixedFaction() (the faction the shared opportunity list is built for).
+    // (b) Interface calls to GetCurrentAvailability compute the uncached GetAvailability(project) and neither read nor write the cache,
+    //     so the cache holds sim values only. Sim calls are unchanged.
+    private static MethodInfo getAvailabilityMethod;
+
+    private static void PatchPopupsAndAvailability()
+    {
+        var manager = AccessTools.TypeByName(ManagerTypeName);
+        var popups = manager == null ? null : AccessTools.DeclaredMethod(manager, "CheckForPopups");
+        if (popups != null)
+            MpCompat.harmony.Patch(popups, prefix: new HarmonyMethod(typeof(ResearchReinvented), nameof(PreCheckForPopups)));
+        else
+            Log.Error("[MPCompat] Research Reinvented row 276: ResearchOpportunityManager.CheckForPopups not found, popups can repeat on a second faction's PC");
+
+        var category = AccessTools.TypeByName("PeteTimesSix.ResearchReinvented.Defs.ResearchOpportunityCategoryDef");
+        var current = category == null ? null : AccessTools.DeclaredMethod(category, "GetCurrentAvailability", [typeof(ResearchProjectDef)]);
+        getAvailabilityMethod = category == null ? null : AccessTools.DeclaredMethod(category, "GetAvailability", [typeof(ResearchProjectDef)]);
+        if (current != null && getAvailabilityMethod != null && getAvailabilityMethod.ReturnType == current.ReturnType)
+            MpCompat.harmony.Patch(current, transpiler: new HarmonyMethod(typeof(ResearchReinvented), nameof(UncachedAvailabilityInInterface)));
+        else
+            Log.Error("[MPCompat] Research Reinvented row 276: ResearchOpportunityCategoryDef.GetCurrentAvailability / GetAvailability not found, interface code still shares the sim's availability cache");
+    }
+
+    private static bool PreCheckForPopups()
+    {
+        if (!MP.IsInMultiplayer)
+            return true;
+
+        var fixedFaction = FixedFaction();
+        return fixedFaction == null || Find.FactionManager.OfPlayer == fixedFaction;
+    }
+
+    private static bool BypassAvailabilityCache() => MP.IsInMultiplayer && MP.InInterface;
+
+    // Prepends: if (BypassAvailabilityCache()) return this.GetAvailability(project);
+    private static IEnumerable<CodeInstruction> UncachedAvailabilityInInterface(IEnumerable<CodeInstruction> insts, ILGenerator generator)
+    {
+        var original = generator.DefineLabel();
+        yield return new CodeInstruction(OpCodes.Call, AccessTools.DeclaredMethod(typeof(ResearchReinvented), nameof(BypassAvailabilityCache)));
+        yield return new CodeInstruction(OpCodes.Brfalse, original);
+        yield return new CodeInstruction(OpCodes.Ldarg_0);
+        yield return new CodeInstruction(OpCodes.Ldarg_1);
+        yield return new CodeInstruction(OpCodes.Call, getAvailabilityMethod);
+        yield return new CodeInstruction(OpCodes.Ret);
+
+        var first = true;
+        foreach (var inst in insts)
+        {
+            if (first)
+            {
+                inst.labels.Add(original);
+                first = false;
+            }
+            yield return inst;
+        }
     }
 
     private static void PatchSavedListWriters()

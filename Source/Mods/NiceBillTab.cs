@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using HarmonyLib;
+using Multiplayer.API;
 using RimWorld;
 using Verse;
 
@@ -63,6 +64,127 @@ namespace Multiplayer.Compat
             var generatePawn = AccessTools.DeclaredMethod(typeof(PawnGenerator), nameof(PawnGenerator.GeneratePawn), [typeof(PawnGenerationRequest)])
                 ?? throw new MissingMethodException(nameof(PawnGenerator), "GeneratePawn(PawnGenerationRequest)");
             MpCompat.harmony.Patch(generatePawn, postfix: new HarmonyMethod(typeof(NiceBillTab), nameof(CollectGhost)));
+
+            PatchBillAdds();
+        }
+
+        // FIXES row 275 (28 Oct 2026, live co-op): Nice Bill Tab adds bills outside Multiplayer's sync.
+        // (1) Paste from the vanilla clipboard into a position ('Paste bill here' float menu, TabBillsDrawer.cs:421 and :784) goes through
+        //     the private static InsertBill(SelTable, bill, index): 'bill.billStack = SelTable.billStack; SelTable.billStack.Bills.Insert(index, bill);'
+        //     - a direct list insert on the clicking PC only. Now, in interface code, the cloned bill is sent BY VALUE (exposed, like
+        //     Multiplayer's own synced BillStack.AddBill for pastes) with the table and the index; the command adds it on every PC
+        //     through AddBill (Multiplayer gives the bill a real loadID there) and moves it to the index.
+        // (2) 'Add recipe' (TryAddBillToQueue) calls 'selection.workTable.billStack.AddBill(val)' and only then SetMaterialToBill and
+        //     AutoRenameBill on 'val'. Multiplayer sends the bill at the AddBill call, so the material filter and the name stayed on the
+        //     clicking PC's local object, and SelectBill(val) selected that object, which no stack holds: its 'Details...' button
+        //     (Bill_Production.GetBillDialog reads billStack.billGiver) threw the NRE of 19:56:13. Now, in interface code, that AddBill call
+        //     is held back and sent when TryAddBillToQueue ends (material and name included), and a selection that points at the
+        //     local object is removed; the real bill appears in the list when the command runs.
+        // BWM pastes started from this tab go through BetterWorkbenchManagement.cs. Not covered: drag-reordering bills in this tab
+        // (HandleBillDrop does Bills.Remove + Bills.Insert directly, also unsynced).
+        private static FieldInfo selectionsField, selectedBillField;
+        private static MethodInfo addBillMethod;
+        [ThreadStatic] private static BillStack pendingStack;
+        [ThreadStatic] private static Bill pendingBill;
+
+        private static void PatchBillAdds()
+        {
+            try
+            {
+                var insertBill = AccessTools.DeclaredMethod("NiceBillTab.TabBillsDrawer:InsertBill", [typeof(Building_WorkTable), typeof(Bill), typeof(int)]);
+                if (insertBill != null)
+                {
+                    MpCompat.harmony.Patch(insertBill, prefix: new HarmonyMethod(typeof(NiceBillTab), nameof(PreInsertBill)));
+                    MP.RegisterSyncMethod(typeof(NiceBillTab), nameof(SyncedInsertBill)).ExposeParameter(1);
+                }
+                else
+                    Log.Error("MPCompat - Nice Bill Tab: TabBillsDrawer.InsertBill not found - 'paste bill here' stays unsynced (FIXES row 275)");
+
+                var tryAdd = AccessTools.DeclaredMethod("NiceBillTab.TabBillsDrawer:TryAddBillToQueue");
+                addBillMethod = AccessTools.DeclaredMethod(typeof(BillStack), nameof(BillStack.AddBill), [typeof(Bill)]);
+                selectionsField = AccessTools.DeclaredField("NiceBillTab.TabBillsDrawer:Selections");
+                selectedBillField = AccessTools.DeclaredField("NiceBillTab.RecipeSelection:SelectedBill");
+                if (tryAdd != null && addBillMethod != null)
+                    MpCompat.harmony.Patch(tryAdd,
+                        transpiler: new HarmonyMethod(typeof(NiceBillTab), nameof(DeferAddBillTranspiler)),
+                        finalizer: new HarmonyMethod(typeof(NiceBillTab), nameof(SendDeferredBill)));
+                else
+                    Log.Error("MPCompat - Nice Bill Tab: TabBillsDrawer.TryAddBillToQueue not found - 'add recipe' keeps sending the bill before its material is set (FIXES row 275)");
+            }
+            catch (Exception e)
+            {
+                Log.Error($"MPCompat - Nice Bill Tab: patching the bill adds failed (FIXES row 275): {e}");
+            }
+        }
+
+        private static bool PreInsertBill(Building_WorkTable SelTable, Bill bill, int index)
+        {
+            if (!MP.IsInMultiplayer || !MP.InInterface)
+                return true;
+
+            if (SelTable?.billStack != null && bill != null)
+                SyncedInsertBill(SelTable, bill, index);
+            return false;
+        }
+
+        // Synced (bill exposed): runs on every PC inside the command.
+        private static void SyncedInsertBill(Building_WorkTable table, Bill bill, int index)
+        {
+            var stack = table?.billStack;
+            if (stack == null || bill == null)
+                return;
+
+            stack.AddBill(bill); // inside a command: runs directly, Multiplayer's AddBill prefix replaces the negative interface loadID
+            var bills = stack.Bills;
+            bills.Remove(bill);
+            bills.Insert(index < 0 ? 0 : index > bills.Count ? bills.Count : index, bill);
+        }
+
+        private static IEnumerable<CodeInstruction> DeferAddBillTranspiler(IEnumerable<CodeInstruction> insts)
+        {
+            var replacement = AccessTools.DeclaredMethod(typeof(NiceBillTab), nameof(DeferAddBill));
+            var replaced = 0;
+            foreach (var inst in insts)
+            {
+                if ((inst.opcode == System.Reflection.Emit.OpCodes.Callvirt || inst.opcode == System.Reflection.Emit.OpCodes.Call) && inst.operand is MethodInfo m && m == addBillMethod)
+                {
+                    inst.opcode = System.Reflection.Emit.OpCodes.Call;
+                    inst.operand = replacement;
+                    replaced++;
+                }
+                yield return inst;
+            }
+
+            if (replaced != 1)
+                Log.Error($"MPCompat - Nice Bill Tab: TryAddBillToQueue has {replaced} BillStack.AddBill calls, expected 1 (FIXES row 275)");
+        }
+
+        private static void DeferAddBill(BillStack stack, Bill bill)
+        {
+            if (MP.IsInMultiplayer && MP.InInterface && pendingBill == null)
+            {
+                pendingStack = stack;
+                pendingBill = bill;
+                return;
+            }
+            stack.AddBill(bill);
+        }
+
+        private static void SendDeferredBill()
+        {
+            var stack = pendingStack;
+            var bill = pendingBill;
+            pendingStack = null;
+            pendingBill = null;
+            if (stack == null || bill == null)
+                return;
+
+            stack.AddBill(bill); // synced by Multiplayer (bill exposed), now with the material filter and the name
+
+            if (selectionsField?.GetValue(null) is IList selections && selectedBillField != null)
+                for (var i = selections.Count - 1; i >= 0; i--)
+                    if (selections[i] != null && ReferenceEquals(selectedBillField.GetValue(selections[i]), bill))
+                        selections.RemoveAt(i);
         }
 
         private static void CollectGhost(Pawn __result)
