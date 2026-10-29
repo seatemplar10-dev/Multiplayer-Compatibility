@@ -50,17 +50,19 @@ namespace Multiplayer.Compat
             frameworkAssembly = AccessTools.TypeByName("JaegerUtilityFramework.WorkQueue")?.Assembly;
             BindCoreUi();
 
-            // G5: Hegemony void postfix. Skipped, it leaves the vanilla __result and ref args as they are.
+            // G5, F1: Hegemony void postfixes. Skipped, they leave the vanilla __result and ref args as they are.
+            // F1 stays skipped with the fork: MP syncs every WorldObject.GetFloatMenuOptions(caravan) click (SyncActions.cs:31,
+            // SyncAction.cs:47), so its option would open the incite confirm on every PC, and its two options share one lambda
+            // (SyncAction.cs:102, first match). The G1 gizmo offers the same order.
             Prefix(nameof(SkipInMultiplayer),
-                "EnvoyOfferCommands:Postfix");       // G5 Pawn.GetGizmos
-            // Stage 2 (co-op fork S7): G1, G2 add only synced items. F1's option is Hegemony's own lambda (MP auto-syncs only
-            // the vanilla CaravanArrivalActionUtility confirm, SyncActions.cs:24); it opens a local confirm that sends
-            // AssaultActions.CaravanIncite. F4's pods launch through MP's synced CompLaunchable.TryLaunch with the arrival
-            // action exposed (SyncMethods.cs:182); ArrivalAtSupplyPods saves its settlement and realm.
+                "EnvoyOfferCommands:Postfix",        // G5 Pawn.GetGizmos
+                "CaravanIncitementOptions:Postfix"); // F1 Settlement.GetFloatMenuOptions
+            // Stage 2 (co-op fork S7): G1, G2 add only synced items. F4's pods launch through MP's synced
+            // CompLaunchable.TryLaunch with the arrival action exposed (SyncMethods.cs:182); ArrivalAtSupplyPods saves its
+            // settlement and realm.
             Prefix(nameof(SkipUnlessCoreUi),
                 "CaravanIncitementCommands:Postfix", // G1 Settlement.GetCaravanGizmos
                 "InvasionJoinCommand:Postfix",       // G2 Settlement.GetCaravanGizmos
-                "CaravanIncitementOptions:Postfix",  // F1 Settlement.GetFloatMenuOptions
                 "SupplyPodOptions:Postfix");         // F4 Settlement.GetTransportersFloatMenuOptions
 
             // G6, G7, G11: passthrough iterator postfixes (rule B). A plain skip would return null and drop the vanilla
@@ -226,7 +228,9 @@ namespace Multiplayer.Compat
             Log.Message("[MP Compat] Hegemony UI: co-op fork found, its synced S1a screens and gizmos stay on in multiplayer.");
         }
 
-        private static bool CoreUi => coreUiActive != null && coreUiActive();
+        // Review M3: also needs the realm hooks live. Without them (binding failed, no Spectator, not multifaction) the
+        // fork's owner guards fall back to Faction.OfPlayer for both players, so the lifts stay off (Stage 1).
+        private static bool CoreUi => coreUiActive != null && coreUiActive() && HegemonyRealms.RealmsActive;
 
         private static bool IsCoreUi(object item) => isCoreUi != null && isCoreUi(item);
 
