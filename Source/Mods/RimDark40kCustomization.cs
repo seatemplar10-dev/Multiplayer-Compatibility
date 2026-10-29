@@ -44,13 +44,22 @@ namespace Multiplayer.Compat
     /// (d) After SetAlternateBaseForm / LoadFromPreset every CompGraphicParent of the item drops its stat cache on every machine.
     /// (e) Precision mode: an entry that is the same object as its original gets a local value-equal copy before it is edited in place.
     /// (f) Pending UI bookkeeping is cleared on game load.
+    /// Re-review follow-up: (g) F3 precision edits are held locally while this machine's SetOriginalDrawData is in flight; (h) F6a the
+    /// ordering Job is dropped in a finalizer; (i) F10 DecorationBaseTab.Setup (simulation) drops the comps' stat caches; (j) F8 the
+    /// per-command log is off unless built with MPCOMPAT_RIMDARK_LOG.
     /// Status: [unverified] compiled only, not run in game.
     /// </remarks>
     [MpCompatFor("phonicmas.rimdark.frameworkcore")]
     internal class RimDark40kCustomization
     {
         private const string LogPrefix = "[MPCompat - RimDark 40k Customization] ";
-        private const bool LogCommands = true;
+        // One log line per synced customization command on every machine: lab evidence only. Off for play; a lab build sets the
+        // compile constant MPCOMPAT_RIMDARK_LOG (static readonly, not const, so the off branch is not "unreachable code").
+#if MPCOMPAT_RIMDARK_LOG
+        private static readonly bool LogCommands = true;
+#else
+        private static readonly bool LogCommands = false;
+#endif
         private const float DrawDataIdleSeconds = 0.3f;
 
         // Core40k types, found by name
@@ -189,7 +198,8 @@ namespace Multiplayer.Compat
                 Patch(AccessTools.DeclaredMethod(typeof(WindowStack), nameof(WindowStack.Add), new[] { typeof(Window) }), prefix: nameof(PreWindowStackAdd)));
             Try("patch Pawn_JobTracker.TryTakeOrderedJob", () =>
                 Patch(AccessTools.DeclaredMethod(typeof(Pawn_JobTracker), nameof(Pawn_JobTracker.TryTakeOrderedJob)),
-                    prefix: nameof(PreTryTakeOrderedJob), postfix: nameof(PostTryTakeOrderedJob), prefixPriority: Priority.Normal));
+                    prefix: nameof(PreTryTakeOrderedJob), postfix: nameof(PostTryTakeOrderedJob), finalizer: nameof(FinalizeTryTakeOrderedJob),
+                    prefixPriority: Priority.Normal));
         }
 
         private static bool IsCustomizeJob(Job job)
@@ -207,9 +217,14 @@ namespace Multiplayer.Compat
             orderingJob = MP.IsInMultiplayer && MP.IsExecutingSyncCommandIssuedBySelf && IsCustomizeJob(job) ? job : null;
         }
 
-        private static void PostTryTakeOrderedJob(Pawn_JobTracker __instance, Job job, bool __result)
+        // Finalizer, so the reference is dropped also when TryTakeOrderedJob throws (review F6a).
+        private static void FinalizeTryTakeOrderedJob()
         {
             orderingJob = null;
+        }
+
+        private static void PostTryTakeOrderedJob(Pawn_JobTracker __instance, Job job, bool __result)
+        {
             if (!__result || !MP.IsInMultiplayer || !MP.IsExecutingSyncCommandIssuedBySelf)
                 return;
             if (!IsCustomizeJob(job) || __instance?.pawn == null)
@@ -429,6 +444,9 @@ namespace Multiplayer.Compat
                 pawn?.Drawer?.renderer?.SetAllGraphicsDirty();
                 if (MP.IsExecutingSyncCommandIssuedBySelf)
                 {
+                    // F3: the original this machine sent has landed; precision edits of that decoration may go out again
+                    if (method.Name == "SetOriginalDrawData" && args is { Length: > 0 } && args[0] is Def originalDef)
+                        awaitingOriginal.Remove((comp, originalDef));
                     MarkTabsForRecache();
                     if (method.Name is "ResetDrawData" or nameof(SyncResetDrawDataRot))
                         ClearPrecisionBuffers();
@@ -539,6 +557,14 @@ namespace Multiplayer.Compat
                 Patch(drawPrecisionModeMethod, prefix: nameof(PrecisionPrefix), finalizer: nameof(PrecisionFinalizer)));
             Try("patch DecorationBaseTab.PrecisionReset", () =>
                 Patch(precisionResetMethod, prefix: nameof(PrecisionResetPrefix)));
+            Try("patch CompDecorativeBase.SetOriginalDrawData (hold edits)", () =>
+                Patch(Declared(compDecorativeBaseType, "SetOriginalDrawData", decorationDefType), prefix: nameof(PreSetOriginalDrawData),
+                    prefixPriority: Priority.Normal));
+            Try("patch DecorationBaseTab.Setup (stat cache)", () =>
+            {
+                decorativeCompsField = Field(precisionTabType, "decorativeComps");
+                Patch(AccessTools.DeclaredMethod(precisionTabType, "Setup", new[] { typeof(Pawn) }), postfix: nameof(PostDecorationTabSetup));
+            });
             // every frame the window is drawn (also on other tabs): send precision edits that have rested long enough
             foreach (var dialog in dialogTypes)
                 Try("patch " + dialog.Name + ".DoWindowContents", () =>
@@ -618,7 +644,18 @@ namespace Multiplayer.Compat
             {
                 var current = GetDrawData(__state.comp, __state.def);
                 var after = current != null ? ToDto(current) : null;
-                if (current != null && !__state.existed && after.SequenceEqual(defaultDrawDataDto))
+                bool changed = after != null && (!__state.existed || !after.SequenceEqual(__state.before));
+                // F3: this machine's SetOriginalDrawData is still in flight; there the original is copied from drawDatas[def], so an
+                // edit made now would become this machine's original only. Put the synced values back (in place, no notify, local
+                // only) and do not mark it pending; the tab's text buffers re-apply it once the command has landed.
+                if (changed && IsAwaitingOriginal(__state.comp, __state.def))
+                {
+                    if (__state.existed)
+                        drawDataCopyFromMethod.Invoke(current, new[] { FromDto(__state.before) });
+                    else
+                        ((IDictionary)compDrawDatasField.GetValue(__state.comp)).Remove(__state.def);
+                }
+                else if (current != null && !__state.existed && after.SequenceEqual(defaultDrawDataDto))
                     ((IDictionary)compDrawDatasField.GetValue(__state.comp)).Remove(__state.def); // tab added a default entry: keep the saved structure equal
                 else if (after != null && (!__state.existed || !after.SequenceEqual(__state.before)))
                     pendingDrawData[(__state.comp, __state.def)] = Time.realtimeSinceStartup;
@@ -747,8 +784,46 @@ namespace Multiplayer.Compat
         }
 
         // A loaded game (host load, join, resync) has new comp objects: drop the UI-side bookkeeping that points at the old ones.
+        // F3 bookkeeping: (comp, def) whose SetOriginalDrawData this machine sent and that has not come back yet -> send time. A record
+        // older than AwaitingOriginalSeconds is ignored (a lost command must not freeze the sliders for good).
+        private const float AwaitingOriginalSeconds = 5f;
+        private static readonly Dictionary<(ThingComp comp, Def def), float> awaitingOriginal = new();
+        private static FieldInfo decorativeCompsField;
+
+        private static bool IsAwaitingOriginal(ThingComp comp, Def def)
+            => awaitingOriginal.TryGetValue((comp, def), out var sent) && Time.realtimeSinceStartup - sent < AwaitingOriginalSeconds;
+
+        // UI call with the window open = the Precision button: the call is about to be sent (GuardPrefix lets MP send it).
+        private static void PreSetOriginalDrawData(ThingComp __instance, object[] __args)
+        {
+            if (!active || !MP.IsInMultiplayer || !MP.InInterface || __args[0] is not Def def || !CustomizeDialogOpenFor(__instance))
+                return;
+            awaitingOriginal[(__instance, def)] = Time.realtimeSinceStartup;
+        }
+
+        // F10 (Core40k itself): Setup runs from the dialog constructor, i.e. in the simulation on every machine, and removes invalid
+        // decorations without the comps dropping their cached stat offsets / factors. Drop them there, on every machine. A UI-time
+        // Setup (none known) is left alone: a cache reset on one machine only would itself be a per-machine call.
+        private static void PostDecorationTabSetup(object __instance)
+        {
+            if (!active || (MP.IsInMultiplayer && MP.InInterface))
+                return;
+            try
+            {
+                if (decorativeCompsField.GetValue(__instance) is IList comps)
+                    foreach (var comp in comps.Cast<object>().ToList())
+                        if (comp != null)
+                            notifyGraphicChangedMethod.Invoke(comp, null);
+            }
+            catch (Exception e)
+            {
+                Log.Warning($"{LogPrefix}stat cache reset after the decoration tab setup failed: {e.GetType().Name}: {e.Message}");
+            }
+        }
+
         private static void PostGameFinalizeInit()
         {
+            awaitingOriginal.Clear();
             pendingDrawData.Clear();
             shoulderColourSent.Clear();
             orderingJob = null;
