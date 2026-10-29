@@ -116,9 +116,13 @@ namespace Multiplayer.Compat
                 prefix: new HarmonyMethod(self, nameof(VetoPlayerTargets)));
             MpCompat.harmony.Patch(AccessTools.DeclaredMethod("FactionTerritories2.FactionFealty:TryAI"), // [1a, 2] diplomacy counterpart
                 prefix: new HarmonyMethod(self, nameof(PreFealtyTryAI)));
+            // Stage 2 (co-op fork, F5c): these run per realm. Blocked only while realms are not active.
+            MpCompat.harmony.Patch(AccessTools.DeclaredMethod("FactionTerritories2.EnvoyMissions:SendAvailable"), // [3] envoys
+                prefix: new HarmonyMethod(self, nameof(FalseUnlessRealms)));
+            MpCompat.harmony.Patch(AccessTools.DeclaredMethod("FactionTerritories2.MechanoidCrisis:Offer"), // [9f] letter that starts the endgame crisis
+                prefix: new HarmonyMethod(self, nameof(SkipUnlessRealms)));
             foreach (var method in new[]
             {
-                "FactionTerritories2.EnvoyMissions:SendAvailable", // [3] envoys
                 "FactionTerritories2.Operations:Threatened", // [4e] allied reinforcement of a colony
                 "FactionTerritories2.Conquest:Hold", // [9g] vassalise/raze/plunder letter after a player win
             })
@@ -131,7 +135,6 @@ namespace Multiplayer.Compat
             {
                 "FactionTerritories2.Stewardship:TickCare", // [6] mayor recall gives the pawn to the Spectator
                 "FactionTerritories2.TerritoryIncursions:TryIncursion", // [9c] raids on player maps from AI territory
-                "FactionTerritories2.MechanoidCrisis:Offer", // [9f] letter that starts the endgame crisis
             })
                 MpCompat.harmony.Patch(AccessTools.DeclaredMethod(method), prefix: new HarmonyMethod(self, nameof(SkipInMultiplayer)));
             MpCompat.harmony.Patch(AccessTools.DeclaredMethod("FactionTerritories2.Operations:InvasionTargets"), // [4a]
@@ -332,14 +335,25 @@ namespace Multiplayer.Compat
             return false;
         }
 
+        private static bool FalseUnlessRealms(ref bool __result) => HegemonyRealms.RealmsActive || FalseInMultiplayer(ref __result);
+
+        private static bool SkipUnlessRealms() => !MP.IsInMultiplayer || HegemonyRealms.RealmsActive;
+
+        // With realms active, a player faction is a valid party only when it owns a realm. MP's Spectator never is.
+        private static bool BlockedPlayerFaction(object faction, bool realmsLifted)
+            => faction is Faction { IsPlayer: true } player && !(realmsLifted && HegemonyRealms.IsRealmFaction(player));
+
         // ApiLifecycle.Block(HegemonyVetoKind kind, Faction actor, Faction other, MapParent target, PlanetTile? tile, terms)
         // Kinds 0 AIWar, 1 AIPeaceOrTreaty, 2 InvasionTarget, 3 SettlementSite (left alone).
+        // Stage 2: kinds 0 and 1 against a realm run when realms are active (F5c). Kind 2 stays blocked until F5b.
         private static bool VetoPlayerTargets(object[] __args, ref string __result)
         {
-            if (!MP.IsInMultiplayer || Convert.ToInt32(__args[0]) > 2)
+            var kind = Convert.ToInt32(__args[0]);
+            if (!MP.IsInMultiplayer || kind > 2)
                 return true;
 
-            if (__args[1] is Faction { IsPlayer: true } || __args[2] is Faction { IsPlayer: true } || IsPlayerPlace(__args[3] as MapParent))
+            var lifted = kind < 2 && HegemonyRealms.RealmsActive;
+            if (BlockedPlayerFaction(__args[1], lifted) || BlockedPlayerFaction(__args[2], lifted) || (!lifted && IsPlayerPlace(__args[3] as MapParent)))
             {
                 __result = "Multiplayer: Hegemony runs as an AI-only world";
                 return false;
@@ -349,9 +363,10 @@ namespace Multiplayer.Compat
         }
 
         // true = "handled": the diplomacy tick returns before its war, peace, letter and envoy code for this pair.
+        // Stage 2: a realm candidate runs the real code when realms are active (F5c).
         private static bool PreFealtyTryAI(Faction candidate, ref bool __result)
         {
-            if (!MP.IsInMultiplayer || candidate is not { IsPlayer: true })
+            if (!MP.IsInMultiplayer || candidate is not { IsPlayer: true } || HegemonyRealms.IsRealmFaction(candidate))
                 return true;
 
             __result = true;

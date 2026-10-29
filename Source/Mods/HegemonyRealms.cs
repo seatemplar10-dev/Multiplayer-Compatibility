@@ -120,7 +120,17 @@ namespace Multiplayer.Compat
             }
         }
 
-        // Checked at call time, never cached: the flag lives in the save and a game can be reloaded in process.
+        // Stage 2: the Stage 1 modules (Hegemony, HegemonyUi) lift a block only while this is true.
+        internal static bool RealmsActive => installed && Active();
+
+        // A player faction that owns a realm (not MP's Spectator). False when realms are not active.
+        internal static bool IsRealmFaction(Faction faction) => faction != null && AllRealms()?.Contains(faction) == true;
+
+        // Checked at call time: the flag lives in the save and a game can be reloaded in process. Review #12: a true is kept
+        // per MultiplayerGameComp object (a reload makes a new one). A false is read again each call, in case hosting sets
+        // the flag after it creates the comp.
+        private static object multifactionGameComp;
+
         private static bool Active()
         {
             if (!bound || !MP.IsInMultiplayer)
@@ -129,7 +139,14 @@ namespace Multiplayer.Compat
             try
             {
                 var gameComp = gameCompGetter();
-                return gameComp != null && (bool)multifactionField.GetValue(gameComp);
+                if (gameComp == null)
+                    return false;
+                if (ReferenceEquals(gameComp, multifactionGameComp))
+                    return true;
+                if (!(bool)multifactionField.GetValue(gameComp))
+                    return false;
+                multifactionGameComp = gameComp;
+                return true;
             }
             catch (Exception)
             {
@@ -157,13 +174,29 @@ namespace Multiplayer.Compat
         // the order of FactionManager.AllFactionsListForReading or on the PC.
         // Cheap: the scan and sort of a few factions run into a reused scratch list. The returned list is replaced only when its content
         // changes, so callers may keep and iterate it, and must not modify it. Null = no player faction found.
+        // Review #12: the scan runs once per game tick and faction count. A faction added in a tick (a join command, also
+        // while paused) changes the count, so the list is rebuilt. Factions are never removed and never change IsPlayer.
+        private static object listGame;
+        private static int listTick = -1;
+        private static int listFactionCount = -1;
+
         private static List<Faction> RealmList()
         {
             var factions = Find.FactionManager?.AllFactionsListForReading;
             if (factions == null)
                 return null;
 
+            var game = Current.Game;
+            var tick = Find.TickManager?.TicksGame ?? -1;
+            if (ReferenceEquals(game, listGame) && tick == listTick && factions.Count == listFactionCount)
+                return cached.Count == 0 ? null : cached;
+
             var spectator = Spectator();
+            // No Spectator yet (world comp not loaded): do not keep this result, it may still hold the Spectator later.
+            listGame = spectator == null ? null : game;
+            listTick = tick;
+            listFactionCount = factions.Count;
+
             scratch.Clear();
             for (var i = 0; i < factions.Count; i++)
             {
