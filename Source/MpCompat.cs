@@ -26,6 +26,15 @@ namespace Multiplayer.Compat
             harmony.PatchAll();
             // FIXES row 180: the dev-mode-only ConfigErrors side effects on every PC (DeterministicConfigErrors.cs)
             LongEventHandler.ExecuteWhenFinished(DeterministicConfigErrors.Run);
+            // FIXES row 262: NullReferenceException in Pawn_TrainingTracker.CanAssignToTrain during every reload (TrainingTrackerLoadGuard.cs)
+            try
+            {
+                TrainingTrackerLoadGuard.Install(harmony);
+            }
+            catch (Exception e)
+            {
+                Log.Warning("[MPCompat] row 262: training tracker load guard not installed: " + e.Message);
+            }
         }
 
         static IEnumerable<ISyncMethod> RegisterLambdaMethod_Impl(Type parentType, string parentMethod, MethodType methodType, params int[] lambdaOrdinals)
