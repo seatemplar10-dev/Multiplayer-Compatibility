@@ -81,6 +81,12 @@ namespace Multiplayer.Compat
             if (!bound)
                 Log.Error("[MP Compat] Hegemony realms: could not bind Multiplayer internals, Hegemony keeps one realm in multiplayer.");
 
+            var of = AccessTools.DeclaredMethod(realm, "Of", [typeof(Faction)]);
+            if (of != null)
+                realmOf = (Func<Faction, Faction>)Delegate.CreateDelegate(typeof(Func<Faction, Faction>), of);
+            else
+                Log.Error("[MP Compat] Hegemony realms: Realm.Of(Faction) not found, realm-vs-realm wars are not detected.");
+
             allHook.SetValue(null, (Func<List<Faction>>)AllRealms);
             defaultHook.SetValue(null, (Func<Faction>)DefaultRealm);
             pushHook.SetValue(null, (Action<Faction>)PushRealm);
@@ -125,6 +131,11 @@ namespace Multiplayer.Compat
 
         // A player faction that owns a realm (not MP's Spectator). False when realms are not active.
         internal static bool IsRealmFaction(Faction faction) => faction != null && AllRealms()?.Contains(faction) == true;
+
+        // The fork's Realm.Of(Faction): a realm -> itself, a vassal domain faction -> its owner realm, else null.
+        private static Func<Faction, Faction> realmOf;
+
+        internal static Faction RealmOf(Faction faction) => faction == null || realmOf == null || !RealmsActive ? null : realmOf(faction);
 
         // Checked at call time: the flag lives in the save and a game can be reloaded in process. Review #12: a true is kept
         // per MultiplayerGameComp object (a reload makes a new one). A false is read again each call, in case hosting sets
@@ -192,8 +203,14 @@ namespace Multiplayer.Compat
                 return cached.Count == 0 ? null : cached;
 
             var spectator = Spectator();
-            // No Spectator yet (world comp not loaded): do not keep this result, it may still hold the Spectator later.
-            listGame = spectator == null ? null : game;
+            // No Spectator known (world comp not loaded, or reflection failed): fail closed, no realms. The list could hold
+            // the Spectator as a realm (review 29 Oct, finding 5). Not kept, so the next call reads the Spectator again.
+            if (spectator == null)
+            {
+                listGame = null;
+                return null;
+            }
+            listGame = game;
             listTick = tick;
             listFactionCount = factions.Count;
 

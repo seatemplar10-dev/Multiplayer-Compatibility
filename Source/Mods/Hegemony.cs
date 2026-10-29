@@ -124,7 +124,7 @@ namespace Multiplayer.Compat
             // Stage 2 (co-op fork, F3/F5b): the threatened owner is the vassal's realm or the settlement's own faction.
             MpCompat.harmony.Patch(AccessTools.DeclaredMethod("FactionTerritories2.Operations:Threatened"), // [4e] allied reinforcement of a colony
                 prefix: new HarmonyMethod(self, nameof(FalseUnlessRealms)));
-            // Still blocked with realms: Hold tests HostileTo(Faction.OfPlayer) in a world tick (the Spectator) and sends its letter there.
+            // Still blocked with realms: the fork sends no conquest letter in MP yet (slice S7), so a held settlement could not be resolved.
             MpCompat.harmony.Patch(AccessTools.DeclaredMethod("FactionTerritories2.Conquest:Hold"), // [9g] vassalise/raze/plunder letter after a player win
                 prefix: new HarmonyMethod(self, nameof(FalseInMultiplayer)));
             // [5] The Workshop PlayerDomain.Sync copies the Spectator's name, colour and relations. The co-op fork (it has
@@ -345,17 +345,29 @@ namespace Multiplayer.Compat
 
         // ApiLifecycle.Block(HegemonyVetoKind kind, Faction actor, Faction other, MapParent target, PlanetTile? tile, terms)
         // Kinds 0 AIWar, 1 AIPeaceOrTreaty, 2 InvasionTarget, 3 SettlementSite (left alone).
-        // Stage 2: kinds 0 and 1 against a realm run when realms are active (F5c). Kind 2 stays blocked after F5b: a colony
-        // invasion deploys from a long event that is not bound to the defender realm (Operations.cs:23919 RealmWork.Capture
-        // without owner) and picks its lord job from map.IsPlayerHome (Operations.cs:24138), so the PCs can differ.
+        // Stage 2: kinds 0 and 1 against a realm run when realms are active (F5c). Kind 2 (AI invasion of a realm colony or
+        // vassal) also runs for realms since the fork's invasion-lift: the deploy long event is bound to the defender realm,
+        // the lord job and colonist tests are context-free, and the target place is judged by its owner faction, not by
+        // the context-dependent Map.IsPlayerHome. The Spectator stays blocked on every kind.
+        // Two realms (or their vassal domains) on both sides: a player-vs-player war, peace or invasion. Not an AI decision,
+        // so it stays blocked until Sea and James decide on PvP (review 29 Oct, finding 1).
+        private static bool RealmAgainstRealm(Faction actor, Faction other, MapParent place)
+        {
+            var actorRealm = HegemonyRealms.RealmOf(actor);
+            var otherRealm = HegemonyRealms.RealmOf(other) ?? HegemonyRealms.RealmOf(place?.Faction);
+            return actorRealm != null && otherRealm != null && actorRealm != otherRealm;
+        }
+
         private static bool VetoPlayerTargets(object[] __args, ref string __result)
         {
             var kind = Convert.ToInt32(__args[0]);
             if (!MP.IsInMultiplayer || kind > 2)
                 return true;
 
-            var lifted = kind < 2 && HegemonyRealms.RealmsActive;
-            if (BlockedPlayerFaction(__args[1], lifted) || BlockedPlayerFaction(__args[2], lifted) || (!lifted && IsPlayerPlace(__args[3] as MapParent)))
+            var lifted = HegemonyRealms.RealmsActive;
+            var place = __args[3] as MapParent;
+            if (BlockedPlayerFaction(__args[1], lifted) || BlockedPlayerFaction(__args[2], lifted) || (lifted ? BlockedPlayerPlace(place) : IsPlayerPlace(place))
+                || (lifted && RealmAgainstRealm(__args[1] as Faction, __args[2] as Faction, place)))
             {
                 __result = "Multiplayer: Hegemony runs as an AI-only world";
                 return false;
@@ -375,15 +387,33 @@ namespace Multiplayer.Compat
             return false;
         }
 
+        // Stage 2 (co-op fork, invasion-lift): a place or target of a player faction that owns no realm (MP's Spectator).
+        // Judged by the owner faction only, so every context (world tick, command, UI) gives the same answer.
+        private static bool BlockedPlayerPlace(MapParent place)
+            => place != null && (BlockedPlayerFaction(place.Faction, true) || (place.HasMap && BlockedPlayerFaction(place.Map.ParentFaction, true)));
+
+        private static bool BlockedPlayerTarget(WorldObject target)
+            => target is Caravan caravan ? BlockedPlayerFaction(caravan.Faction, true) : target is MapParent place && BlockedPlayerPlace(place);
+
+        // Stage 2 (co-op fork, invasion-lift): with realms active, realm colonies stay in the list; only non-realm player places go.
         private static void PostInvasionTargets(List<MapParent> __result)
         {
-            if (MP.IsInMultiplayer)
+            if (!MP.IsInMultiplayer)
+                return;
+
+            if (HegemonyRealms.RealmsActive)
+                __result?.RemoveAll(place => place == null || BlockedPlayerPlace(place));
+            else
                 __result?.RemoveAll(place => place == null || IsPlayerPlace(place));
         }
 
+        // Stage 2 (co-op fork, invasion-lift): with realms active an AI army may target a realm's place or caravan, never the Spectator's.
+        private static bool IsBlockedTarget(WorldObject target)
+            => HegemonyRealms.RealmsActive ? BlockedPlayerTarget(target) : IsPlayerTarget(target);
+
         private static bool PreArmyHostileWorldTarget(WorldObject target, ref double distance, ref bool __result)
         {
-            if (!MP.IsInMultiplayer || !IsPlayerTarget(target))
+            if (!MP.IsInMultiplayer || !IsBlockedTarget(target))
                 return true;
 
             distance = 0.0;
@@ -393,7 +423,7 @@ namespace Multiplayer.Compat
 
         private static bool PreAiInterceptTarget(WorldObject target, ref double distance, ref double power, ref double loot, ref bool __result)
         {
-            if (!MP.IsInMultiplayer || !IsPlayerTarget(target))
+            if (!MP.IsInMultiplayer || !IsBlockedTarget(target))
                 return true;
 
             distance = power = loot = 0.0;
