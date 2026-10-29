@@ -56,9 +56,7 @@ namespace Multiplayer.Compat
                 "InvasionJoinCommand:Postfix",       // G2 Settlement.GetCaravanGizmos
                 "CaravanTilePreview:Postfix",        // G3 Caravan.GetGizmos
                 "EnvoyOfferCommands:Postfix",        // G5 Pawn.GetGizmos
-                "OutpostFacilityGizmos:Postfix",     // G8 WorldObject.GetGizmos
                 "OutpostLinkGizmos:Postfix",         // G9 WorldObject.GetGizmos
-                "OrbitalSiteFeatureCommand:Postfix", // G10 MapParent.GetGizmos
                 "CaravanIncitementOptions:Postfix",  // F1 Settlement.GetFloatMenuOptions
                 "SupplyCaravanOptions:Postfix",      // F2 Settlement.GetFloatMenuOptions
                 "SupplyPodOptions:Postfix",          // F4 Settlement.GetTransportersFloatMenuOptions
@@ -76,6 +74,10 @@ namespace Multiplayer.Compat
             // G4 adds Found town (synced) and the other founding gizmos. It runs, and a last postfix on Caravan.GetGizmos keeps
             // only the marked S1a items of it. Without the fork the old skip stays.
             Prefix(nameof(SkipUnlessCoreUi), "PlayerFoundingGizmo:Postfix"); // G4 Caravan.GetGizmos
+            // Stage 2 (co-op fork S3): both add only synced items (outpost site building, site feature upgrade).
+            Prefix(nameof(SkipUnlessCoreUi),
+                "OutpostFacilityGizmos:Postfix",      // G8 WorldObject.GetGizmos
+                "OrbitalSiteFeatureCommand:Postfix"); // G10 MapParent.GetGizmos
             Patch(AccessTools.DeclaredMethod(typeof(Caravan), nameof(Caravan.GetGizmos)), "Caravan.GetGizmos", postfix: nameof(FilterCaravanGizmos), lastPostfix: true);
 
             // F3, U1, T7: Hegemony bool prefixes (rule C). Skipped with __result = true, so vanilla runs as without Hegemony.
@@ -88,14 +90,14 @@ namespace Multiplayer.Compat
             // C1, W1-W4: Hegemony's own overrides. Keep the vanilla base gizmos and options (dev, reform caravan, abandon,
             // map gizmos), remove only the items Hegemony or its framework made.
             Postfix(nameof(FilterGizmosKeepCoreUi),
-                "SettlementComp:GetGizmos");     // C1 (Stage 2: keeps buy vassal, rename and the Vassalage button of S1a)
+                "SettlementComp:GetGizmos",      // C1 (Stage 2: keeps buy vassal, rename and the Vassalage button of S1a)
+                "HegemonyOutpost:GetGizmos",     // W3 (Stage 2: keeps the S3 outpost site building gizmo)
+                "LandmarkHolding:GetGizmos");    // W4 (Stage 2: keeps the S3 site feature upgrade gizmo)
             Postfix(nameof(FilterGizmos),
                 "ArmyMarker:GetGizmos",          // W1
                 "ArmyMarker:GetCaravanGizmos",   // W1
                 "SkirmishSite:GetGizmos",        // W2
-                "SkirmishSite:GetCaravanGizmos", // W2
-                "HegemonyOutpost:GetGizmos",     // W3
-                "LandmarkHolding:GetGizmos");    // W4
+                "SkirmishSite:GetCaravanGizmos"); // W2
             Postfix(nameof(FilterFloatMenuOptions),
                 "ArmyMarker:GetFloatMenuOptions",    // W1
                 "SkirmishSite:GetFloatMenuOptions"); // W2
