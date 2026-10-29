@@ -24,6 +24,8 @@ namespace Multiplayer.Compat
 
             MpCompatLoader.Load(content);
             harmony.PatchAll();
+            // FIXES row 305: a message from another player's tick or command is not drawn or played here (ForeignFactionMessages.cs)
+            ForeignFactionMessages.Patch(harmony);
             // FIXES row 180: the dev-mode-only ConfigErrors side effects on every PC (DeterministicConfigErrors.cs)
             LongEventHandler.ExecuteWhenFinished(DeterministicConfigErrors.Run);
         }
