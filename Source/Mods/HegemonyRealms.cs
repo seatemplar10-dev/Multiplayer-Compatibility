@@ -92,6 +92,50 @@ namespace Multiplayer.Compat
             pushHook.SetValue(null, (Action<Faction>)PushRealm);
             popHook.SetValue(null, (Action)PopRealm);
             installed = true;
+
+            try
+            {
+                PatchMpRelationCommand();
+            }
+            catch (Exception e)
+            {
+                Log.Error($"[MP Compat] Hegemony realms: could not patch MP's relation command, it is not blocked between realms. {e}");
+            }
+        }
+
+        // MP's multifaction "Change faction relation" pawn gizmo (MultifactionPatches.cs, PawnChangeRelationGizmo) sets the
+        // relation directly. Between two realms that skips Hegemony's synced war and peace (S2: war by declaration, peace only
+        // by an accepted offer). So: no gizmo between realms, and the synced SetRelation does nothing between realms.
+        private static void PatchMpRelationCommand()
+        {
+            var setRelation = AccessTools.DeclaredMethod("Multiplayer.Client.Patches.PawnChangeRelationGizmo:SetRelation");
+            if (setRelation == null)
+            {
+                Log.Error("[MP Compat] Hegemony realms: MP PawnChangeRelationGizmo.SetRelation not found, MP's relation command is not blocked between realms.");
+                return;
+            }
+
+            MpCompat.harmony.Patch(setRelation, prefix: new HarmonyMethod(typeof(HegemonyRealms), nameof(PreMpSetRelation)));
+            MpCompat.harmony.Patch(AccessTools.DeclaredMethod(typeof(Pawn), nameof(Pawn.GetGizmos)),
+                postfix: new HarmonyMethod(typeof(HegemonyRealms), nameof(PostPawnGizmos)) { priority = Priority.Last });
+        }
+
+        private const string MpRelationLabel = "Change faction relation"; // MP hard-codes this label (not translated)
+
+        private static bool BetweenRealms(Faction other) => RealmsActive && other != Faction.OfPlayer && IsRealmFaction(Faction.OfPlayer) && IsRealmFaction(other);
+
+        // Runs as the issuer on every PC (synced command), so the check gives the same answer everywhere.
+        private static bool PreMpSetRelation(Faction other) => !BetweenRealms(other);
+
+        private static IEnumerable<Gizmo> PostPawnGizmos(IEnumerable<Gizmo> gizmos, Pawn __instance)
+        {
+            var block = BetweenRealms(__instance.Faction);
+            foreach (var gizmo in gizmos)
+            {
+                if (block && gizmo is Command_Action { defaultLabel: MpRelationLabel })
+                    continue;
+                yield return gizmo;
+            }
         }
 
         private static bool ResolveMultiplayerInternals()
