@@ -27,7 +27,8 @@ namespace Multiplayer.Compat
         // In MP the Update bodies run from the world tick instead, every budget is a fixed step count, the timers are
         // tick based, and UI reads cannot rebuild sim caches. Not needed: the static failed-route cache and ~70 unsaved
         // scheduling fields, because the host saves and reloads at every join point and those reset on a world change.
-        // Both PCs need identical Hegemony mod settings (the sim reads its 461 rules).
+        // Both PCs need identical Hegemony mod settings (the sim reads its 461 rules). The co-op fork (S9) keeps the
+        // host's rules in the save and syncs changes, so there only the Workshop build needs matching local settings.
 
         private static readonly string[] UpdateDrivenComponents =
         {
