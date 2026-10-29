@@ -119,8 +119,15 @@ namespace Multiplayer.Compat
                 // AllowAll doesn't use the normal designator methods, sync the method directly.
                 // Not necessary, but we're syncing the AllowAllTheThings as otherwise we'll end up with a spam of synced commands for CompForbiddable
                 var type = AccessTools.TypeByName("AllowTool.Designator_AllowAll");
+                // FIXES row 196 (29 Oct 2026, live co-op: Allow all acted on the wrong map for both players): AllowAllTheThings takes no map -
+                // it works on Find.CurrentMap - so the call was sent as a WORLD command. A world command runs with Find.CurrentMap pinned
+                // to ONE map for everybody (WorldCurrentMapPin: the first player colony) and with the presser's faction, so the presser's
+                // faction unforbade things on that fixed map (22 Oct: James's press landed on Sea's map; 29 Oct: Sea's press landed on James's
+                // map, James's on neither), never reliably the map the presser was looking at. The sync worker below now writes the presser's viewed map into the command (a Map is
+                // written as the command's map id): it is a map command for THAT map, run with the presser's faction, and on every PC
+                // Find.CurrentMap is that map for the call (AsyncTimeComp.ExecuteCmd), shift and control state still sent as before.
                 MP.RegisterSyncMethod(AccessTools.Method(type, "AllowAllTheThings")).SetPostInvoke(ClearTemporaryState);
-                MP.RegisterSyncWorker<object>(ShiftControlStateOnlySyncWorker, type, shouldConstruct: true);
+                MP.RegisterSyncWorker<object>(ShiftControlMapSyncWorker, type, shouldConstruct: true);
 
                 // Remove syncing from select similar designator (breaks the designator otherwise)
                 selectSimilarType = AccessTools.TypeByName("AllowTool.Designator_SelectSimilar");
@@ -213,7 +220,10 @@ namespace Multiplayer.Compat
         private static void LatePatch()
         {
             // Strip mine
-            MP.RegisterSyncMethod(AccessTools.Method("AllowTool.Designator_StripMine:DesignateCells"));
+            // FIXES row 196 (same cause): DesignateCells(IEnumerable<IntVec3>) reads Find.CurrentMap for the existing mine designations and
+            // toggles the designations on it, but sent only cells (no map) = a world command pinned to the first colony's map.
+            MP.RegisterSyncMethod(AccessTools.Method("AllowTool.Designator_StripMine:DesignateCells"))
+                .SetContext(SyncContext.CurrentMap);
         }
 
         #endregion
@@ -342,6 +352,17 @@ namespace Multiplayer.Compat
 
         private static void ShiftControlStateOnlySyncWorker(SyncWorker sync, ref object _)
             => SyncShiftControlState(sync);
+
+        // Shift/control state plus the map the presser is viewing, for designators that work on Find.CurrentMap with no map argument.
+        // Writing a Map sets the command's map id and writes no bytes; reading it returns the command's map.
+        private static void ShiftControlMapSyncWorker(SyncWorker sync, ref object _)
+        {
+            SyncShiftControlState(sync);
+            if (sync.isWriting)
+                sync.Write(Find.CurrentMap);
+            else
+                sync.Read<Map>();
+        }
 
         private static void ShiftControlCameraStateOnlySyncWorker(SyncWorker sync, ref object _)
         {
