@@ -349,8 +349,9 @@ namespace Multiplayer.Compat
         // vassal) also runs for realms since the fork's invasion-lift: the deploy long event is bound to the defender realm,
         // the lord job and colonist tests are context-free, and the target place is judged by its owner faction, not by
         // the context-dependent Map.IsPlayerHome. The Spectator stays blocked on every kind.
-        // Two realms (or their vassal domains) on both sides: a player-vs-player war, peace or invasion. Not an AI decision,
-        // so it stays blocked until Sea and James decide on PvP (review 29 Oct, finding 1).
+        // Two realms (or their vassal domains) on both sides. Sea 29 Oct allowed war between the realms ("Yes, allow war").
+        // Players decide that war and peace themselves (fork slice S2), so the AI kinds 0 AIWar and 1 AIPeaceOrTreaty stay
+        // blocked for a realm pair. Kind 2 InvasionTarget passes: the fork's own hostility checks gate an invasion.
         private static bool RealmAgainstRealm(Faction actor, Faction other, MapParent place)
         {
             var actorRealm = HegemonyRealms.RealmOf(actor);
@@ -367,7 +368,7 @@ namespace Multiplayer.Compat
             var lifted = HegemonyRealms.RealmsActive;
             var place = __args[3] as MapParent;
             if (BlockedPlayerFaction(__args[1], lifted) || BlockedPlayerFaction(__args[2], lifted) || (lifted ? BlockedPlayerPlace(place) : IsPlayerPlace(place))
-                || (lifted && RealmAgainstRealm(__args[1] as Faction, __args[2] as Faction, place)))
+                || (lifted && kind < 2 && RealmAgainstRealm(__args[1] as Faction, __args[2] as Faction, place)))
             {
                 __result = "Multiplayer: Hegemony runs as an AI-only world";
                 return false;
