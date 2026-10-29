@@ -50,14 +50,12 @@ namespace Multiplayer.Compat
             frameworkAssembly = AccessTools.TypeByName("JaegerUtilityFramework.WorkQueue")?.Assembly;
             BindCoreUi();
 
-            // G1, G2, G5, G9, F1, F2, F4: Hegemony void postfixes. Skipped, they leave the vanilla __result and ref args as they are.
+            // G1, G2, G5, F1, F4: Hegemony void postfixes. Skipped, they leave the vanilla __result and ref args as they are.
             Prefix(nameof(SkipInMultiplayer),
                 "CaravanIncitementCommands:Postfix", // G1 Settlement.GetCaravanGizmos
                 "InvasionJoinCommand:Postfix",       // G2 Settlement.GetCaravanGizmos
                 "EnvoyOfferCommands:Postfix",        // G5 Pawn.GetGizmos
-                "OutpostLinkGizmos:Postfix",         // G9 WorldObject.GetGizmos
                 "CaravanIncitementOptions:Postfix",  // F1 Settlement.GetFloatMenuOptions
-                "SupplyCaravanOptions:Postfix",      // F2 Settlement.GetFloatMenuOptions
                 "SupplyPodOptions:Postfix");         // F4 Settlement.GetTransportersFloatMenuOptions
 
             // G6, G7, G11: passthrough iterator postfixes (rule B). A plain skip would return null and drop the vanilla
@@ -81,7 +79,14 @@ namespace Multiplayer.Compat
             Prefix(nameof(SkipUnlessCoreUi),
                 "CaravanTilePreview:Postfix",        // G3 Caravan.GetGizmos
                 "TilePreviewInspectButton:Postfix"); // U2 WorldInspectPane.DoInspectPaneButtons
-            Patch(AccessTools.DeclaredMethod(typeof(Caravan), nameof(Caravan.GetGizmos)), "Caravan.GetGizmos", postfix: nameof(FilterCaravanGizmos), lastPostfix: true);
+            // Stage 2 (co-op fork S5): F2 offers the supply caravan option only for the player's own vassal. G9 adds the
+            // synced WD2 trade gizmos next to unsynced ones (endpoint selection, supporting settlement, WD2 upgrade funding),
+            // so a last postfix on WorldObject.GetGizmos keeps only the marked items, as on Caravan.GetGizmos for G4.
+            Prefix(nameof(SkipUnlessCoreUi),
+                "SupplyCaravanOptions:Postfix",      // F2 Settlement.GetFloatMenuOptions
+                "OutpostLinkGizmos:Postfix");        // G9 WorldObject.GetGizmos
+            Patch(AccessTools.DeclaredMethod(typeof(Caravan), nameof(Caravan.GetGizmos)), "Caravan.GetGizmos", postfix: nameof(FilterToCoreUi), lastPostfix: true);
+            Patch(AccessTools.DeclaredMethod(typeof(WorldObject), nameof(WorldObject.GetGizmos)), "WorldObject.GetGizmos", postfix: nameof(FilterToCoreUi), lastPostfix: true);
 
             // F3, U1, T7: Hegemony bool prefixes (rule C). Skipped with __result = true, so vanilla runs as without Hegemony.
             // T7 opens a confirm dialog from the synced caravan arrival; its button would attack on one PC only.
@@ -238,7 +243,7 @@ namespace Multiplayer.Compat
             }
         }
 
-        private static void FilterCaravanGizmos(ref IEnumerable<Gizmo> __result)
+        private static void FilterToCoreUi(ref IEnumerable<Gizmo> __result)
         {
             if (CoreUi && __result != null)
                 __result = __result.Where(gizmo => !FromHegemony(gizmo) || IsCoreUi(gizmo));
