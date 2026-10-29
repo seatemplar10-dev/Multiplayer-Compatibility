@@ -67,13 +67,12 @@ namespace Multiplayer.Compat
 
             // G6, G7, G11: passthrough iterator postfixes (rule B). A plain skip would return null and drop the vanilla
             // gizmos, so the prefix returns the incoming enumerable unchanged.
-            Prefix(nameof(PassThroughGizmos),
-                "TerritorialTaxGizmo:Postfix"); // G11 Settlement.GetGizmos
-
-            // Stage 2 (co-op fork S1a): these are synced. Shown when RealmSync.CoreUiActive, else hidden as in Stage 1.
+            // Stage 2 (co-op fork S1a, review fix): these are synced. Shown when RealmSync.CoreUiActive, else hidden as in
+            // Stage 1. G11's tax gizmo reads the account without creating it in MP and its toggle is DiplomacyFullActions.TaxRefusal.
             Prefix(nameof(PassThroughUnlessCoreUi),
-                "FealtyMapCommands:Postfix",    // G6 Pawn.GetGizmos
-                "FealtyColonyCommands:Postfix"); // G7 WorldObject.GetGizmos
+                "FealtyMapCommands:Postfix",     // G6 Pawn.GetGizmos
+                "FealtyColonyCommands:Postfix",  // G7 WorldObject.GetGizmos
+                "TerritorialTaxGizmo:Postfix");  // G11 Settlement.GetGizmos
             // G4 adds Found town (synced) and the other founding gizmos. It runs, and a last postfix on Caravan.GetGizmos keeps
             // only the marked S1a items of it. Without the fork the old skip stays.
             Prefix(nameof(SkipUnlessCoreUi), "PlayerFoundingGizmo:Postfix"); // G4 Caravan.GetGizmos
