@@ -87,19 +87,21 @@ namespace Multiplayer.Compat
             // T7 opens a confirm dialog from the synced caravan arrival; its button would attack on one PC only.
             Prefix(nameof(LetVanillaRun),
                 "VassalTravelOptions:Prefix",      // F3 Settlement.GetFloatMenuOptions
-                "FieldArmyWorldRightClick:Prefix", // U1 WorldSelector.HandleWorldClicks
                 "DiplomaticAttackWarning:Prefix"); // T7 SettlementUtility.Attack
+            // Stage 2 (co-op fork S6): the field army right-click menu sends only synced orders, and only for own armies.
+            Prefix(nameof(LetVanillaRunUnlessCoreUi),
+                "FieldArmyWorldRightClick:Prefix"); // U1 WorldSelector.HandleWorldClicks
 
             // C1, W1-W4: Hegemony's own overrides. Keep the vanilla base gizmos and options (dev, reform caravan, abandon,
             // map gizmos), remove only the items Hegemony or its framework made.
             Postfix(nameof(FilterGizmosKeepCoreUi),
                 "SettlementComp:GetGizmos",      // C1 (Stage 2: keeps buy vassal, rename and the Vassalage button of S1a)
                 "HegemonyOutpost:GetGizmos",     // W3 (Stage 2: keeps the S3 outpost site building gizmo)
-                "LandmarkHolding:GetGizmos");    // W4 (Stage 2: keeps the S3 site feature upgrade gizmo)
+                "LandmarkHolding:GetGizmos",     // W4 (Stage 2: keeps the S3 site feature upgrade gizmo)
+                "ArmyMarker:GetGizmos",          // W1 (Stage 2: keeps the S6 field army gizmos)
+                "SkirmishSite:GetGizmos");       // W2 (Stage 2: keeps the S6 Watch battle gizmo)
             Postfix(nameof(FilterGizmos),
-                "ArmyMarker:GetGizmos",          // W1
                 "ArmyMarker:GetCaravanGizmos",   // W1
-                "SkirmishSite:GetGizmos",        // W2
                 "SkirmishSite:GetCaravanGizmos"); // W2
             Postfix(nameof(FilterFloatMenuOptions),
                 "ArmyMarker:GetFloatMenuOptions",    // W1
@@ -251,6 +253,8 @@ namespace Multiplayer.Compat
             __result = (IEnumerable<Gizmo>)__args[0];
             return false;
         }
+
+        private static bool LetVanillaRunUnlessCoreUi(ref bool __result) => CoreUi || LetVanillaRun(ref __result);
 
         private static bool LetVanillaRun(ref bool __result)
         {
