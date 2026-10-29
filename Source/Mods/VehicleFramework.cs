@@ -62,6 +62,14 @@ namespace Multiplayer.Compat
     /// formation: the seat window does not open (same reject message as Send, since step 7 refuses vehicle caravans anyway, and its
     /// unsynced seat writes could make the PCs send different caravans), and the untick skips the null notify.
     /// </para>
+    /// <para>
+    /// Step 9 (FIXES row 273, Sea 28/29 Oct: "reform caravan ... my guy does not show up in the list"): VF replaces the window's tab bar
+    /// (<c>FormCaravanTabsTranspiler</c>) with its static tab list, which <c>CreateTabListPostOpen</c> fills only on a first open. MP's
+    /// proxy window always counts as opened before (see step 7), so it had no tab bar, and VF's static <c>selectedTab</c> stays on the
+    /// Vehicles tab (10) after any caravan window closes: the window showed only the Vehicles list, never the pawns. For the proxy, and
+    /// only when the tab list is empty: VF builds its tab list as for a first open, then <c>CaravanFormation.formation</c> is set back to
+    /// null (steps 7 and 8 need it null) and the Pawns tab is selected. UI only, nothing synced.
+    /// </para>
     /// </remarks>
     [MpCompatFor("SmashPhil.VehicleFramework")]
     public class VehicleFramework
@@ -188,6 +196,60 @@ namespace Multiplayer.Compat
             {
                 Log.Error("MPCompat :: Vehicle Framework step 8 (vehicle seat window in caravan forming, FIXES row 285) not installed: " + e);
             }
+
+            // 9. Tab bar of Multiplayer's caravan window: VF builds it only on a first open, so the window showed only the Vehicles tab.
+            try
+            {
+                PatchProxyTabs();
+            }
+            catch (Exception e)
+            {
+                Log.Error("MPCompat :: Vehicle Framework step 9 (caravan window tabs, FIXES row 273) not installed: " + e);
+            }
+        }
+
+        // Step 9: Vehicles.World.CaravanFormation.formation, Vehicles.Patch_FormCaravanDialog.selectedTab (both static)
+        private static FieldInfo caravanFormationField;
+        private static FieldInfo vfSelectedTabField;
+
+        private static void PatchProxyTabs()
+        {
+            var formDialogPatchType = FindType("Vehicles.Patch_FormCaravanDialog");
+            caravanFormationField = AccessTools.DeclaredField(FindType("Vehicles.World.CaravanFormation"), "formation")
+                                    ?? throw new MissingFieldException("Vehicles.World.CaravanFormation", "formation");
+            vfSelectedTabField = AccessTools.DeclaredField(formDialogPatchType, "selectedTab")
+                                 ?? throw new MissingFieldException(formDialogPatchType.FullName, "selectedTab");
+
+            MpCompat.harmony.Patch(
+                GetDeclaredMethod(formDialogPatchType, "CreateTabListPostOpen",
+                    [typeof(Dialog_FormCaravan), typeof(Map), typeof(List<TabRecord>), typeof(bool)]),
+                prefix: new HarmonyMethod(typeof(VehicleFramework), nameof(PreCreateTabListPostOpen)),
+                finalizer: new HarmonyMethod(typeof(VehicleFramework), nameof(FinalCreateTabListPostOpen)));
+
+            Log.Message($"{LogPrefix}caravan window tabs installed (Multiplayer's caravan window gets VF's tab bar and opens on the Pawns tab)");
+        }
+
+        // Prefix on Vehicles.Patch_FormCaravanDialog.CreateTabListPostOpen(Dialog_FormCaravan formCaravan, Map map, List<TabRecord> tabsList,
+        // bool thisWindowInstanceEverOpened), static, read by position. For the proxy with an empty tab list, VF runs its first-open branch.
+        // An open after the route planner keeps its tabs (VF clears the list in PostClose only when not choosing a route), so no duplicates.
+        private static void PreCreateTabListPostOpen(Dialog_FormCaravan __0, List<TabRecord> __2, ref bool __3, out bool __state)
+        {
+            __state = false;
+            if (!MP.IsInMultiplayer || !__3 || __2 == null || __2.Count > 0 || !IsCaravanFormingProxy(__0))
+                return;
+
+            __3 = false;
+            __state = true;
+        }
+
+        // Finalizer (runs on an exception too): undo the formation VF just made for the proxy, select the Pawns tab.
+        private static void FinalCreateTabListPostOpen(bool __state)
+        {
+            if (!__state)
+                return;
+
+            caravanFormationField.SetValue(null, null);
+            vfSelectedTabField.SetValue(null, 0);
         }
 
         private static void PatchVehicleCards()
