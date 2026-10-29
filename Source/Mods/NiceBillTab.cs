@@ -67,6 +67,97 @@ namespace Multiplayer.Compat
 
             PatchBillAdds();
             PatchBillCardWatch();
+            PatchBillReorder();
+        }
+
+        // FIXES row 277 (29 Oct 2026, found while fixing row 275): dragging a bill card to another position in this tab ends in
+        // TabBillsDrawer.HandleBillDrop, which does 'LastSelTable.BillStack.Bills.Remove(item); LastSelTable.BillStack.Bills.Insert(dropIndex, item);'
+        // directly on the clicking PC. The bill order is read by the work givers (WorkGiver_DoBill walks the stack in order), so one PC
+        // then offers a different bill first and the game splits. Now, in interface code, the Remove call is skipped and the Insert call
+        // is sent as a synced command with the work table (the bill holder), the bill (synced by holder + loadID) and the drop index;
+        // the command runs the same Remove + Insert on every PC, with the index clamped to the list (the mod's own drop index counts
+        // the filtered list, so a stale or filtered index is possible). The mod's filter cache is told to refresh on every PC.
+        // Done as a transpiler on the two List<Bill> calls so the mod's drag and drop-index logic stays as it is.
+        private static FieldInfo shouldRefreshFilterField;
+
+        private static void PatchBillReorder()
+        {
+            try
+            {
+                var handleDrop = AccessTools.DeclaredMethod("NiceBillTab.TabBillsDrawer:HandleBillDrop");
+                shouldRefreshFilterField = AccessTools.DeclaredField("NiceBillTab.TabBillsDrawer:shouldRefreshFilter");
+                if (handleDrop == null)
+                {
+                    Log.Error("MPCompat - Nice Bill Tab: TabBillsDrawer.HandleBillDrop not found - dragging bills to reorder stays unsynced (FIXES row 277)");
+                    return;
+                }
+
+                MP.RegisterSyncMethod(typeof(NiceBillTab), nameof(SyncedReorderBill));
+                MpCompat.harmony.Patch(handleDrop, transpiler: new HarmonyMethod(typeof(NiceBillTab), nameof(HandleBillDropTranspiler)));
+            }
+            catch (Exception e)
+            {
+                Log.Error($"MPCompat - Nice Bill Tab: patching the bill reorder failed (FIXES row 277): {e}");
+            }
+        }
+
+        private static IEnumerable<CodeInstruction> HandleBillDropTranspiler(IEnumerable<CodeInstruction> insts)
+        {
+            var listRemove = AccessTools.DeclaredMethod(typeof(List<Bill>), nameof(List<Bill>.Remove), [typeof(Bill)]);
+            var listInsert = AccessTools.DeclaredMethod(typeof(List<Bill>), nameof(List<Bill>.Insert), [typeof(int), typeof(Bill)]);
+            var removeStub = AccessTools.DeclaredMethod(typeof(NiceBillTab), nameof(RemoveBillStub));
+            var insertStub = AccessTools.DeclaredMethod(typeof(NiceBillTab), nameof(InsertBillStub));
+            int removed = 0, inserted = 0;
+
+            foreach (var inst in insts)
+            {
+                if ((inst.opcode == System.Reflection.Emit.OpCodes.Callvirt || inst.opcode == System.Reflection.Emit.OpCodes.Call) && inst.operand is MethodInfo m)
+                {
+                    if (m == listRemove)
+                    {
+                        inst.opcode = System.Reflection.Emit.OpCodes.Call;
+                        inst.operand = removeStub;
+                        removed++;
+                    }
+                    else if (m == listInsert)
+                    {
+                        inst.opcode = System.Reflection.Emit.OpCodes.Call;
+                        inst.operand = insertStub;
+                        inserted++;
+                    }
+                }
+                yield return inst;
+            }
+
+            if (removed != 1 || inserted != 1)
+                Log.Error($"MPCompat - Nice Bill Tab: HandleBillDrop has {removed} List<Bill>.Remove and {inserted} List<Bill>.Insert calls, expected 1 and 1 (FIXES row 277)");
+        }
+
+        // Both stubs must take the same decision, so it is one function of the bill alone.
+        private static bool SyncReorder(Bill bill)
+            => MP.IsInMultiplayer && MP.InInterface && bill?.billStack?.billGiver is Building_WorkTable;
+
+        private static bool RemoveBillStub(List<Bill> list, Bill bill)
+            => SyncReorder(bill) || list.Remove(bill); // synced: leave the list alone, the command does the move
+
+        private static void InsertBillStub(List<Bill> list, int index, Bill bill)
+        {
+            if (SyncReorder(bill))
+                SyncedReorderBill((Building_WorkTable)bill.billStack.billGiver, bill, index);
+            else
+                list.Insert(index, bill);
+        }
+
+        // Synced: runs on every PC inside the command. The work table names the bill holder, the bill is found in its stack.
+        private static void SyncedReorderBill(Building_WorkTable table, Bill bill, int index)
+        {
+            var bills = table?.billStack?.Bills;
+            if (bills == null || bill == null || !bills.Contains(bill))
+                return;
+
+            bills.Remove(bill);
+            bills.Insert(Math.Max(0, Math.Min(index, bills.Count)), bill);
+            shouldRefreshFilterField?.SetValue(null, true);
         }
 
         // FIXES row 283 (28 Oct 2026, live co-op: "the bill for stone blocks, whenever he shift clicks, desyncs us"): Nice Bill Tab
