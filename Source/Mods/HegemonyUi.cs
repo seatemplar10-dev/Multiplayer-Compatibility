@@ -50,11 +50,16 @@ namespace Multiplayer.Compat
             frameworkAssembly = AccessTools.TypeByName("JaegerUtilityFramework.WorkQueue")?.Assembly;
             BindCoreUi();
 
-            // G1, G2, G5, F1, F4: Hegemony void postfixes. Skipped, they leave the vanilla __result and ref args as they are.
+            // G5: Hegemony void postfix. Skipped, it leaves the vanilla __result and ref args as they are.
             Prefix(nameof(SkipInMultiplayer),
+                "EnvoyOfferCommands:Postfix");       // G5 Pawn.GetGizmos
+            // Stage 2 (co-op fork S7): G1, G2 add only synced items. F1's option is Hegemony's own lambda (MP auto-syncs only
+            // the vanilla CaravanArrivalActionUtility confirm, SyncActions.cs:24); it opens a local confirm that sends
+            // AssaultActions.CaravanIncite. F4's pods launch through MP's synced CompLaunchable.TryLaunch with the arrival
+            // action exposed (SyncMethods.cs:182); ArrivalAtSupplyPods saves its settlement and realm.
+            Prefix(nameof(SkipUnlessCoreUi),
                 "CaravanIncitementCommands:Postfix", // G1 Settlement.GetCaravanGizmos
                 "InvasionJoinCommand:Postfix",       // G2 Settlement.GetCaravanGizmos
-                "EnvoyOfferCommands:Postfix",        // G5 Pawn.GetGizmos
                 "CaravanIncitementOptions:Postfix",  // F1 Settlement.GetFloatMenuOptions
                 "SupplyPodOptions:Postfix");         // F4 Settlement.GetTransportersFloatMenuOptions
 
@@ -104,11 +109,10 @@ namespace Multiplayer.Compat
                 "HegemonyOutpost:GetGizmos",     // W3 (Stage 2: keeps the S3 outpost site building gizmo)
                 "LandmarkHolding:GetGizmos",     // W4 (Stage 2: keeps the S3 site feature upgrade gizmo)
                 "ArmyMarker:GetGizmos",          // W1 (Stage 2: keeps the S6 field army gizmos)
-                "SkirmishSite:GetGizmos");       // W2 (Stage 2: keeps the S6 Watch battle gizmo)
-            Postfix(nameof(FilterGizmos),
-                "ArmyMarker:GetCaravanGizmos",   // W1
-                "SkirmishSite:GetCaravanGizmos"); // W2
-            Postfix(nameof(FilterFloatMenuOptions),
+                "SkirmishSite:GetGizmos",        // W2 (Stage 2: keeps the S6 Watch battle gizmo)
+                "ArmyMarker:GetCaravanGizmos",   // W1 (Stage 2: keeps the S7 follow army gizmo)
+                "SkirmishSite:GetCaravanGizmos"); // W2 (Stage 2: keeps the S7 join skirmish gizmo)
+            Postfix(nameof(FilterFloatMenuOptionsKeepCoreUi),
                 "ArmyMarker:GetFloatMenuOptions",    // W1
                 "SkirmishSite:GetFloatMenuOptions"); // W2
 
@@ -270,16 +274,13 @@ namespace Multiplayer.Compat
             return false;
         }
 
-        private static void FilterGizmos(ref IEnumerable<Gizmo> __result)
+        private static void FilterFloatMenuOptionsKeepCoreUi(ref IEnumerable<FloatMenuOption> __result)
         {
             if (MP.IsInMultiplayer && __result != null)
-                __result = __result.Where(gizmo => !FromHegemony(gizmo));
-        }
-
-        private static void FilterFloatMenuOptions(ref IEnumerable<FloatMenuOption> __result)
-        {
-            if (MP.IsInMultiplayer && __result != null)
-                __result = __result.Where(option => !FromHegemony(option));
+            {
+                var keepCore = CoreUi;
+                __result = __result.Where(option => !FromHegemony(option) || (keepCore && IsCoreUi(option)));
+            }
         }
 
         // Made by Hegemony or its framework: the type, or the click delegate (lambdas live in compiler-generated nested types).

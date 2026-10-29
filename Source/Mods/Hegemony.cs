@@ -125,9 +125,9 @@ namespace Multiplayer.Compat
             // Stage 2 (co-op fork, F3/F5b): the threatened owner is the vassal's realm or the settlement's own faction.
             MpCompat.harmony.Patch(AccessTools.DeclaredMethod("FactionTerritories2.Operations:Threatened"), // [4e] allied reinforcement of a colony
                 prefix: new HarmonyMethod(self, nameof(FalseUnlessRealms)));
-            // Still blocked with realms: the fork sends no conquest letter in MP yet (slice S7), so a held settlement could not be resolved.
+            // Stage 2 (co-op fork, S7): Hold runs per realm. The letter goes to the choosing realm, its buttons are synced calls.
             MpCompat.harmony.Patch(AccessTools.DeclaredMethod("FactionTerritories2.Conquest:Hold"), // [9g] vassalise/raze/plunder letter after a player win
-                prefix: new HarmonyMethod(self, nameof(FalseInMultiplayer)));
+                prefix: new HarmonyMethod(self, nameof(FalseUnlessRealms)));
             // [5] The Workshop PlayerDomain.Sync copies the Spectator's name, colour and relations. The co-op fork (it has
             // FactionTerritories2.Realm) syncs each domain from its own realm, so it must run there.
             if (AccessTools.TypeByName("FactionTerritories2.Realm") == null)
