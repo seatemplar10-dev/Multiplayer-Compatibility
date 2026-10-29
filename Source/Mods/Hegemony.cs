@@ -121,22 +121,22 @@ namespace Multiplayer.Compat
                 prefix: new HarmonyMethod(self, nameof(FalseUnlessRealms)));
             MpCompat.harmony.Patch(AccessTools.DeclaredMethod("FactionTerritories2.MechanoidCrisis:Offer"), // [9f] letter that starts the endgame crisis
                 prefix: new HarmonyMethod(self, nameof(SkipUnlessRealms)));
-            foreach (var method in new[]
-            {
-                "FactionTerritories2.Operations:Threatened", // [4e] allied reinforcement of a colony
-                "FactionTerritories2.Conquest:Hold", // [9g] vassalise/raze/plunder letter after a player win
-            })
-                MpCompat.harmony.Patch(AccessTools.DeclaredMethod(method), prefix: new HarmonyMethod(self, nameof(FalseInMultiplayer)));
+            // Stage 2 (co-op fork, F3/F5b): the threatened owner is the vassal's realm or the settlement's own faction.
+            MpCompat.harmony.Patch(AccessTools.DeclaredMethod("FactionTerritories2.Operations:Threatened"), // [4e] allied reinforcement of a colony
+                prefix: new HarmonyMethod(self, nameof(FalseUnlessRealms)));
+            // Still blocked with realms: Hold tests HostileTo(Faction.OfPlayer) in a world tick (the Spectator) and sends its letter there.
+            MpCompat.harmony.Patch(AccessTools.DeclaredMethod("FactionTerritories2.Conquest:Hold"), // [9g] vassalise/raze/plunder letter after a player win
+                prefix: new HarmonyMethod(self, nameof(FalseInMultiplayer)));
             // [5] The Workshop PlayerDomain.Sync copies the Spectator's name, colour and relations. The co-op fork (it has
             // FactionTerritories2.Realm) syncs each domain from its own realm, so it must run there.
             if (AccessTools.TypeByName("FactionTerritories2.Realm") == null)
                 MpCompat.harmony.Patch(AccessTools.DeclaredMethod("FactionTerritories2.PlayerDomain:Sync"), prefix: new HarmonyMethod(self, nameof(SkipInMultiplayer)));
-            foreach (var method in new[]
-            {
-                "FactionTerritories2.Stewardship:TickCare", // [6] mayor recall gives the pawn to the Spectator
-                "FactionTerritories2.TerritoryIncursions:TryIncursion", // [9c] raids on player maps from AI territory
-            })
-                MpCompat.harmony.Patch(AccessTools.DeclaredMethod(method), prefix: new HarmonyMethod(self, nameof(SkipInMultiplayer)));
+            // Stage 2 (co-op fork, F5a): Recall gives the mayor back to MayorRecord.owner, a realm, not the Spectator.
+            MpCompat.harmony.Patch(AccessTools.DeclaredMethod("FactionTerritories2.Stewardship:TickCare"), // [6] mayor recall gives the pawn to the Spectator
+                prefix: new HarmonyMethod(self, nameof(SkipUnlessRealms)));
+            // Stage 2 (co-op fork, F5b): only on a map of a realm. MP ticks that map with its realm pushed, so the raid is the realm's.
+            MpCompat.harmony.Patch(AccessTools.DeclaredMethod("FactionTerritories2.TerritoryIncursions:TryIncursion"), // [9c] raids on player maps from AI territory
+                prefix: new HarmonyMethod(self, nameof(PreTryIncursion)));
             MpCompat.harmony.Patch(AccessTools.DeclaredMethod("FactionTerritories2.Operations:InvasionTargets"), // [4a]
                 postfix: new HarmonyMethod(self, nameof(PostInvasionTargets)));
             MpCompat.harmony.Patch(AccessTools.DeclaredMethod("FactionTerritories2.Operations:ArmyHostileWorldTarget"), // [4c]
@@ -345,7 +345,9 @@ namespace Multiplayer.Compat
 
         // ApiLifecycle.Block(HegemonyVetoKind kind, Faction actor, Faction other, MapParent target, PlanetTile? tile, terms)
         // Kinds 0 AIWar, 1 AIPeaceOrTreaty, 2 InvasionTarget, 3 SettlementSite (left alone).
-        // Stage 2: kinds 0 and 1 against a realm run when realms are active (F5c). Kind 2 stays blocked until F5b.
+        // Stage 2: kinds 0 and 1 against a realm run when realms are active (F5c). Kind 2 stays blocked after F5b: a colony
+        // invasion deploys from a long event that is not bound to the defender realm (Operations.cs:23919 RealmWork.Capture
+        // without owner) and picks its lord job from map.IsPlayerHome (Operations.cs:24138), so the PCs can differ.
         private static bool VetoPlayerTargets(object[] __args, ref string __result)
         {
             var kind = Convert.ToInt32(__args[0]);
@@ -399,19 +401,40 @@ namespace Multiplayer.Compat
             return false;
         }
 
+        // Stage 2 (co-op fork, F5b): a map of a realm only. Other maps tick as the Spectator.
+        private static bool PreTryIncursion(MapComponent __instance)
+            => !MP.IsInMultiplayer || (HegemonyRealms.RealmsActive && HegemonyRealms.IsRealmFaction(__instance?.map?.ParentFaction));
+
         // null controller = "no foreign territorial tax" for that place, and nothing is collected.
+        // Stage 2 (co-op fork, F3/F5a/F5c): a realm may tax and be taxed. A non-realm player faction (the Spectator) never.
         private static void PostTaxControllerFor(MapParent settlement, ref Faction __result)
         {
-            if (MP.IsInMultiplayer && (__result is { IsPlayer: true } || IsPlayerPlace(settlement)))
+            if (!MP.IsInMultiplayer)
+                return;
+
+            if (HegemonyRealms.RealmsActive)
+            {
+                if (BlockedPlayerFaction(__result, true))
+                    __result = null;
+            }
+            else if (__result is { IsPlayer: true } || IsPlayerPlace(settlement))
                 __result = null;
         }
 
+        // Stage 2 (co-op fork, F5b): a realm may be aggressor or victim. The Spectator stays blocked on both sides.
         private static bool PreRetaliationAttacked(Settlement victim, Faction aggressor)
-            => !MP.IsInMultiplayer || (aggressor is not { IsPlayer: true } && victim?.Faction is not { IsPlayer: true });
-
-        private static bool PreEncounterOwner(ref Faction __result)
         {
             if (!MP.IsInMultiplayer)
+                return true;
+
+            var lifted = HegemonyRealms.RealmsActive;
+            return !BlockedPlayerFaction(aggressor, lifted) && !BlockedPlayerFaction(victim?.Faction, lifted);
+        }
+
+        // Stage 2 (co-op fork): Owner reads no OfPlayer. A Spectator context sees no player-controlled caravan, so it returns null.
+        private static bool PreEncounterOwner(ref Faction __result)
+        {
+            if (!MP.IsInMultiplayer || HegemonyRealms.RealmsActive)
                 return true;
 
             __result = null;
