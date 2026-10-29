@@ -20,13 +20,16 @@ namespace Multiplayer.Compat
     /// (ThingFilterMarkers.DrawnThingFilter); a float menu action from this tab has none, so the filter changed on the clicking PC only.
     /// Now a pick on a bill that is in a bill stack is sent as a command (bill, recipe, material) and set on every PC.
     /// A bill that is in no stack yet (the 'Add recipe' bill that row 275 holds back) keeps the local call: row 275 sends it by value
-    /// with its filter. Not covered: the clicking PC's ingredient panel can show the old material until it refreshes.
+    /// with its filter. The synced call also sets NBT's UI-only RecipeSelection.NeedRefresh for open selections of that bill (review fix).
     /// Status: [unverified] compiled only, not run in game.
     /// </remarks>
     [MpCompatFor("Andromeda.NiceBillTab")]
     internal class NiceBillTabMaterialPick
     {
         private static FieldInfo selectionMaterial;
+        private static FieldInfo selectionsField;
+        private static FieldInfo selectionBill;
+        private static FieldInfo selectionNeedRefresh;
 
         public NiceBillTabMaterialPick(ModContentPack mod)
         {
@@ -45,6 +48,17 @@ namespace Multiplayer.Compat
             }
 
             selectionMaterial = materialField;
+            // Optional, UI only: mark open selections of the changed bill for NBT's own refresh (DoCache re-reads the bill's material)
+            selectionsField = AccessTools.DeclaredField("NiceBillTab.TabBillsDrawer:Selections");
+            selectionBill = AccessTools.DeclaredField(selectionType, "SelectedBill");
+            selectionNeedRefresh = AccessTools.DeclaredField(selectionType, "NeedRefresh");
+            if (selectionsField == null || selectionBill == null || selectionNeedRefresh == null || selectionNeedRefresh.FieldType != typeof(bool))
+            {
+                Log.Warning("MPCompat - Nice Bill Tab: TabBillsDrawer.Selections or RecipeSelection.SelectedBill/NeedRefresh not found - " +
+                            "the bill panel may show the old material after a pick (FIXES row 270)");
+                selectionsField = selectionBill = selectionNeedRefresh = null;
+            }
+
             MP.RegisterSyncMethod(typeof(NiceBillTabMaterialPick), nameof(SyncedSetMaterial));
             MpCompat.harmony.Patch(setMaterial, prefix: new HarmonyMethod(typeof(NiceBillTabMaterialPick), nameof(PreSetMaterialToBill)));
         }
@@ -84,6 +98,16 @@ namespace Multiplayer.Compat
 
             bill.ingredientFilter.SetDisallowAll();
             bill.ingredientFilter.SetAllow(material, true);
+
+            // UI only (no saved state): the clicking PC's panel re-reads the material on its next draw
+            if (selectionsField?.GetValue(null) is System.Collections.IList selections)
+            {
+                foreach (var selection in selections)
+                {
+                    if (selection != null && selectionBill.GetValue(selection) == bill)
+                        selectionNeedRefresh.SetValue(selection, true);
+                }
+            }
         }
     }
 }
