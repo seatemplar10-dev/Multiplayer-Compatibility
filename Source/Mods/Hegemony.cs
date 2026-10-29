@@ -6,6 +6,7 @@ using System.Reflection;
 using System.Reflection.Emit;
 using HarmonyLib;
 using Multiplayer.API;
+using RimWorld;
 using RimWorld.Planet;
 using Verse;
 
@@ -107,7 +108,41 @@ namespace Multiplayer.Compat
             MpCompat.harmony.Patch(AccessTools.DeclaredPropertyGetter("FactionTerritories2.Diagnostics:Enabled"),
                 prefix: new HarmonyMethod(typeof(Hegemony), nameof(NoDiagnostics)));
 
-            // @@STAGE1_C@@
+            // C1: AI decisions never target a player faction. In MP world ticks Faction.OfPlayer is the Spectator, so
+            // without these the AI courts, taxes, invades and raids "the player" through the Spectator.
+            // Targets: REPORT-2026-10-29-new-mods_audits/heg_stage1_targets.md Part 1 (row ids in brackets).
+            var self = typeof(Hegemony);
+            MpCompat.harmony.Patch(AccessTools.DeclaredMethod("FactionTerritories2.ApiLifecycle:Block"), // [4b] Hegemony's own veto choke point
+                prefix: new HarmonyMethod(self, nameof(VetoPlayerTargets)));
+            MpCompat.harmony.Patch(AccessTools.DeclaredMethod("FactionTerritories2.FactionFealty:TryAI"), // [1a, 2] diplomacy counterpart
+                prefix: new HarmonyMethod(self, nameof(PreFealtyTryAI)));
+            foreach (var method in new[]
+            {
+                "FactionTerritories2.EnvoyMissions:SendAvailable", // [3] envoys
+                "FactionTerritories2.Operations:Threatened", // [4e] allied reinforcement of a colony
+                "FactionTerritories2.Conquest:Hold", // [9g] vassalise/raze/plunder letter after a player win
+            })
+                MpCompat.harmony.Patch(AccessTools.DeclaredMethod(method), prefix: new HarmonyMethod(self, nameof(FalseInMultiplayer)));
+            foreach (var method in new[]
+            {
+                "FactionTerritories2.PlayerDomain:Sync", // [5] copies Spectator name, colour, relations
+                "FactionTerritories2.Stewardship:TickCare", // [6] mayor recall gives the pawn to the Spectator
+                "FactionTerritories2.TerritoryIncursions:TryIncursion", // [9c] raids on player maps from AI territory
+                "FactionTerritories2.MechanoidCrisis:Offer", // [9f] letter that starts the endgame crisis
+            })
+                MpCompat.harmony.Patch(AccessTools.DeclaredMethod(method), prefix: new HarmonyMethod(self, nameof(SkipInMultiplayer)));
+            MpCompat.harmony.Patch(AccessTools.DeclaredMethod("FactionTerritories2.Operations:InvasionTargets"), // [4a]
+                postfix: new HarmonyMethod(self, nameof(PostInvasionTargets)));
+            MpCompat.harmony.Patch(AccessTools.DeclaredMethod("FactionTerritories2.Operations:ArmyHostileWorldTarget"), // [4c]
+                prefix: new HarmonyMethod(self, nameof(PreArmyHostileWorldTarget)));
+            MpCompat.harmony.Patch(AccessTools.DeclaredMethod("FactionTerritories2.Operations:AiInterceptTarget"), // [4d]
+                prefix: new HarmonyMethod(self, nameof(PreAiInterceptTarget)));
+            MpCompat.harmony.Patch(AccessTools.DeclaredMethod("FactionTerritories2.TerritorialTaxes:ControllerFor"), // [7]
+                postfix: new HarmonyMethod(self, nameof(PostTaxControllerFor)));
+            MpCompat.harmony.Patch(AccessTools.DeclaredMethod("FactionTerritories2.SettlementRetaliation:Attacked"), // [9a]
+                prefix: new HarmonyMethod(self, nameof(PreRetaliationAttacked)));
+            MpCompat.harmony.Patch(AccessTools.DeclaredMethod("FactionTerritories2.TerritoryEncounters:Owner"), // [9e]
+                prefix: new HarmonyMethod(self, nameof(PreEncounterOwner)));
         }
 
         #region F1 work queues
@@ -277,6 +312,94 @@ namespace Multiplayer.Compat
 
         #endregion
 
-        // @@STAGE1_C_BODY@@
+        #region C1 AI paths never target a player
+
+        private static bool IsPlayerPlace(MapParent place)
+            => place != null && (place.Faction is { IsPlayer: true } || (place.HasMap && place.Map.IsPlayerHome));
+
+        private static bool IsPlayerTarget(WorldObject target)
+            => target is Caravan { Faction.IsPlayer: true } || (target is MapParent place && IsPlayerPlace(place));
+
+        private static bool FalseInMultiplayer(ref bool __result)
+        {
+            if (!MP.IsInMultiplayer)
+                return true;
+
+            __result = false;
+            return false;
+        }
+
+        // ApiLifecycle.Block(HegemonyVetoKind kind, Faction actor, Faction other, MapParent target, PlanetTile? tile, terms)
+        // Kinds 0 AIWar, 1 AIPeaceOrTreaty, 2 InvasionTarget, 3 SettlementSite (left alone).
+        private static bool VetoPlayerTargets(object[] __args, ref string __result)
+        {
+            if (!MP.IsInMultiplayer || Convert.ToInt32(__args[0]) > 2)
+                return true;
+
+            if (__args[1] is Faction { IsPlayer: true } || __args[2] is Faction { IsPlayer: true } || IsPlayerPlace(__args[3] as MapParent))
+            {
+                __result = "Multiplayer: Hegemony runs as an AI-only world";
+                return false;
+            }
+
+            return true;
+        }
+
+        // true = "handled": the diplomacy tick returns before its war, peace, letter and envoy code for this pair.
+        private static bool PreFealtyTryAI(Faction candidate, ref bool __result)
+        {
+            if (!MP.IsInMultiplayer || candidate is not { IsPlayer: true })
+                return true;
+
+            __result = true;
+            return false;
+        }
+
+        private static void PostInvasionTargets(List<MapParent> __result)
+        {
+            if (MP.IsInMultiplayer)
+                __result?.RemoveAll(place => place == null || IsPlayerPlace(place));
+        }
+
+        private static bool PreArmyHostileWorldTarget(WorldObject target, ref double distance, ref bool __result)
+        {
+            if (!MP.IsInMultiplayer || !IsPlayerTarget(target))
+                return true;
+
+            distance = 0.0;
+            __result = false;
+            return false;
+        }
+
+        private static bool PreAiInterceptTarget(WorldObject target, ref double distance, ref double power, ref double loot, ref bool __result)
+        {
+            if (!MP.IsInMultiplayer || !IsPlayerTarget(target))
+                return true;
+
+            distance = power = loot = 0.0;
+            __result = false;
+            return false;
+        }
+
+        // null controller = "no foreign territorial tax" for that place, and nothing is collected.
+        private static void PostTaxControllerFor(MapParent settlement, ref Faction __result)
+        {
+            if (MP.IsInMultiplayer && (__result is { IsPlayer: true } || IsPlayerPlace(settlement)))
+                __result = null;
+        }
+
+        private static bool PreRetaliationAttacked(Settlement victim, Faction aggressor)
+            => !MP.IsInMultiplayer || (aggressor is not { IsPlayer: true } && victim?.Faction is not { IsPlayer: true });
+
+        private static bool PreEncounterOwner(ref Faction __result)
+        {
+            if (!MP.IsInMultiplayer)
+                return true;
+
+            __result = null;
+            return false;
+        }
+
+        #endregion
     }
 }
