@@ -206,6 +206,27 @@ namespace Multiplayer.Compat
             {
                 Log.Error("MPCompat :: Vehicle Framework step 9 (caravan window tabs, FIXES row 273) not installed: " + e);
             }
+
+            // 10. VF's MassUsage transpiler (IgnorePawnGearAndInventoryMassTranspiler) passes local 4 as the pawn, which is null in the
+            // corpse branch: PawnMassUsageInVehicle(float, Pawn) then throws every frame in the reform window. Null pawn = mass unchanged.
+            try
+            {
+                MpCompat.harmony.Patch(GetDeclaredMethod(FindType("Vehicles.Patch_CaravanHandling"), "PawnMassUsageInVehicle", [typeof(float), typeof(Pawn)]),
+                    prefix: new HarmonyMethod(typeof(VehicleFramework), nameof(PrePawnMassUsageInVehicle)));
+            }
+            catch (Exception e)
+            {
+                Log.Error("MPCompat :: Vehicle Framework step 10 (null pawn in caravan mass, FIXES row 271) not installed: " + e);
+            }
+        }
+
+        // Step 10: the mass passes through unchanged for a null pawn (a corpse), as VF does for a pawn not in a vehicle.
+        private static bool PrePawnMassUsageInVehicle(float massUsage, Pawn pawn, ref float __result)
+        {
+            if (pawn != null)
+                return true;
+            __result = massUsage;
+            return false;
         }
 
         // Step 9: Vehicles.World.CaravanFormation.formation, Vehicles.Patch_FormCaravanDialog.selectedTab (both static)
