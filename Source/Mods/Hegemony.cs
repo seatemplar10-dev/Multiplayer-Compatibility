@@ -123,9 +123,12 @@ namespace Multiplayer.Compat
                 "FactionTerritories2.Conquest:Hold", // [9g] vassalise/raze/plunder letter after a player win
             })
                 MpCompat.harmony.Patch(AccessTools.DeclaredMethod(method), prefix: new HarmonyMethod(self, nameof(FalseInMultiplayer)));
+            // [5] The Workshop PlayerDomain.Sync copies the Spectator's name, colour and relations. The co-op fork (it has
+            // FactionTerritories2.Realm) syncs each domain from its own realm, so it must run there.
+            if (AccessTools.TypeByName("FactionTerritories2.Realm") == null)
+                MpCompat.harmony.Patch(AccessTools.DeclaredMethod("FactionTerritories2.PlayerDomain:Sync"), prefix: new HarmonyMethod(self, nameof(SkipInMultiplayer)));
             foreach (var method in new[]
             {
-                "FactionTerritories2.PlayerDomain:Sync", // [5] copies Spectator name, colour, relations
                 "FactionTerritories2.Stewardship:TickCare", // [6] mayor recall gives the pawn to the Spectator
                 "FactionTerritories2.TerritoryIncursions:TryIncursion", // [9c] raids on player maps from AI territory
                 "FactionTerritories2.MechanoidCrisis:Offer", // [9f] letter that starts the endgame crisis
