@@ -21,7 +21,7 @@ namespace Multiplayer.Compat
         // Hegemony patches in its Mod constructor and the module order against it is not fixed, so patch after loading.
         // Gap: other Hegemony windows (DiplomacyLedgerWindow, LogisticsHub, ...) opened from elsewhere are not guarded.
         // Stage 2: with the private co-op fork (FactionTerritories2.RealmSync, slice S1a) the synced screens and gizmos stay on.
-        // Letters stay off until slice S1b.
+        // Letters are on when the fork has slice S1b (RealmSync.LettersActive).
 
         private const string Ns = "FactionTerritories2.";
         private const string HegemonyHarmonyId = "jaeger972.factionterritories2";
@@ -184,6 +184,7 @@ namespace Multiplayer.Compat
         // Stage 2: the co-op fork's FactionTerritories2.RealmSync (S1a). Absent in the Workshop DLL: then CoreUi is false.
         private static Func<bool> coreUiActive;
         private static Func<object, bool> isCoreUi;
+        private static Func<bool> lettersActive;
 
         private static void BindCoreUi()
         {
@@ -201,6 +202,11 @@ namespace Multiplayer.Compat
 
             coreUiActive = (Func<bool>)Delegate.CreateDelegate(typeof(Func<bool>), active);
             isCoreUi = (Func<object, bool>)Delegate.CreateDelegate(typeof(Func<object, bool>), marked);
+
+            // Slice S1b: the fork routes each letter to its realm and makes unsynced letter choices info-only in MP.
+            var letters = AccessTools.PropertyGetter(realmSync, "LettersActive");
+            if (letters != null)
+                lettersActive = (Func<bool>)Delegate.CreateDelegate(typeof(Func<bool>), letters);
             Log.Message("[MP Compat] Hegemony UI: co-op fork found, its synced S1a screens and gizmos stay on in multiplayer.");
         }
 
@@ -292,7 +298,7 @@ namespace Multiplayer.Compat
 
         private static bool NoNotifications(ref bool __result)
         {
-            if (!MP.IsInMultiplayer)
+            if (!MP.IsInMultiplayer || (lettersActive != null && lettersActive()))
                 return true;
 
             __result = false;
