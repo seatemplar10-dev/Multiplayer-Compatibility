@@ -731,8 +731,8 @@ namespace Multiplayer.Compat
                 return;
 
             MP.WatchBegin();
-            targetFuelPercentField.Watch(fuelGizmoRefuelableField(__instance));
             __state = true;
+            targetFuelPercentField.Watch(fuelGizmoRefuelableField(__instance));
         }
 
         // Finalizer, so WatchEnd still runs if the gizmo throws
