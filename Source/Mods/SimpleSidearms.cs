@@ -1,4 +1,7 @@
 ﻿using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Text;
 
 using HarmonyLib;
 using JetBrains.Annotations;
@@ -137,16 +140,100 @@ namespace Multiplayer.Compat
 
             // If verbs are null, assume false (is EMP, is dangerous, etc.)
             __result = false;
-            // Initialize the verb
-            SyncInitVerbsForComp(comp);
+            // Initialize the verb (FIXES row 315: at most one command per weapon per throttle window)
+            TrySendInitVerbs(comp);
             // Prevent the method from running
             return false;
         }
 
-        [MpCompatSyncMethod]
-        private static void SyncInitVerbsForComp(CompEquippable comp)
+        // FIXES row 315 (29 Oct co-op, desync A): the gizmo calls the 3 getters for every verbs-null weapon on every frame.
+        // When the synced comp read back as null, the command threw an NRE, verbs stayed null and the gizmo sent again:
+        // 101 failing commands in 3 seconds. Now: one send per weapon, then a doubling wait (1 s up to 60 s).
+        // Interface-only state (never read by synced code), so it may differ between PCs.
+        private const long InitVerbsFirstWaitMs = 1000;
+        private const long InitVerbsMaxWaitMs = 60000;
+        private static readonly Dictionary<int, (long nextMs, long waitMs)> initVerbsThrottle = new();
+        private static readonly Stopwatch initVerbsClock = Stopwatch.StartNew();
+        private static int initVerbsThrottleGame; // identity hash of Current.Game, so no old Game stays referenced
+
+        // Lab only: -mplabssverbslog logs every SyncInitVerbsForComp read that finds no comp (thing id, holder, ThingsById hits)
+        private static readonly bool LabSsVerbsLog = GenCommandLine.CommandLineArgPassed("mplabssverbslog");
+
+        private static void TrySendInitVerbs(CompEquippable comp)
         {
-            if (comp.verbTracker.verbs == null)
+            var weapon = comp.parent;
+            if (weapon == null)
+                return;
+
+            var game = System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(Current.Game);
+            if (initVerbsThrottleGame != game)
+            {
+                initVerbsThrottle.Clear();
+                initVerbsThrottleGame = game;
+            }
+
+            var now = initVerbsClock.ElapsedMilliseconds;
+            var id = weapon.thingIDNumber;
+            var wait = InitVerbsFirstWaitMs;
+            if (initVerbsThrottle.TryGetValue(id, out var entry))
+            {
+                if (now < entry.nextMs)
+                    return;
+                wait = Math.Min(entry.waitMs * 2, InitVerbsMaxWaitMs);
+            }
+            initVerbsThrottle[id] = (now + wait, wait);
+
+            var holder = ThingOwnerUtility.GetFirstSpawnedParentThing(weapon);
+            SyncInitVerbsForComp(id, holder?.thingIDNumber ?? -1, HolderPath(weapon), comp);
+        }
+
+        // Debug text only: the ParentHolder chain of the weapon on the sending PC, e.g. "Pawn_InventoryTracker>Pawn"
+        private static string HolderPath(Thing thing)
+        {
+            var sb = new StringBuilder();
+            IThingHolder holder = thing.ParentHolder;
+            for (var i = 0; holder != null && i < 6; i++)
+            {
+                if (sb.Length > 0)
+                    sb.Append('>');
+                sb.Append(holder.GetType().Name);
+                if (holder is Thing { Spawned: true })
+                    break;
+                holder = holder.ParentHolder;
+            }
+            return sb.ToString();
+        }
+
+        // A null comp no longer throws: the method looks the weapon up again (same game state on every PC) and logs
+        // the miss under -mplabssverbslog. comp MUST stay the LAST param: MP's ThingComp reader returns early on a
+        // null parent without reading its comp index (SyncDictRimWorld.cs ThingComp worker), so any arg after comp
+        // would read shifted bytes.
+        [MpCompatSyncMethod]
+        private static void SyncInitVerbsForComp(int thingId, int holderId, string holderPath, CompEquippable comp)
+        {
+            if (comp == null)
+            {
+                Thing holder = null;
+                var holderHit = holderId >= 0 && MP.TryGetThingById(holderId, out holder);
+                var thingHit = MP.TryGetThingById(thingId, out var byId);
+                Thing found = null;
+                if (holderHit && holder.thingIDNumber == thingId)
+                    found = holder; // spawned weapon: GetFirstSpawnedParentThing returned the weapon itself
+                else if (holderHit && holder is IThingHolder thingHolder)
+                    found = ThingOwnerUtility.GetAllThingsRecursively(thingHolder).Find(t => t.thingIDNumber == thingId);
+                found ??= byId;
+                comp = (found as ThingWithComps)?.GetComp<CompEquippable>();
+
+                if (LabSsVerbsLog)
+                    Log.Warning($"[MPCompat] row 315: SyncInitVerbsForComp read a null comp: thing {thingId} (ThingsById hit {thingHit}), " +
+                                $"holder {holderId} (ThingsById hit {holderHit}, {holder?.GetType().Name ?? "none"}, spawned {holder?.Spawned}), " +
+                                $"sender path {holderPath}, found again {found != null}, comp {comp != null}");
+
+                if (comp == null)
+                    return;
+            }
+
+            if (comp.verbTracker != null && comp.verbTracker.verbs == null)
                 comp.verbTracker.InitVerbsFromZero();
         }
 
