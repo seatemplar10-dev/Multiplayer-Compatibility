@@ -29,6 +29,10 @@ namespace Multiplayer.Compat
     ///     not through the per-PC tree. Fluffy's DoBeginResearch prefix (EnqueueFirst from the per-PC tree) only runs in
     ///     interface code, inside the snapshot.
     ///  4. Tree resets and RefreshQueue (per-PC window maintenance) keep the queue's project list in MP.
+    ///  5. One queue per faction (row 312 per-faction): research runs per faction in MP, the mod's queue was one list for
+    ///     the world. Each faction now has its own list; Queue._queue is swapped to the list of the faction whose
+    ///     research manager MP made active (MultiplayerWorldComp.SetFaction postfix). Saved as "mpFactionQueues" next to
+    ///     the mod's "Queue" node. An old save's single queue goes to the first player faction in the FactionManager.
     /// </remarks>
     [MpCompatFor("eheieh.researchtree")]
     public class FluffyResearchTree
@@ -54,6 +58,22 @@ namespace Multiplayer.Compat
         // Tree maintenance guard
         private static List<ResearchProjectDef> reinitDefs;
         private static List<ResearchProjectDef> refreshDefs;
+
+        // 5. One queue per faction (MP). Key = faction loadID. The value for activeFactionId is the list object that
+        // sits in Queue._queue; MP's MultiplayerWorldComp.SetFaction swaps Game.researchManager and we swap the list.
+        private static bool perFactionReady;
+        private static FieldInfo mpFactionDataField;        // MultiplayerWorldComp.factionData (SortedDictionary<int, FactionWorldData>)
+        private static FieldInfo mpFactionResearchField;    // FactionWorldData.researchManager
+        private static FastInvokeHandler mpWorldCompGetter; // Multiplayer.WorldComp (static getter)
+        private static object boundQueue;                   // Queue instance factionQueues belongs to
+        private static readonly Dictionary<int, IList> factionQueues = new();
+        private static int activeFactionId;
+        private static ResearchManager activeResearchManager;
+        private static object pendingQueue;                 // Queue instance pendingLoaded was read for
+        private static List<FactionQueueSave> pendingLoaded;
+        private static bool warnedUnknownManager;
+        private static readonly Dictionary<ResearchManager, int> managerFactionIds = new();  // reference keys, cleared on bind
+        private const int UnknownFaction = int.MinValue;
 
         public FluffyResearchTree(ModContentPack mod)
         {
@@ -149,6 +169,33 @@ namespace Multiplayer.Compat
             MpCompat.harmony.Patch(targets["RefreshQueue"],
                 prefix: new HarmonyMethod(typeof(FluffyResearchTree), nameof(PreRefreshQueue)),
                 finalizer: new HarmonyMethod(typeof(FluffyResearchTree), nameof(FinRefreshQueue)));
+
+            // 5. One queue per faction (row 312 per-faction). All or nothing: without it the queue stays shared.
+            var worldCompType = AccessTools.TypeByName("Multiplayer.Client.MultiplayerWorldComp");
+            var factionWorldDataType = AccessTools.TypeByName("Multiplayer.Client.FactionWorldData");
+            var mpType = AccessTools.TypeByName("Multiplayer.Client.Multiplayer");
+            var setFaction = worldCompType == null ? null : AccessTools.DeclaredMethod(worldCompType, "SetFaction", new[] { typeof(Faction) });
+            var worldCompGetter = mpType == null ? null : AccessTools.PropertyGetter(mpType, "WorldComp");
+            var exposeData = AccessTools.DeclaredMethod(queueType, "ExposeData");
+            mpFactionDataField = worldCompType == null ? null : AccessTools.DeclaredField(worldCompType, "factionData");
+            mpFactionResearchField = factionWorldDataType == null ? null : AccessTools.DeclaredField(factionWorldDataType, "researchManager");
+            var missingPerFaction = new List<string>();
+            if (setFaction == null) missingPerFaction.Add("MultiplayerWorldComp.SetFaction");
+            if (worldCompGetter == null) missingPerFaction.Add("Multiplayer.WorldComp");
+            if (exposeData == null) missingPerFaction.Add("Queue.ExposeData");
+            if (mpFactionDataField == null || !typeof(IDictionary).IsAssignableFrom(mpFactionDataField.FieldType)) missingPerFaction.Add("MultiplayerWorldComp.factionData");
+            if (mpFactionResearchField == null || mpFactionResearchField.FieldType != typeof(ResearchManager)) missingPerFaction.Add("FactionWorldData.researchManager");
+            if (queueListField.IsStatic || !typeof(IList).IsAssignableFrom(queueListField.FieldType)) missingPerFaction.Add("Queue._queue (instance list)");
+            if (missingPerFaction.Any())
+            {
+                Log.Error("MPCompat - ResearchTree: one queue per faction not applied (queue stays shared), not found: " + string.Join(", ", missingPerFaction));
+                return;
+            }
+
+            mpWorldCompGetter = MethodInvoker.GetHandler(worldCompGetter);
+            MpCompat.harmony.Patch(exposeData, postfix: new HarmonyMethod(typeof(FluffyResearchTree), nameof(PostQueueExposeData)));
+            MpCompat.harmony.Patch(setFaction, postfix: new HarmonyMethod(typeof(FluffyResearchTree), nameof(PostWorldSetFaction)));
+            perFactionReady = true;
         }
 
         #region Queue access
@@ -210,6 +257,7 @@ namespace Multiplayer.Compat
                 return;
             }
             if (!MP.IsInMultiplayer || !MP.InInterface || !UnityData.IsInMainThread) return;
+            EnsureActiveFactionQueue();
             var list = QueueList();
             if (list == null) return;
 
@@ -271,6 +319,8 @@ namespace Multiplayer.Compat
         private static void SyncedEditQueue(List<ResearchProjectDef> before, List<ResearchProjectDef> after,
             ResearchProjectDef beforeCurrent, ResearchProjectDef startProject, bool clearCurrent)
         {
+            // Runs in the sender's faction context (MP pushes the command's faction): its research manager and queue
+            EnsureActiveFactionQueue();
             var list = QueueList();
             if (list == null) return;
             before ??= new List<ResearchProjectDef>();
@@ -314,6 +364,7 @@ namespace Multiplayer.Compat
         private static bool PreTryStartNext(ResearchProjectDef finished)
         {
             if (!MP.IsInMultiplayer || MP.InInterface) return true;
+            EnsureActiveFactionQueue();
             var list = QueueList();
             if (list == null || finished == null) return true;
             var defs = QueueDefs();
@@ -391,6 +442,7 @@ namespace Multiplayer.Compat
                 SetQueueDefs(list, defs);
                 RefreshQueueUi();
             }
+            RebuildInactiveFactionQueues();
         }
 
         // RefreshQueue (window open) adds the current project to an empty queue and drops hidden projects, on this PC only
@@ -407,6 +459,189 @@ namespace Multiplayer.Compat
             var list = QueueList();
             if (list != null && !QueueDefs().SequenceEqual(defs))
                 SetQueueDefs(list, defs);
+        }
+
+        #endregion
+
+        #region 5. One queue per faction (MP)
+
+        // Row 312 per-faction: research runs per faction in MP (MultiplayerWorldComp.SetFaction swaps
+        // Game.researchManager), but Queue is one WorldComponent. Here every faction gets its own node list, and the
+        // list in Queue._queue follows Game.researchManager. Single player never gets here: SetFaction is MP code, and
+        // the save postfix writes nothing outside MP.
+        // Old saves (one queue, or MP saves made before this): the one queue goes to the first player faction in the
+        // FactionManager. That is the faction MP saves and loads as (SaveLoad: AllFactions.First(f => f.IsPlayer)), so
+        // the "Queue" node of such a save holds that faction's queue.
+
+        /// <summary>One faction's saved queue (no Class attribute in the save: Deep with the declared type)</summary>
+        public class FactionQueueSave : IExposable
+        {
+            public int factionId = -1;
+            public List<ResearchProjectDef> projects;
+
+            public void ExposeData()
+            {
+                Scribe_Values.Look(ref factionId, "faction", -1);
+                Scribe_Collections.Look(ref projects, "projects", LookMode.Def);
+            }
+        }
+
+        private static IList NewQueueList() => (IList)Activator.CreateInstance(queueListField.FieldType);
+
+        private static List<ResearchProjectDef> ListDefs(IList list)
+        {
+            var defs = new List<ResearchProjectDef>(list.Count);
+            foreach (var node in list)
+            {
+                var def = node == null ? null : nodeResearchField(node);
+                if (def != null && !defs.Contains(def)) defs.Add(def);
+            }
+            return defs;
+        }
+
+        private static int FirstPlayerFactionId()
+        {
+            var faction = Find.FactionManager?.AllFactionsListForReading.FirstOrDefault(f => f.IsPlayer);
+            return faction?.loadID ?? -1;
+        }
+
+        // MP's faction id for a research manager (MultiplayerWorldComp.GetFactionId without its throw)
+        private static bool TryGetFactionId(ResearchManager manager, out int factionId)
+        {
+            factionId = -1;
+            if (manager == null) return false;
+            if (managerFactionIds.TryGetValue(manager, out factionId)) return factionId != UnknownFaction;
+            var worldComp = mpWorldCompGetter(null);
+            if (worldComp == null || mpFactionDataField.GetValue(worldComp) is not IDictionary data) return false;
+            foreach (DictionaryEntry entry in data)
+            {
+                if (entry.Value != null && ReferenceEquals(mpFactionResearchField.GetValue(entry.Value), manager))
+                {
+                    factionId = (int)entry.Key;
+                    managerFactionIds[manager] = factionId;
+                    return true;
+                }
+            }
+            managerFactionIds[manager] = UnknownFaction;   // review fix: no rescan on every switch to this manager
+            factionId = UnknownFaction;
+            return false;
+        }
+
+        // First use after a load or after MP started: the list now in Queue._queue belongs to the first player faction
+        private static void BindFactionQueues(object instance)
+        {
+            factionQueues.Clear();
+            managerFactionIds.Clear();
+            boundQueue = instance;
+            activeResearchManager = null;
+            warnedUnknownManager = false;
+            var live = (IList)queueListField.GetValue(instance);
+            var owner = FirstPlayerFactionId();
+            var saved = ReferenceEquals(pendingQueue, instance) ? pendingLoaded : null;
+            pendingQueue = null;
+            pendingLoaded = null;
+
+            if (saved != null)
+            {
+                // Saved by this compat: the per-faction lists win over the shared "Queue" node
+                foreach (var entry in saved)
+                {
+                    if (entry == null || factionQueues.ContainsKey(entry.factionId)) continue;
+                    var list = entry.factionId == owner ? live : NewQueueList();
+                    SetQueueDefs(list, entry.projects ?? new List<ResearchProjectDef>());
+                    factionQueues[entry.factionId] = list;
+                }
+                if (!factionQueues.ContainsKey(owner))
+                {
+                    live.Clear();
+                    factionQueues[owner] = live;
+                }
+            }
+            else
+                factionQueues[owner] = live;
+
+            activeFactionId = owner;
+        }
+
+        private static void ActivateFactionQueue(object instance, int factionId)
+        {
+            if (factionId == activeFactionId) return;
+            if (!factionQueues.TryGetValue(factionId, out var list))
+            {
+                list = NewQueueList();
+                factionQueues[factionId] = list;
+            }
+            queueListField.SetValue(instance, list);
+            activeFactionId = factionId;
+        }
+
+        // Make Queue._queue the list of the faction whose research manager is active. Cheap when nothing changed.
+        private static void EnsureActiveFactionQueue()
+        {
+            // Review fix: main thread only. MP's FactionCreator pushes and pops factions on a worker thread; those
+            // pairs are balanced, so the list stays with the manager the main thread sees before and after.
+            if (!perFactionReady || !MP.IsInMultiplayer || Scribe.mode != LoadSaveMode.Inactive || !UnityData.IsInMainThread) return;
+            var instance = queueInstanceField.GetValue(null);
+            if (instance == null) return;
+            var manager = Current.Game?.researchManager;
+            if (ReferenceEquals(instance, boundQueue) && ReferenceEquals(manager, activeResearchManager)) return;
+
+            if (!ReferenceEquals(instance, boundQueue))
+                BindFactionQueues(instance);
+            if (TryGetFactionId(manager, out var factionId))
+                ActivateFactionQueue(instance, factionId);
+            else if (!warnedUnknownManager)
+            {
+                warnedUnknownManager = true;
+                Log.Warning("MPCompat - ResearchTree: active research manager has no MP faction, queue not switched");
+            }
+            activeResearchManager = manager;
+        }
+
+        private static void PostWorldSetFaction() => EnsureActiveFactionQueue();
+
+        private static void PostQueueExposeData(object __instance)
+        {
+            if (!perFactionReady) return;
+            if (Scribe.mode == LoadSaveMode.Saving)
+            {
+                // Outside MP nothing is written: single-player saves stay as they were
+                if (!MP.IsInMultiplayer) return;
+                // Saved before the first faction switch (not expected: MP sets the real faction after every load)
+                if (!ReferenceEquals(__instance, boundQueue)) BindFactionQueues(__instance);
+                // Review fix: empty lists are not written (a PC that only visited a faction must not change the save)
+                var save = factionQueues.OrderBy(kv => kv.Key)
+                    .Select(kv => new FactionQueueSave { factionId = kv.Key, projects = ListDefs(kv.Value) })
+                    .Where(entry => entry.projects.Count > 0)
+                    .ToList();
+                Scribe_Collections.Look(ref save, "mpFactionQueues", LookMode.Deep);
+            }
+            else if (Scribe.mode == LoadSaveMode.LoadingVars)
+            {
+                // Review fix: only an MP load keeps the lists. A single-player load drops them, so a later "host from
+                // this game" does not put old lists over queue edits made in single player (and holds no old World).
+                pendingQueue = null;
+                pendingLoaded = null;
+                if (!MP.IsInMultiplayer) return;
+                List<FactionQueueSave> loaded = null;
+                Scribe_Collections.Look(ref loaded, "mpFactionQueues", LookMode.Deep);
+                pendingQueue = __instance;
+                pendingLoaded = loaded;
+            }
+        }
+
+        // After a tree rebuild the inactive lists still hold the old tree's nodes: rebuild them from their projects.
+        // New list objects, so a loop that still holds an old list is not changed under it.
+        private static void RebuildInactiveFactionQueues()
+        {
+            if (!perFactionReady || !ReferenceEquals(queueInstanceField.GetValue(null), boundQueue)) return;
+            foreach (var factionId in factionQueues.Keys.ToList())
+            {
+                if (factionId == activeFactionId) continue;
+                var fresh = NewQueueList();
+                SetQueueDefs(fresh, ListDefs(factionQueues[factionId]));
+                factionQueues[factionId] = fresh;
+            }
         }
 
         #endregion
