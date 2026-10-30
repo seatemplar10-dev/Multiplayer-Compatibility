@@ -36,10 +36,20 @@ namespace Multiplayer.Compat
     /// - Simulation callers (the gestator's Finish, vial use, load) are untouched: they already run on every PC from the same saved state, and now get
     ///   the same def name.
     /// Short hash: the GeneDef is added in the same order on every PC (synced commands in command order, load in saved-list order); the hash only
-    /// depends on the def name and on the hashes already taken. Residual: Remove only drops the design from the list (the mod never unregisters the
-    /// GeneDef), so on a PC that ran the session the dead def stays in DefDatabase and keeps its hash until the game restarts, while a later joiner never
-    /// sees it; that matters only if a later runtime def hits the same 16 bit hash (1 in ~65,000 per dead def) or if sim code picks a random GeneDef
-    /// without weights. Not fixed here (DefDatabase.Remove is private and renumbers every def).
+    /// depends on the def name and on the hashes already taken. Remove only drops the design from the list (the mod never unregisters the GeneDef;
+    /// DefDatabase.Remove is private and renumbers every def), so on a PC that ran the session the dead def stays in DefDatabase and its hash stays in
+    /// vanilla's taken set (ShortHashGiver.takenHashesPerDeftype), while a fresh joiner never sees it. The names are prefix + "mp" + id, so consecutive
+    /// ids give (near) consecutive base hashes and a def that walked up one step (ShortHashGiver walks past taken hashes) sits on the NEXT id's base:
+    /// that is a likely clash, not a 1 in ~65,000 chance, and the next def would get a different shortHash on a connected PC than on a joiner (MP syncs
+    /// a Gene as pawn + GeneDef shortHash). Fix: SyncRemove (runs on every connected PC inside the command) takes the removed design's shortHash out of
+    /// the taken set for GeneDef (FreeShortHash), so a def registered after the removal gets what a fresh joiner gives it. The dead def object keeps its
+    /// own shortHash value (no pawn holds it: a design with a gene-seed is locked and cannot be removed; when a later def takes the freed hash,
+    /// InitializeShortHashDictionary maps the hash to the newer def, which is later in the list). If vanilla has no such field the module logs ONE
+    /// warning at start and skips this step.
+    /// Known limits (not fixed): (a) a def registered BEFORE the removal that had walked past the removed def's hash keeps its walked hash, a fresh joiner
+    /// gives it the base hash; (b) the names repeat across saves (every game starts at mp0000), so one process that loads a SECOND save with custom
+    /// chapters reuses the first save's GeneDef objects (EnsureRegistered finds them by name) with their possibly walked shortHash: restart the game
+    /// between different saves that use custom chapters, in a co-op session on every PC.
     /// Not done here (listed in the row report): bills created by Dialog_SelectChapter / Dialog_SelectGeneseedVial / Dialog_CraftPrimarchEmbryo,
     /// the Building_GeneGestator gizmo lambdas, Core40k Dialog_GeneCustomization, Dialog_ChangeFlagColour.
     /// Inert when the loaded Genes40k has no <c>GameComponent_CustomChapterGenes</c> (the build the frozen co-op copy loads, Genes40k 1.1.14, does not):
@@ -77,6 +87,9 @@ namespace Multiplayer.Compat
         private static ConstructorInfo levelCtor;
         private static FieldInfo levelDef, levelLevel, templateKind, templateMax;
         private static MethodInfo builderPrefix, builderNewDefName;
+
+        // vanilla ShortHashGiver.takenHashesPerDeftype (Dictionary<Type, HashSet<ushort>>); optional: null = SyncRemove cannot free the hash
+        private static FieldInfo takenHashesField;
 
         // Dialog_CreateChapterGene
         private static MethodInfo createAccept;
@@ -223,6 +236,14 @@ namespace Multiplayer.Compat
             builderPrefix = Method(builderType, "DefNamePrefix", 1, typeof(string));
             builderNewDefName = Method(builderType, "NewDefName", 1, typeof(string));
 
+            // optional, not counted as a failure: without it the dead design's hash stays taken (see the header)
+            takenHashesField = AccessTools.Field(typeof(ShortHashGiver), "takenHashesPerDeftype");
+            if (takenHashesField == null || takenHashesField.FieldType != typeof(Dictionary<Type, HashSet<ushort>>))
+            {
+                takenHashesField = null;
+                Log.Warning($"{LogPrefix}vanilla ShortHashGiver.takenHashesPerDeftype (Dictionary<Type, HashSet<ushort>>) not found: removing a design will not free its short hash (a later def may get a different shortHash on a connected PC than on a joiner).");
+            }
+
             createAccept = Method(createDialogType, "Accept", 0);
             createEditing = Field(createDialogType, "editing");
             createTemplate = Field(createDialogType, "template");
@@ -355,7 +376,9 @@ namespace Multiplayer.Compat
         // being built is nextId - 1. (EnsureRegistered calls it only for a design without a name, which Add never produces.)
         private static bool PreNewDefName(object __0, ref string __result)
         {
-            if (!active || !MP.IsInMultiplayer)
+            // While loading (legacy saved design with an empty defName reaching EnsureRegistered) the component's Instance may be a throwaway one that the
+            // mod then caches: leave the original alone and never touch Instance.
+            if (!active || !MP.IsInMultiplayer || Scribe.mode != LoadSaveMode.Inactive)
                 return true;
             var comp = GetComp();
             if (comp == null)
@@ -487,8 +510,20 @@ namespace Multiplayer.Compat
                 return;
 
             var described = Describe(chapter);
+            var dead = DefDatabase<GeneDef>.GetNamedSilentFail((string)geneDefName.GetValue(chapter));
             var removed = (bool)compRemove.Invoke(comp, new[] { chapter });
-            Log.Message($"{LogPrefix}Remove {described} removed={removed} designs={((IList)compChapters.GetValue(comp)).Count}");
+            var freed = removed && FreeShortHash(dead);
+            Log.Message($"{LogPrefix}Remove {described} removed={removed} freedShortHash={(freed ? dead.shortHash.ToString() : "none")} designs={((IList)compChapters.GetValue(comp)).Count}");
+        }
+
+        // Puts the dead def's short hash back to "free" in vanilla's taken set, the state a fresh joiner (which never registers the def) has.
+        private static bool FreeShortHash(GeneDef dead)
+        {
+            if (dead == null || dead.shortHash == 0 || takenHashesField == null)
+                return false;
+            if (takenHashesField.GetValue(null) is not Dictionary<Type, HashSet<ushort>> perType || !perType.TryGetValue(typeof(GeneDef), out var taken))
+                return false;
+            return taken.Remove(dead.shortHash);
         }
 
         private static void SyncGestatorPattern(Thing gestator, List<Def> disciplineDefs, List<int> levels)
