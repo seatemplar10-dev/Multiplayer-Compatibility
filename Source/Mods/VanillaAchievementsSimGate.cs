@@ -36,7 +36,15 @@ namespace Multiplayer.Compat
     /// Left alone: <c>AchievementPointManager.CheckUnlocks</c> (UnlockOnStartup at load: state checks with no counters, run from the
     /// same save on every PC), the dev-mode unlock tools, the reward purchase (synced by <see cref="VanillaAchievements"/>).
     /// A count that already differs is not repaired here: every PC saves and reloads its own state at a join point; a new joiner
-    /// loads the host's snapshot. A total tracker (AbilityCountTracker total) recounts from zero at its next synced call.
+    /// loads the host's snapshot. A total tracker (AbilityCountTracker total) recounts from zero at its next synced call; a cumulative
+    /// tracker (HediffTracker family, triggeredCount++) stays different until every PC rejoins from the host's snapshot, so a lab check
+    /// starts with a fresh join of every client.
+    /// </para>
+    /// <para>
+    /// Known loss vs single player (same on every PC, no desync): a hook that fires inside a long event queued by a tick or a command
+    /// (settle, caravan arrival, map generation, gravship landing) runs outside Multiplayer's tick and command scopes and is skipped.
+    /// Known split left alone (review 30 Oct): TimeTracker with gameTime=false compares per-PC real play time; it unlocks after about
+    /// 600 h of real play on one PC only.
     /// </para>
     /// </remarks>
     [MpCompatFor("vanillaexpanded.achievements")]
@@ -56,7 +64,8 @@ namespace Multiplayer.Compat
             "AbilityGained", "ThoughtInitialized", "TitleSet", "SettlementDefeatedEvent", "RecordEvent", "SingleLongTickTracker",
         ];
 
-        // AchievementsExpanded.UtilityMethods: the calls AE's transpilers inject (mental break, skill level-up, record time).
+        // AchievementsExpanded.UtilityMethods: the calls AE's transpilers inject (mental break, skill level-up, record time);
+        // ItemCraftedTrigger has no caller in this AE build, gated in case a later build calls it.
         private static readonly string[] UtilityHooks = ["MentalBreakTrigger", "LevelUpTrigger", "RecordTimeEvent", "ItemCraftedTrigger"];
 
         private static bool active;
