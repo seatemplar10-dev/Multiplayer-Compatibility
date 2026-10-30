@@ -35,6 +35,7 @@ namespace Multiplayer.Compat
 
         // VehiclesModSettings
         private static ISyncField showAllCargoItemsField;
+        private static ISyncField targetFuelPercentField;
 
         // VehiclePawn.<>c__DisplayClass250_0
         private static AccessTools.FieldRef<object, VehiclePawn> vehiclePawnInnerClassParentField;
@@ -156,8 +157,16 @@ namespace Multiplayer.Compat
 
                 // Comps
 
-                // Target fuel level setter, used from Gizmo_RefuelableFuelTravel
-                MP.RegisterSyncMethod(typeof(CompFueledTravel), nameof(CompFueledTravel.TargetFuelPercent));
+                // Target fuel level, set from Gizmo_RefuelableFuelTravel. FIXES row 322: not a synced setter - the base
+                // Gizmo_Slider.GizmoOnGUI assigns Target on every GUI frame (Gizmo_Slider.cs:129 "Target = targetValuePct;"),
+                // so a synced setter sent one command per frame while a vehicle was selected. A buffered sync field watched
+                // around the gizmo sends only on change, after the drag, as MP does for vanilla Gizmo_SetFuelLevel.
+                targetFuelPercentField = MP.RegisterSyncField(typeof(CompFueledTravel), nameof(CompFueledTravel.TargetFuelPercent))
+                    .SetBufferChanges();
+                MpCompat.harmony.Patch(
+                    AccessTools.DeclaredMethod(typeof(Gizmo_RefuelableFuelTravel), nameof(Gizmo_RefuelableFuelTravel.GizmoOnGUI)),
+                    prefix: new HarmonyMethod(typeof(VehicleFramework), nameof(PreFuelGizmoOnGUI)),
+                    finalizer: new HarmonyMethod(typeof(VehicleFramework), nameof(PostFuelGizmoOnGUI)));
                 // Refuel from inventory, used from Gizmo_RefuelableFuelTravel
                 MP.RegisterSyncMethod(typeof(CompFueledTravel), nameof(CompFueledTravel.Refuel), [typeof(List<Thing>)]);
                 MP.RegisterSyncMethod(typeof(CompFueledTravel), nameof(CompFueledTravel.Refuel), [typeof(float)]);
@@ -198,8 +207,11 @@ namespace Multiplayer.Compat
                 // DeploymentSatisfied and (with RimThunder installed) LaunchRestriction_WingDeployed,
                 // a straight sim-state divergence the moment anyone deploys or undeploys.
                 MpCompat.RegisterLambdaMethod(typeof(CompVehicleTurrets), nameof(CompVehicleTurrets.RecacheGizmos), 0);
-                // (Dev) full reload turret — only lambda in CompGetGizmosExtra now
-                MpCompat.RegisterLambdaDelegate(typeof(CompVehicleTurrets), nameof(CompVehicleTurrets.CompGetGizmosExtra), 0).SetDebugOnly();
+                // (Dev) full reload turret. FIXES row 322: ordinal 1, not 0. In the current build (Vehicles.dll cceb7173)
+                // <>c__DisplayClass51_0 holds b__0 = the crew-handler filter "handler => handler.role.TurretIds.Contains(
+                // turret.key)", which GetGizmos calls for every turret on every frame, and b__1 = the "Full Refill" action
+                // (DevModeReloadTurret). Syncing b__0 sent a command per call and attached a stack trace to each.
+                MpCompat.RegisterLambdaDelegate(typeof(CompVehicleTurrets), nameof(CompVehicleTurrets.CompGetGizmosExtra), 1).SetDebugOnly();
 
 
                 // Turret syncing in separate region
@@ -712,6 +724,23 @@ namespace Multiplayer.Compat
         #endregion
 
         #region Fuel toggle sync
+
+        private static void PreFuelGizmoOnGUI(Gizmo_RefuelableFuelTravel __instance, ref bool __state)
+        {
+            if (!MP.IsInMultiplayer)
+                return;
+
+            MP.WatchBegin();
+            targetFuelPercentField.Watch(fuelGizmoRefuelableField(__instance));
+            __state = true;
+        }
+
+        // Finalizer, so WatchEnd still runs if the gizmo throws
+        private static void PostFuelGizmoOnGUI(bool __state)
+        {
+            if (__state)
+                MP.WatchEnd();
+        }
 
         private static bool PreToggleFuelSwitch(Gizmo_RefuelableFuelTravel __instance)
         {
