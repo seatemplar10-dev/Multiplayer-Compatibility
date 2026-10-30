@@ -1570,21 +1570,25 @@ namespace Multiplayer.Compat
                 sync.Write(factionDefField(window));
             else
             {
-                // For the person using the dialog, grab the existing one as we'll need to call the method on that instance
-                // to open the next dialog with new faction.
-                window = Find.WindowStack.Windows.FirstOrDefault(x => x.GetType() == newFactionSpawningDialogType);
-                // We need to load the def, even if we don't use it - otherwise the synced method parameters will end up messed up
+                // Always read the def first, so the synced method parameters after it stay aligned
                 var factionDef = sync.Read<FactionDef>();
+
+                // For the person using the dialog, grab the existing one for that faction, as we'll need to call the method
+                // on that instance to open the next dialog with new faction.
+                window = Find.WindowStack.Windows.FirstOrDefault(x => x.GetType() == newFactionSpawningDialogType && factionDefField(x) == factionDef);
 
                 if (window == null)
                 {
-                    window ??= (Window)Activator.CreateInstance(
+                    // FIXES row 320: VEF 1.7's constructor is (IEnumerator<FactionDef> enumerator, FactionDef faction = null).
+                    // Activator does not fill optional parameters, so pass both. Passing the def also lets the constructor
+                    // read its forcedFactionData (an empty enumerator's Current is null). The instance never enters the
+                    // window stack, so its Close does not run PostClose and opens nothing.
+                    window = (Window)Activator.CreateInstance(
                         newFactionSpawningDialogType,
                         AccessTools.allDeclared,
                         null,
-                        [new List<FactionDef>().GetEnumerator()],
+                        [new List<FactionDef>().GetEnumerator(), factionDef],
                         null);
-                    factionDefField(window) = factionDef;
                 }
             }
         }
