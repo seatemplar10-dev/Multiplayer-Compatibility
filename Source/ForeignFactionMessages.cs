@@ -31,6 +31,14 @@ namespace Multiplayer.Compat
     /// same text and targets inside the 13 s message lifetime pass AcceptsMessage on this PC but not on the owner's, so one PC
     /// would call GetNextMessageID and the other would not. Message ids, the archive and liveMessages never feed Rand, Thing ids or
     /// any def, so a hidden message changes no simulation state.
+    ///
+    /// Two UI-only repairs (Opus review of package E, 30 Oct 2026); liveMessages itself stays the same on every PC:
+    /// 1. Cap: vanilla keeps at most 12 live messages and drops the oldest. Hidden messages count, so they pushed this PC's
+    ///    visible messages out early. A visible message that the cap drops is kept on a per-PC display list until it expires,
+    ///    while fewer than 12 messages are visible. In single player nothing is hidden, so nothing is kept (vanilla).
+    /// 2. Same text: AcceptsMessage refuses a message whose text and targets match a live one and flashes the live one. When
+    ///    the live one is hidden here and the new one is this PC's own, the refusal still happens on every PC, but the live one
+    ///    is shown here again: it carries the same text and targets the player should see.
     /// </remarks>
     internal static class ForeignFactionMessages
     {
@@ -40,6 +48,11 @@ namespace Multiplayer.Compat
 
         // MessagesDoGUI calls DrawOrSkip then adds the step; a hidden message adds none, so the visible stack has no gap.
         private static bool lastSkipped;
+
+        // UI only, per PC: visible messages the cap of 12 dropped from liveMessages because hidden ones filled it. Oldest first.
+        private static readonly List<Message> keptVisible = new List<Message>();
+        private const int MaxLiveMessages = 12; // Messages.MaxLiveMessages
+        private static List<Message> liveMessages; // vanilla never replaces this list (readonly in use: only Clear)
 
         internal static void Patch(Harmony harmony)
         {
@@ -54,11 +67,22 @@ namespace Multiplayer.Compat
                     return;
                 }
 
+                liveMessages = AccessTools.StaticFieldRefAccess<List<Message>>(typeof(Messages), "liveMessages");
+
                 harmony.Patch(messagesMessage,
+                    prefix: new HarmonyMethod(typeof(ForeignFactionMessages), nameof(MessagePrefix)),
                     postfix: new HarmonyMethod(typeof(ForeignFactionMessages), nameof(MessagePostfix)),
                     transpiler: new HarmonyMethod(typeof(ForeignFactionMessages), nameof(SoundTranspiler)));
-                harmony.Patch(acceptsMessage, transpiler: new HarmonyMethod(typeof(ForeignFactionMessages), nameof(SoundTranspiler)));
-                harmony.Patch(doGui, transpiler: new HarmonyMethod(typeof(ForeignFactionMessages), nameof(DoGuiTranspiler)));
+                harmony.Patch(acceptsMessage,
+                    prefix: new HarmonyMethod(typeof(ForeignFactionMessages), nameof(AcceptsMessagePrefix)),
+                    transpiler: new HarmonyMethod(typeof(ForeignFactionMessages), nameof(SoundTranspiler)));
+                harmony.Patch(doGui,
+                    postfix: new HarmonyMethod(typeof(ForeignFactionMessages), nameof(DoGuiPostfix)),
+                    transpiler: new HarmonyMethod(typeof(ForeignFactionMessages), nameof(DoGuiTranspiler)));
+                harmony.Patch(AccessTools.Method(typeof(Messages), nameof(Messages.Clear)),
+                    postfix: new HarmonyMethod(typeof(ForeignFactionMessages), nameof(ClearPostfix)));
+                harmony.Patch(AccessTools.Method(typeof(Messages), nameof(Messages.Notify_LoadedLevelChanged)),
+                    postfix: new HarmonyMethod(typeof(ForeignFactionMessages), nameof(LoadedLevelChangedPostfix)));
             }
             catch (Exception e)
             {
@@ -85,12 +109,113 @@ namespace Multiplayer.Compat
             return context.Name != "Spectator";
         }
 
-        private static void MessagePostfix(Message msg)
+        // At the cap, remember liveMessages before vanilla drops its oldest entries, so the postfix can keep the visible ones.
+        private static void MessagePrefix(out List<Message> __state)
         {
-            if (msg != null && IsForeignContext() && Messages.IsLive(msg))
+            __state = null;
+            if (MP.IsInMultiplayer && liveMessages != null && liveMessages.Count >= MaxLiveMessages)
+                __state = new List<Message>(liveMessages);
+        }
+
+        private static void MessagePostfix(Message msg, List<Message> __state)
+        {
+            if (msg != null && Messages.IsLive(msg))
             {
-                try { hidden.Add(msg, marker); } catch (ArgumentException) { }
+                if (IsForeignContext())
+                {
+                    try { hidden.Add(msg, marker); } catch (ArgumentException) { }
+                }
+                else if (keptVisible.Count > 0)
+                {
+                    // A new visible message replaces a kept copy with the same text and targets, so the player sees it once.
+                    keptVisible.RemoveAll(kept => kept.text == msg.text && LookTargets.SameTargets(kept.lookTargets, msg.lookTargets));
+                }
             }
+
+            if (__state == null)
+                return;
+
+            var live = liveMessages;
+            foreach (var old in __state)
+            {
+                if (!live.Contains(old) && !IsHidden(old) && !old.Expired && !keptVisible.Contains(old))
+                    keptVisible.Add(old);
+            }
+            TrimKept(live);
+        }
+
+        // Keep only as many dropped messages as fit next to the visible live ones (12 in all); drop the oldest first.
+        private static void TrimKept(List<Message> live)
+        {
+            if (keptVisible.Count == 0)
+                return;
+
+            keptVisible.RemoveAll(kept => kept.Expired);
+            int visibleLive = 0;
+            foreach (var msg in live)
+            {
+                if (!IsHidden(msg))
+                    visibleLive++;
+            }
+
+            int extra = visibleLive + keptVisible.Count - MaxLiveMessages;
+            if (extra > 0)
+                keptVisible.RemoveRange(0, Math.Min(extra, keptVisible.Count));
+        }
+
+        // Vanilla refuses a message with the same text and targets as a live one and flashes that live one instead. When the live
+        // one is hidden here and the new one is this PC's own, show the live one again. The return value is unchanged on every PC.
+        private static void AcceptsMessagePrefix(string text, LookTargets lookTargets)
+        {
+            if (!MP.IsInMultiplayer || liveMessages == null || text.NullOrEmpty() || IsForeignContext())
+                return;
+
+            foreach (var live in liveMessages)
+            {
+                // Vanilla stops at the first match, so only that one can flash.
+                if (live.text == text && LookTargets.SameTargets(live.lookTargets, lookTargets))
+                {
+                    if (IsHidden(live))
+                        hidden.Remove(live);
+                    return;
+                }
+            }
+        }
+
+        // Draws the kept messages under the visible live ones, oldest at the bottom, as vanilla would have.
+        private static void DoGuiPostfix()
+        {
+            if (keptVisible.Count == 0 || liveMessages == null)
+                return;
+
+            var live = liveMessages;
+            TrimKept(live);
+            if (keptVisible.Count == 0)
+                return;
+
+            int x = (int)Messages.MessagesTopLeftStandard.x;
+            int y = (int)Messages.MessagesTopLeftStandard.y;
+            if (Current.Game != null && Find.ActiveLesson.ActiveLessonVisible)
+                y += (int)Find.ActiveLesson.Current.MessagesYOffset;
+            foreach (var msg in live)
+            {
+                if (!IsHidden(msg))
+                    y += 26;
+            }
+
+            for (int i = keptVisible.Count - 1; i >= 0; i--)
+            {
+                keptVisible[i].Draw(x, y);
+                y += 26;
+            }
+        }
+
+        private static void ClearPostfix() => keptVisible.Clear();
+
+        private static void LoadedLevelChangedPostfix()
+        {
+            foreach (var kept in keptVisible)
+                kept.lookTargets = null;
         }
 
         private static bool IsHidden(Message msg) => msg != null && hidden.TryGetValue(msg, out _);
