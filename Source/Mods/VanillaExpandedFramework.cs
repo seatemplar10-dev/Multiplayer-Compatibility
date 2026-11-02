@@ -149,8 +149,58 @@ namespace Multiplayer.Compat
             type = AccessTools.TypeByName("VEF.AnimalBehaviours.CompDiseasesAfterPeriod");
             MpCompat.RegisterLambdaMethod(type, "GetGizmos", 0).SetDebugOnly();
 
-            type = AccessTools.TypeByName("VEF.AnimalBehaviours.Pawn_GetGizmos_Patch");
-            MpCompat.RegisterLambdaDelegate(type, "Postfix", 1);
+            // The draft button's toggleAction. Its lambda ordinal changed between VEF builds: it was 1, but in the 1.6 build 0 is the
+            // toggleAction (void) and 1 is the isActive getter (bool), which must never be synced. VEF 1.7 moved the gizmo code into
+            // AnimalBehavioursPawnGizmos.GetGizmos. So look the lambda up by its signature, starting from the old ordinal.
+            var gizmoType = AccessTools.TypeByName("VEF.AnimalBehaviours.Pawn_GetGizmos_Patch");
+            var gizmoMethod = "Postfix";
+            if (gizmoType == null)
+            {
+                gizmoType = AccessTools.TypeByName("VEF.AnimalBehaviours.AnimalBehavioursPawnGizmos");
+                gizmoMethod = "GetGizmos";
+            }
+
+            var gizmoOrdinal = gizmoType == null ? -1 : FindVoidLambdaOrdinal(gizmoType, gizmoMethod, 1);
+            if (gizmoOrdinal >= 0)
+                MpCompat.RegisterLambdaDelegate(gizmoType, gizmoMethod, gizmoOrdinal);
+            else
+                Log.Error("MPCompat :: Could not find the draft toggle lambda of VEF's animal gizmos, so drafting a draftable VEF animal is not synced.");
+        }
+
+        /// <summary>Finds the ordinal of the one lambda of <paramref name="method"/> that returns void and takes no arguments
+        /// (a button or toggle action). Lambda ordinals move when a mod adds or removes a lambda earlier in the method, and a
+        /// predicate or getter landing on a fixed ordinal would get synced instead of the action.</summary>
+        /// <param name="preferred">Ordinal tried first, so a build where it is still right keeps its old registration.</param>
+        /// <returns>The ordinal, or -1 when there is no such lambda or more than one candidate.</returns>
+        private static int FindVoidLambdaOrdinal(Type type, string method, int preferred)
+        {
+            const int maxOrdinal = 12;
+
+            static MethodInfo TryGetLambda(Type type, string method, int ordinal)
+            {
+                try
+                {
+                    var lambda = MpMethodUtil.GetLambda(type, method, lambdaOrdinal: ordinal);
+                    return lambda.ReturnType == typeof(void) && lambda.GetParameters().Length == 0 ? lambda : null;
+                }
+                catch (Exception)
+                {
+                    // No lambda with this ordinal
+                    return null;
+                }
+            }
+
+            if (TryGetLambda(type, method, preferred) != null)
+                return preferred;
+
+            var found = new List<int>();
+            for (var ordinal = 0; ordinal <= maxOrdinal; ordinal++)
+            {
+                if (ordinal != preferred && TryGetLambda(type, method, ordinal) != null)
+                    found.Add(ordinal);
+            }
+
+            return found.Count == 1 ? found[0] : -1;
         }
 
         private static void PatchKCSG()
@@ -913,7 +963,13 @@ namespace Multiplayer.Compat
 
             DialogUtilities.RegisterDialogCloseSync(contractInfoDialogType, true);
             MP.RegisterSyncWorker<Window>(SyncContractInfoDialog, contractInfoDialogType);
-            MpCompat.RegisterLambdaMethod(contractInfoDialogType, "DoWindowContents", 0);
+            // The "cancel contract" confirmation action. In the VEF 1.6 build lambda 0 is a Where predicate cached in <>c
+            // (Pawn -> bool) and the button action is lambda 1, so look the action up by signature, starting from the old ordinal.
+            var cancelContractOrdinal = FindVoidLambdaOrdinal(contractInfoDialogType, "DoWindowContents", 0);
+            if (cancelContractOrdinal >= 0)
+                MpCompat.RegisterLambdaMethod(contractInfoDialogType, "DoWindowContents", cancelContractOrdinal);
+            else
+                Log.Error("MPCompat :: Could not find the cancel contract lambda of VEF's Dialog_ContractInfo, so cancelling a contract is not synced.");
 
             MpCompat.RegisterLambdaDelegate("VEF.Planet.HiringContractTracker", "CommFloatMenuOption", 0);
         }
