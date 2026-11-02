@@ -22,7 +22,7 @@ namespace Multiplayer.Compat
     /// <see href="https://github.com/SmashPhil/Vehicle-Framework"/>
     /// <see href="https://steamcommunity.com/sharedfiles/filedetails/?id=3014915404"/>
     [MpCompatFor("SmashPhil.VehicleFramework")]
-    public class VehicleFramework
+    public partial class VehicleFramework
     {
         #region Fields
 
@@ -678,6 +678,21 @@ namespace Multiplayer.Compat
                     // Set the original field to the value we set up
                     supportedThingHoldersField.SetValue(null, array);
                 }
+            }
+
+            #endregion
+
+            #region Caravan forming with vehicles (FIXES row 358)
+
+            // In its own try: a failure leaves VehicleFrameworkCaravanSync.Installed false, so the guards of the main
+            // assembly's VehicleFramework (steps 7 and 8) keep refusing vehicle caravans in Multiplayer's caravan window.
+            try
+            {
+                PatchCaravanFormingWithVehicles();
+            }
+            catch (Exception e)
+            {
+                Log.Error($"MPCompat :: Vehicle Framework caravan forming with vehicles (FIXES row 358) not installed, vehicle caravans stay refused in MP: {e}");
             }
 
             #endregion
