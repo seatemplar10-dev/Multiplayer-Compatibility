@@ -68,6 +68,7 @@ public class CustomQuestFramework
         PatchDialogWindow();
         MP.RegisterSyncMethod(typeof(CustomQuestFramework), nameof(SyncedStartJob));
         MP.RegisterSyncMethod(typeof(CustomQuestFramework), nameof(SyncedChooseOption));
+        RegisterGizmos();
     }
 
     #region Jobs from float menus
@@ -315,6 +316,98 @@ public class CustomQuestFramework
             }
             else
                 window.Close();
+        }
+    }
+
+    #endregion
+
+    #region Gizmos
+
+    // FIXES row 279 (CQF 1.7 decompile, 2 Nov 2026). Every gizmo action below except the caravan one is a private instance
+    // lambda <Parent>b__<id>_<n> on its declaring class (it captures only `this`), so a plain synced method call is enough.
+    // The windows they open (Dialog_Select, Dialog_Slider) stay local; only the callbacks that change state are synced.
+    // MP runs a registered method inline when it is called from a tick or an executing command, so nothing is sent twice.
+    // Content check: no installed mod XML uses CompLandFillable, CompPower_Level, CompTransmit or CaravanActionDef, and
+    // the Spawner, ZoneCore, GenerationActionWorker gizmos exist on editor maps only. These are cheap to register, none is urgent.
+    // The debug-only ones are dropped by the server unless dev mode is allowed for the sender (no desync, the click does nothing).
+    private const string CqfNamespace = "QuestEditor_Library.";
+
+    private static void RegisterGizmos()
+    {
+        // A Thing sent by id: it does not set the command's map, which a Thing from another map would (map mismatch)
+        var thingById = Serializer.New<Thing, int>(
+            thing => thing?.thingIDNumber ?? -1,
+            id =>
+            {
+                MP.TryGetThingById(id, out var thing);
+                return thing;
+            });
+
+        // Comps: ordinals are the lambda numbers of CompGetGizmosExtra
+        TryRegister("CompLandFillable toggle", () =>
+            MpCompat.RegisterLambdaMethod(CqfNamespace + "CompLandFillable", nameof(ThingComp.CompGetGizmosExtra), 0));
+        // 2 = Link(selected building), 3 = "Null" (unlink), 6 = slider confirm (int), 8 = output mode toggle.
+        // 0 and 4 only open the Dialog_Select / Dialog_Slider windows, 1, 5 and 7 are labels and getters: not registered.
+        // The Dialog_Select list holds buildings of OTHER maps (pocket map source, sub maps), never of the comp's own map.
+        // MP's Thing writer sets the command map from every spawned Thing it writes, so a Building argument would make
+        // "map mismatch" with the comp's map: lambda 2 sends the building as a thing id instead.
+        TryRegister("CompPower_Level link", () =>
+            MpCompat.RegisterLambdaMethod(CqfNamespace + "CompPower_Level", nameof(ThingComp.CompGetGizmosExtra), 2)[0]
+                .TransformArgument(0, thingById, skipTypeCheck: true)
+                .CancelIfAnyArgNull());
+        TryRegister("CompPower_Level", () =>
+            MpCompat.RegisterLambdaMethod(CqfNamespace + "CompPower_Level", nameof(ThingComp.CompGetGizmosExtra), 3, 6, 8));
+        // 2 = receiver = building (same cross-map list as above), 3 = receiver = null.
+        // CompTick moves stored things to the receiver every 15 ticks, so a receiver set on one PC only is a map desync.
+        TryRegister("CompTransmit receiver", () =>
+            MpCompat.RegisterLambdaMethod(CqfNamespace + "CompTransmit", nameof(ThingComp.CompGetGizmosExtra), 2)[0]
+                .TransformArgument(0, thingById, skipTypeCheck: true)
+                .CancelIfAnyArgNull());
+        TryRegister("CompTransmit unlink", () =>
+            MpCompat.RegisterLambdaMethod(CqfNamespace + "CompTransmit", nameof(ThingComp.CompGetGizmosExtra), 3));
+        // Building_TransmitReceiver rename: MP registers the RenamableLabel setter of every IRenameable by itself
+        // (Multiplayer SyncMethods.cs, "typeof(IRenameable).AllImplementing()"), so nothing is added here.
+
+        // Editor-map tools: one lambda each, debug permission only (they run arbitrary CQFAction lists, spawn pawns, generate map parts)
+        TryRegister("GenerationActionWorker CQF_RunActions", () =>
+            MpCompat.RegisterLambdaMethod(CqfNamespace + "GenerationActionWorker", nameof(Thing.GetGizmos), 0).SetDebugOnly());
+        TryRegister("Spawner Spawn", () =>
+            MpCompat.RegisterLambdaMethod(CqfNamespace + "Spawner", nameof(Thing.GetGizmos), 0).SetDebugOnly());
+        TryRegister("ZoneCore Try Generate", () =>
+            MpCompat.RegisterLambdaMethod(CqfNamespace + "ZoneCore", nameof(Thing.GetGizmos), 0).SetDebugOnly());
+        // CustomMapEntrance dev gizmos. Lambda 3 = "GenerateCustomMap". It is called with thing == null, so its StartJob /
+        // CurrentMap branch (a pawn entering during a job tick) does not run here. Lambda 2 = SetMapDef: GenerateCustomMap
+        // reads that field, so it is synced too, or the PCs would generate maps from different defs. The CustomMapDataDefs
+        // are added by CQF at startup (CQFQuestDefBootstrap), after the short hashes are given, so the def goes by defName.
+        TryRegister("CustomMapEntrance GenerateCustomMap", () =>
+            MpCompat.RegisterLambdaMethod(CqfNamespace + "CustomMapEntrance", nameof(Thing.GetGizmos), 3).SetDebugOnly());
+        TryRegister("CustomMapEntrance SetMapDef", () =>
+        {
+            var mapDefType = AccessTools.TypeByName(CqfNamespace + "CustomMapDataDef");
+            var byName = Serializer.New<Def, string>(def => def?.defName,
+                name => name == null ? null : GenDefDatabase.GetDefSilentFail(mapDefType, name, false));
+            var setMapDef = MpCompat.RegisterLambdaMethod(CqfNamespace + "CustomMapEntrance", nameof(Thing.GetGizmos), 2)[0];
+            setMapDef.TransformArgument(0, byName, skipTypeCheck: true).CancelIfAnyArgNull();
+            setMapDef.SetDebugOnly();
+        });
+
+        // Caravan gizmo of Patch_AddCaravanAction.PostFix: display class <>c__DisplayClass0_1, lambda 2 (it captures the
+        // action def, the caravan and the editor game component, through the outer display class <>c__DisplayClass0_0).
+        TryRegister("Patch_AddCaravanAction caravan action", () =>
+            MpCompat.RegisterLambdaDelegate(CqfNamespace + "Patch_AddCaravanAction", "PostFix",
+                ["item", "CS$<>8__locals1/__instance", "CS$<>8__locals1/comp"], 2));
+    }
+
+    // One failed lookup (a CQF update that renumbers a lambda) must not stop the registrations around it
+    private static void TryRegister(string what, Action register)
+    {
+        try
+        {
+            register();
+        }
+        catch (Exception e)
+        {
+            Log.Error($"MPCompat :: CustomQuestFramework: {what} stays unsynced: {e.Message}");
         }
     }
 
