@@ -56,7 +56,9 @@ namespace Multiplayer.Compat
     ///    way (the confirmation also on its accept and cancel keys). Entry does not help with one write: GeneTool.SetPawnXenotype(CustomXenotype) adds the xenotype to
     ///    Current.Game.customXenotypeDatabase, a list in the save that PawnGenerator.AdjustXenotypeForFactionlessPawn reads
     ///    (Count, Rand.Range, TryRandomElement) - one PC with an extra entry draws other random numbers than the rest. For a
-    ///    page pawn that call runs against a throwaway database; the pawn carries its own xenotype name, icon and genes.
+    ///    page pawn that call runs against a throwaway database; the pawn carries its own xenotype name, icon and genes. The swap
+    ///    covers only the open page: MP's synced CreateFaction (PrepForMapGen) still adds the page's ForcedCustomXenotype to the
+    ///    real list on the editing PC only. That gap is MP's (vanilla's own page pick has it too), not fixed here.
     /// 10. Checked, no patch: the JIT cannot inline a patched CE method into a CE caller, because CharacterEditor.dll is a
     ///    Debug build (DebuggableAttribute with DisableOptimizations: the runtime compiles its methods unoptimized, and the
     ///    DynamicMethod Harmony builds for a patched CE caller was measured to follow that too). Measured on the lab's
@@ -265,7 +267,7 @@ namespace Multiplayer.Compat
         // is a page pawn or none.
         private static void PreVanillaWindowOfCe(Window __instance, ref int __state)
         {
-            __state = -1;
+            __state = 0;
             if (gamePlusSetByUs && OwnedByCharacterEditor(__instance) && SelectedIsPageLocalOrNone())
                 TryEnterEntryState(ref __state);
         }
@@ -298,7 +300,9 @@ namespace Multiplayer.Compat
         // Row 193c: GeneTool.SetPawnXenotype(CustomXenotype) adds the xenotype to Current.Game.customXenotypeDatabase. That list
         // is in the save and PawnGenerator.AdjustXenotypeForFactionlessPawn reads it (Count, Rand.Range, TryRandomElement), so
         // an entry on one PC draws other random numbers than on the rest. For a page pawn the call gets a throwaway database.
-        // The pawn keeps its xenotype name, icon and genes, and the page's generation request keeps the CustomXenotype itself.
+        // The pawn keeps its xenotype name, icon and genes. This covers only the time the page is open: CE also sets the page's
+        // generation request ForcedCustomXenotype on the editing PC, and MP's synced CreateFaction runs PrepForMapGen, which adds
+        // that xenotype to the real list on that PC only (an MP gap, vanilla's own page pick leaks the same way).
         private static void PreSetPawnXenotypeCustom(Pawn __0, ref CustomXenotypeDatabase __state)
         {
             __state = null;
@@ -315,8 +319,9 @@ namespace Multiplayer.Compat
         }
 
         // Row 193c, item 10: the tripwire for an optimized CharacterEditor.dll. A patch on a small CE method can be skipped when
-        // the JIT inlines the method into a CE caller; the Debug build CE ships today is never inlined into.
-        private const int InlineWarnIlBytes = 100;
+        // the JIT inlines the method into a CE caller; the Debug build CE ships today is never inlined into. 128: the CoreCLR
+        // default inliner's IL limit (larger methods can still be inlined at hot call sites, so this list is a lower bound).
+        private const int InlineWarnIlBytes = 128;
 
         private static void WarnIfCeIsOptimized()
         {
@@ -378,7 +383,8 @@ namespace Multiplayer.Compat
             // CE's casket on the map, and CE's item / capsule windows offer map actions.
             try
             {
-                foreach (var window in Find.WindowStack.Windows.Where(w => w.GetType().Assembly == ceAssembly).ToList())
+                // Also CE's vanilla confirmation boxes: one left open would run its CE action later, outside the Entry scope
+                foreach (var window in Find.WindowStack.Windows.Where(OwnedByCharacterEditor).ToList())
                     window.Close(false);
             }
             catch (Exception e)
@@ -388,24 +394,26 @@ namespace Multiplayer.Compat
             ClearGamePlus();
         }
 
-        // __state: the ProgramState to restore, or -1 when this call did not switch.
+        // __state: the ProgramState to restore plus 1, or 0 when this call did not switch. 0 must mean "no switch": Harmony
+        // sets __state to 0 before the prefixes run, so when another owner's earlier prefix throws, ours never runs but our
+        // finalizer still does (a plain ProgramState 0 is Entry, and restoring it would leave the game in Entry on one PC).
         private static void PreEnterEntryState(ref int __state) => TryEnterEntryState(ref __state);
 
         private static void TryEnterEntryState(ref int __state)
         {
-            __state = -1;
+            __state = 0;
             if (Current.ProgramState != ProgramState.Playing || MP.IsExecutingSyncCommand || !PageOpen)
                 return;
-            __state = (int)Current.ProgramState;
+            __state = (int)Current.ProgramState + 1;
             Current.programStateInt = ProgramState.Entry;
             entryDepth++;
         }
 
         private static void RestoreProgramState(int __state)
         {
-            if (__state < 0)
+            if (__state <= 0)
                 return;
-            Current.programStateInt = (ProgramState)__state;
+            Current.programStateInt = (ProgramState)(__state - 1);
             entryDepth--;
         }
 
@@ -451,7 +459,7 @@ namespace Multiplayer.Compat
         // PC only, instead of sending a command whose target no other PC can find. A real pawn selected: old path.
         private static void PreCeWindowContents(ref int __state)
         {
-            __state = -1;
+            __state = 0;
             if (gamePlusSetByUs && SelectedIsPageLocalOrNone())
                 TryEnterEntryState(ref __state);
         }
@@ -486,7 +494,7 @@ namespace Multiplayer.Compat
 
         private static void PreCeFloatMenuChosen(FloatMenuOption __instance, ref int __state)
         {
-            __state = -1;
+            __state = 0;
             if (gamePlusSetByUs && __instance.action?.Method.DeclaringType?.Assembly == ceAssembly && SelectedIsPageLocalOrNone())
                 TryEnterEntryState(ref __state);
         }
