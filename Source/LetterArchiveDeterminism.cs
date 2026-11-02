@@ -26,7 +26,9 @@ namespace Multiplayer.Compat
     /// 2. IncidentWorker_RansomDemand.RandomKidnappedColonist (RimWorld/IncidentWorker_RansomDemand.cs:64) leaves out pawns with
     ///    a ransom letter in the stack. Another faction's ransom letter is not in this PC's stack, so the pick could differ.
     ///    Fix: in MP it reads the archive's ransom letters whose timeout has not passed. Rule 1 keeps those on every PC.
-    /// Single player is unchanged (both patches return at once when not in MP).
+    /// 3. Mods (their modules): VAspirE grow old (VanillaAspirationsExpanded.cs) and Vanilla Persona Weapons Expanded
+    ///    (VanillaPersonaWeaponsExpanded.cs) read the stack in a tick or a synced call.
+    /// Single player is unchanged (every patch returns at once when not in MP).
     /// </remarks>
     internal static class LetterArchiveDeterminism
     {
@@ -76,14 +78,21 @@ namespace Multiplayer.Compat
         }
 
         private static IEnumerable<CodeInstruction> RansomTranspiler(IEnumerable<CodeInstruction> instructions, MethodBase original)
+            => ReplaceStackRead(instructions, original, AccessTools.PropertyGetter(typeof(LetterStack), nameof(LetterStack.LettersListForReading)),
+                AccessTools.Method(typeof(LetterArchiveDeterminism), nameof(LettersForRansom)));
+
+        /// <summary>Replaces the one read of the letter stack (LettersListForReading or the letters field) with replacement(LetterStack).</summary>
+        internal static IEnumerable<CodeInstruction> ReplaceStackRead(IEnumerable<CodeInstruction> instructions, MethodBase original,
+            MemberInfo stackRead, MethodInfo replacement)
         {
-            var stackGetter = AccessTools.PropertyGetter(typeof(LetterStack), nameof(LetterStack.LettersListForReading));
-            var replacement = AccessTools.Method(typeof(LetterArchiveDeterminism), nameof(LettersForRansom));
             var list = new List<CodeInstruction>(instructions);
             int replaced = 0;
             foreach (var ci in list)
             {
-                if ((ci.opcode == OpCodes.Callvirt || ci.opcode == OpCodes.Call) && ci.operand as MethodInfo == stackGetter)
+                bool hit = stackRead is FieldInfo
+                    ? ci.opcode == OpCodes.Ldfld && Equals(ci.operand, stackRead)
+                    : (ci.opcode == OpCodes.Callvirt || ci.opcode == OpCodes.Call) && Equals(ci.operand, stackRead);
+                if (hit)
                 {
                     ci.opcode = OpCodes.Call;
                     ci.operand = replacement;
@@ -91,8 +100,26 @@ namespace Multiplayer.Compat
                 }
             }
             if (replaced != 1)
-                Log.Warning($"[MPCompat] row 106: {original?.Name} reads the letter stack {replaced} times, expected 1; ransom picks may stay per PC");
+                Log.Warning($"[MPCompat] row 106: {original?.DeclaringType?.Name}.{original?.Name} reads the letter stack {replaced} times, expected 1; it may still decide per PC");
             return list;
+        }
+
+        // Replaces LetterStack.letters where a mod looks for a letter it sent in the simulation (VAspirE grow old).
+        // ReceiveLetter archives the letter on every PC in the same tick, before MP removes another faction's letter from the stack.
+        private static readonly List<Letter> archivedLetters = new List<Letter>();
+
+        internal static List<Letter> ArchivedLetters(LetterStack stack)
+        {
+            if (!MP.IsInMultiplayer)
+                return stack.letters;
+
+            archivedLetters.Clear();
+            foreach (var archivable in Find.Archive.ArchivablesListForReading)
+            {
+                if (archivable is Letter letter)
+                    archivedLetters.Add(letter);
+            }
+            return archivedLetters;
         }
 
         // Replaces LetterStack.LettersListForReading in RandomKidnappedColonist. It only looks for ChoiceLetter_RansomDemand there.

@@ -1,4 +1,7 @@
 ﻿using System;
+using System.Collections;
+using System.Collections.Generic;
+using System.Reflection;
 using System.Runtime.Serialization;
 using HarmonyLib;
 using Multiplayer.API;
@@ -134,8 +137,51 @@ public class VanillaPersonaWeaponsExpanded
 
     private static bool CanAcceptPersonaWeapon(ChoiceLetter choiceLetter)
     {
-        // If the letter is archived, cancel execution - weapon was accepted or rejected.
-        return !MP.IsInMultiplayer || choiceLetter is { ArchivedOnly: false };
+        // If the letter is resolved, cancel execution - weapon was accepted or rejected.
+        // FIXES row 106: this ran ArchivedOnly, which reads this PC's letter stack. MP removes another faction's letter from the
+        // stack on receive, so the synced accept was cancelled on every PC but the owner's (the weapon spawned on one PC only).
+        // GameComponent_PersonaWeapons.unresolvedLetters is saved and changes only in synced code and the tick:
+        // RemoveAndResolveLetter, which accept and reject both call, takes the letter out.
+        return !MP.IsInMultiplayer || choiceLetter != null && UnresolvedLetters()?.Contains(choiceLetter) == true;
+    }
+
+    // GameComponent_PersonaWeapons.unresolvedLetters (List<ChoiceLetter_ChoosePersonaWeapon>)
+    private static IList UnresolvedLetters()
+    {
+        personaComponentType ??= AccessTools.TypeByName("VanillaPersonaWeaponsExpanded.GameComponent_PersonaWeapons");
+        var component = Current.Game?.components?.Find(c => c.GetType() == personaComponentType);
+        return component == null ? null : AccessTools.Field(personaComponentType, "unresolvedLetters").GetValue(component) as IList;
+    }
+
+    private static Type personaComponentType;
+    private static readonly List<Letter> unresolvedAsLetters = new List<Letter>();
+
+    // FIXES row 106: GameComponent_PersonaWeapons.GameComponentTick re-sends, or for a non-colonist drops, an unresolved letter
+    // that is not in this PC's letter stack 7 days after tickWhenOpened (set when a player opens the letter, per PC). In MP every
+    // unresolved letter counts as in the stack, so neither happens and unresolvedLetters stays the same on every PC.
+    // MP already keeps the letter in the stack on postpone (DontRemoveLetterOnPostpone).
+    [MpCompatTranspiler("VanillaPersonaWeaponsExpanded.GameComponent_PersonaWeapons", "GameComponentTick")]
+    private static IEnumerable<CodeInstruction> TickReadsUnresolved(IEnumerable<CodeInstruction> instr, MethodBase baseMethod)
+        => LetterArchiveDeterminism.ReplaceStackRead(instr, baseMethod,
+            AccessTools.PropertyGetter(typeof(LetterStack), nameof(LetterStack.LettersListForReading)),
+            AccessTools.Method(typeof(VanillaPersonaWeaponsExpanded), nameof(LettersForTick)));
+
+    private static List<Letter> LettersForTick(LetterStack stack)
+    {
+        if (!MP.IsInMultiplayer)
+            return stack.LettersListForReading;
+
+        unresolvedAsLetters.Clear();
+        var unresolved = UnresolvedLetters();
+        if (unresolved != null)
+        {
+            foreach (var letter in unresolved)
+            {
+                if (letter is Letter l)
+                    unresolvedAsLetters.Add(l);
+            }
+        }
+        return unresolvedAsLetters;
     }
 
     #endregion

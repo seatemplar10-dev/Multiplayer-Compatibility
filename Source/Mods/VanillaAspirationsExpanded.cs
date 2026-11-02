@@ -247,4 +247,17 @@ public class VanillaAspirationsExpanded
     private static bool DontRemoveChoiceLetter() => !MP.IsInMultiplayer || !isDrawingDialog;
 
     #endregion
+
+    #region Grow old: look for the birthday letter in the archive (FIXES row 106)
+
+    // AspirationWorker_GrowOld.IsCompleted (from Need_Fulfillment.NeedInterval, a tick) completes while a "LetterLabelBirthday"
+    // letter about the pawn is in Find.LetterStack.letters. The stack is per PC: MP removes another faction's letters on receive,
+    // and players close letters locally. So the aspiration completed on one PC only. In MP it reads the archive's letters instead
+    // (LetterArchiveDeterminism.ArchivedLetters): the birthday letter is archived on every PC in the tick it is sent.
+    [MpCompatTranspiler("VAspirE.AspirationWorker_GrowOld", "IsCompleted")]
+    private static IEnumerable<CodeInstruction> GrowOldReadsArchive(IEnumerable<CodeInstruction> instr, MethodBase baseMethod)
+        => LetterArchiveDeterminism.ReplaceStackRead(instr, baseMethod, AccessTools.Field(typeof(LetterStack), nameof(LetterStack.letters)),
+            AccessTools.Method(typeof(LetterArchiveDeterminism), nameof(LetterArchiveDeterminism.ArchivedLetters)));
+
+    #endregion
 }
