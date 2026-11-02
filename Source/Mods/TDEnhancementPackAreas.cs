@@ -127,7 +127,7 @@ namespace Multiplayer.Compat
             catch (Exception e)
             {
                 MpCompat.harmony.Unpatch(doOrderButton, HarmonyPatchType.Transpiler, MpCompat.harmony.Id);
-                Log.Error($"{LogPrefix}patching or registering failed, the clear button patch was removed again, the Manage Areas buttons stay local: {e}");
+                Log.Error($"{LogPrefix}patching or registering failed, the DoOrderButton patch was removed again, so clear and reorder stay local (recolour and paste stay synced if they were registered before the failure): {e}");
                 throw new InvalidOperationException($"{LogPrefix}patch failed", e);
             }
 
@@ -222,6 +222,8 @@ namespace Multiplayer.Compat
 
         // The clear button, on every PC: the area is named by the argument. The vanilla Area.Clear() empties the cell grid and marks the
         // drawer dirty, the same result as TD's own BoolGrid.Clear() followed by two Invert() calls.
+        // NoInlining: Multiplayer patches this method (sync prefix) - its caller (the patched DoOrderButton) must call it, never inline its body.
+        [MethodImpl(MethodImplOptions.NoInlining)]
         public static void SyncClearArea(Area area)
         {
             if (!active || area is not Area_Allowed)

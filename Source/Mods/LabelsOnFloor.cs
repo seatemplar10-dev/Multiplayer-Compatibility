@@ -6,6 +6,7 @@ using System.Reflection.Emit;
 using System.Runtime.CompilerServices;
 using HarmonyLib;
 using Multiplayer.API;
+using UnityEngine;
 using Verse;
 
 namespace Multiplayer.Compat
@@ -21,15 +22,18 @@ namespace Multiplayer.Compat
     /// does the next automatic zone name, because <c>ZoneManager.NewZoneName</c> reads the labels of all zones.
     /// </para>
     /// <para>
-    /// Fix: a transpiler replaces that one <c>stfld Zone.label</c> by a call of <see cref="SyncSetZoneLabel"/>, a sync method that names the
-    /// zone and sets the label on every PC when the command runs. The clicking PC writes nothing before the command runs. After the write each
-    /// PC marks the mod's floor label cache dirty, as the clicking PC already did at the end of <c>ApplyChanges</c>, so the new name is drawn on
-    /// every PC. Single player, and any call made while a command runs, run the plain write.
+    /// Fix: a transpiler on the dialog's <c>DoWindowContents</c> replaces its one <c>call ApplyChanges</c> by <see cref="ApplyZoneChangesHook"/>.
+    /// In MP the hook reads the dialog's name and colour and sends <see cref="SyncApplyZoneChanges"/>, which on every PC sets <c>Zone.label</c>
+    /// and the mod's saved <c>CustomZoneData</c> label and colour (a world component, found again from the zone), then marks the floor label
+    /// cache dirty. The clicking PC writes nothing before the command runs. Single player runs the mod's own <c>ApplyChanges</c>.
+    /// The caller is patched, not <c>ApplyChanges</c> itself: that one is 95 bytes of IL, and a tier-1 <c>DoWindowContents</c> could inline its
+    /// original body past a patch on it.
     /// </para>
     /// <para>
-    /// Left as it is on purpose: the mod's own per zone data (<c>CustomZoneData</c> label and colour, a world component that only the floor
-    /// label drawing reads), the room rename window, and the rename window itself, which Multiplayer opens on every PC through the designator
-    /// command (<c>Designator_Rename.DesignateSingleCell</c>).
+    /// Multiplayer syncs <c>Designator_Rename.DesignateSingleCell</c>, so the rename window opened on every PC, and an OK or Enter in any copy
+    /// renamed the zone again. A prefix on <c>WindowStack.Add</c> now drops both rename windows while another player's command runs, so only the
+    /// issuing PC gets the window. The command still runs the rest of <c>DesignateSingleCell</c> on every PC (it creates the empty custom data
+    /// entry everywhere). Left local on purpose: the room rename window's data (<c>CustomRoomData</c>, read by the floor label drawing only).
     /// </para>
     /// </remarks>
     [MpCompatFor("falconne.LabelsOnFloor")]
@@ -37,35 +41,62 @@ namespace Multiplayer.Compat
     {
         private const string LogPrefix = "[MPCompat - Labels on Floor] ";
 
-        // Verse.Zone.label (public saved field)
-        private static FieldInfo zoneLabelField;
         // LabelsOnFloor.LabelsOnFloorMod.Instance (static getter), .LabelPlacementHandler (getter) and LabelPlacementHandler.SetDirty()
-        // Optional: when one of them is missing the label is still synced, only the floor label cache is not refreshed.
+        // Optional: when one of them is missing the rename is still synced, only the floor label cache is not refreshed.
         private static MethodInfo modInstanceGetter;
         private static MethodInfo placementHandlerGetter;
         private static MethodInfo setDirty;
-        // LabelsOnFloor.SyncSetZoneLabel(Zone, string)
-        private static MethodInfo syncSetZoneLabel;
+
+        // Dialog_RenameZoneWithColor: the method we redirect, the mod's own ApplyChanges (single player), and the fields the hook reads
+        private static MethodInfo applyChanges;
+        private static MethodInfo applyZoneChangesHook;
+        private static FastInvokeHandler applyChangesInvoker;
+        private static AccessTools.FieldRef<object, Zone> dialogZoneField;
+        private static AccessTools.FieldRef<object, string> dialogNameField;
+        private static AccessTools.FieldRef<object, Color?> dialogColorField;
+        // CustomZoneLabelManagerComponent (world component) .GetOrCreateCustomData(Zone), and CustomZoneData.Label / .CustomColor
+        private static Type zoneLabelManagerType;
+        private static FastInvokeHandler getOrCreateCustomData;
+        private static AccessTools.FieldRef<object, string> customDataLabelField;
+        private static AccessTools.FieldRef<object, Color?> customDataColorField;
+        // The two rename windows, kept off the PCs that did not issue the rename command
+        private static Type zoneDialogType;
+        private static Type roomDialogType;
 
         public LabelsOnFloor(ModContentPack mod)
         {
-            MethodInfo applyChanges;
+            MethodInfo doWindowContents;
 
             // 1. look every member up first and check the IL we rewrite: patch and register nothing when one is missing
             try
             {
-                var dialogType = AccessTools.TypeByName("LabelsOnFloor.Dialog_RenameZoneWithColor")
+                zoneDialogType = AccessTools.TypeByName("LabelsOnFloor.Dialog_RenameZoneWithColor")
                                  ?? throw new TypeLoadException("type LabelsOnFloor.Dialog_RenameZoneWithColor not found");
-                applyChanges = AccessTools.DeclaredMethod(dialogType, "ApplyChanges", Type.EmptyTypes)
-                               ?? throw new MissingMethodException(dialogType.FullName, "ApplyChanges");
-                zoneLabelField = AccessTools.DeclaredField(typeof(Zone), nameof(Zone.label))
-                                 ?? throw new MissingFieldException(typeof(Zone).FullName, nameof(Zone.label));
-                syncSetZoneLabel = AccessTools.DeclaredMethod(typeof(LabelsOnFloor), nameof(SyncSetZoneLabel), [typeof(Zone), typeof(string)])
-                                   ?? throw new MissingMethodException(typeof(LabelsOnFloor).FullName, nameof(SyncSetZoneLabel));
+                roomDialogType = AccessTools.TypeByName("LabelsOnFloor.Dialog_RenameRoomWithColor");
+                doWindowContents = AccessTools.DeclaredMethod(zoneDialogType, nameof(Window.DoWindowContents), [typeof(Rect)])
+                                   ?? throw new MissingMethodException(zoneDialogType.FullName, nameof(Window.DoWindowContents));
+                applyChanges = AccessTools.DeclaredMethod(zoneDialogType, "ApplyChanges", Type.EmptyTypes)
+                               ?? throw new MissingMethodException(zoneDialogType.FullName, "ApplyChanges");
+                applyChangesInvoker = MethodInvoker.GetHandler(applyChanges);
+                applyZoneChangesHook = AccessTools.DeclaredMethod(typeof(LabelsOnFloor), nameof(ApplyZoneChangesHook), [typeof(Window)])
+                                       ?? throw new MissingMethodException(typeof(LabelsOnFloor).FullName, nameof(ApplyZoneChangesHook));
+                dialogZoneField = AccessTools.FieldRefAccess<Zone>(zoneDialogType, "_zone");
+                dialogNameField = AccessTools.FieldRefAccess<string>(zoneDialogType, "curName");
+                dialogColorField = AccessTools.FieldRefAccess<Color?>(zoneDialogType, "selectedColor");
 
-                RewriteLabelStore(PatchProcessor.GetOriginalInstructions(applyChanges), out var stores);
-                if (stores != 1)
-                    throw new InvalidOperationException($"{dialogType.FullName}.ApplyChanges: expected 1 write of Zone.label, found {stores}");
+                zoneLabelManagerType = AccessTools.TypeByName("LabelsOnFloor.CustomZoneLabelManagerComponent")
+                                       ?? throw new TypeLoadException("type LabelsOnFloor.CustomZoneLabelManagerComponent not found");
+                getOrCreateCustomData = MethodInvoker.GetHandler(
+                    AccessTools.DeclaredMethod(zoneLabelManagerType, "GetOrCreateCustomData", [typeof(Zone)])
+                    ?? throw new MissingMethodException(zoneLabelManagerType.FullName, "GetOrCreateCustomData"));
+                var customDataType = AccessTools.TypeByName("LabelsOnFloor.CustomZoneData")
+                                     ?? throw new TypeLoadException("type LabelsOnFloor.CustomZoneData not found");
+                customDataLabelField = AccessTools.FieldRefAccess<string>(customDataType, "Label");
+                customDataColorField = AccessTools.FieldRefAccess<Color?>(customDataType, "CustomColor");
+
+                RewriteApplyCall(PatchProcessor.GetOriginalInstructions(doWindowContents), out var calls);
+                if (calls != 1)
+                    throw new InvalidOperationException($"{zoneDialogType.FullName}.DoWindowContents: expected 1 call of ApplyChanges, found {calls}");
             }
             catch (Exception e)
             {
@@ -90,42 +121,60 @@ namespace Multiplayer.Compat
                 Log.Warning($"{LogPrefix}cannot refresh the floor labels after a synced rename, other PCs show the new zone name after their next label refresh: {e.Message}");
             }
 
-            // 2. patch, then register; when something fails the patch is taken off again and the rename behaves as without the module
+            // 2. register, then patch; when the patch fails it is taken off again and the rename behaves as without the module
             try
             {
-                MpCompat.harmony.Patch(applyChanges, transpiler: new HarmonyMethod(typeof(LabelsOnFloor), nameof(TranspileApplyChanges)));
-                MP.RegisterSyncMethod(typeof(LabelsOnFloor), nameof(SyncSetZoneLabel)).CancelIfAnyArgNull();
+                MP.RegisterSyncMethod(typeof(LabelsOnFloor), nameof(SyncApplyZoneChanges)).CancelIfAnyArgNull();
+                MpCompat.harmony.Patch(doWindowContents, transpiler: new HarmonyMethod(typeof(LabelsOnFloor), nameof(TranspileDoWindowContents)));
             }
             catch (Exception e)
             {
-                MpCompat.harmony.Unpatch(applyChanges, HarmonyPatchType.Transpiler, MpCompat.harmony.Id);
+                MpCompat.harmony.Unpatch(doWindowContents, HarmonyPatchType.Transpiler, MpCompat.harmony.Id);
                 Log.Error($"{LogPrefix}patching or registering failed, the patch was removed again, the zone rename stays local: {e}");
                 throw new InvalidOperationException($"{LogPrefix}patch failed", e);
             }
 
-            Log.Message($"{LogPrefix}installed: the zone rename OK button sets Zone.label through a sync method.");
+            // The window gate is separate: without it the rename is still synced, only every PC gets the window
+            try
+            {
+                MpCompat.harmony.Patch(AccessTools.DeclaredMethod(typeof(WindowStack), nameof(WindowStack.Add), [typeof(Window)]),
+                    prefix: new HarmonyMethod(typeof(LabelsOnFloor), nameof(PreWindowStackAdd)));
+            }
+            catch (Exception e)
+            {
+                Log.Warning($"{LogPrefix}cannot keep the rename window to the issuing PC, every PC opens it: {e.Message}");
+            }
+
+            Log.Message($"{LogPrefix}installed: the zone rename OK button sets the zone label and its colour through a sync method.");
         }
+
+        // ---- the rename window ---------------------------------------------------------------------------------------------------------
+
+        // Designator_Rename.DesignateSingleCell runs as a synced command on every PC and opens the rename window there.
+        private static bool PreWindowStackAdd(Window window)
+            => window == null || !MP.IsInMultiplayer || !MP.IsExecutingSyncCommand || MP.IsExecutingSyncCommandIssuedBySelf
+               || !(zoneDialogType.IsInstanceOfType(window) || (roomDialogType != null && roomDialogType.IsInstanceOfType(window)));
 
         // ---- the rename OK button -----------------------------------------------------------------------------------------------------
 
-        private static IEnumerable<CodeInstruction> TranspileApplyChanges(IEnumerable<CodeInstruction> instructions)
-            => RewriteLabelStore(instructions, out _);
+        private static IEnumerable<CodeInstruction> TranspileDoWindowContents(IEnumerable<CodeInstruction> instructions)
+            => RewriteApplyCall(instructions, out _);
 
-        // "ldarg.0; ldfld _zone; ldloc label; stfld Zone.label" becomes "...; call SyncSetZoneLabel(Zone, string)".
-        // Both end with the zone and the string on the stack, so only the last instruction changes (it keeps the labels and blocks).
-        private static List<CodeInstruction> RewriteLabelStore(IEnumerable<CodeInstruction> instructions, out int rewritten)
+        // "ldarg.0; call instance ApplyChanges()" becomes "ldarg.0; call ApplyZoneChangesHook(Window)".
+        // Both take the dialog from the stack and leave nothing, so only the call changes (it keeps the labels and blocks).
+        private static List<CodeInstruction> RewriteApplyCall(IEnumerable<CodeInstruction> instructions, out int rewritten)
         {
             rewritten = 0;
             var result = new List<CodeInstruction>();
             foreach (var ci in instructions)
             {
-                if (!ci.StoresField(zoneLabelField))
+                if (!ci.Calls(applyChanges))
                 {
                     result.Add(ci);
                     continue;
                 }
 
-                var call = new CodeInstruction(OpCodes.Call, syncSetZoneLabel);
+                var call = new CodeInstruction(OpCodes.Call, applyZoneChangesHook);
                 call.labels.AddRange(ci.labels);
                 call.blocks.AddRange(ci.blocks);
                 result.Add(call);
@@ -134,19 +183,44 @@ namespace Multiplayer.Compat
             return result;
         }
 
+        // In the interface: single player runs the mod's own ApplyChanges, MP sends what the dialog holds as one command.
+        // The mod trims the name, the label and the custom data get the trimmed name (ApplyChanges: "curName?.Trim() ?? """).
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private static void ApplyZoneChangesHook(Window dialog)
+        {
+            if (!MP.IsInMultiplayer)
+            {
+                applyChangesInvoker(dialog);
+                return;
+            }
+
+            var color = dialogColorField(dialog);
+            SyncApplyZoneChanges(dialogZoneField(dialog), dialogNameField(dialog)?.Trim() ?? "", color.HasValue, color ?? default);
+        }
+
         // ---- synced -------------------------------------------------------------------------------------------------------------------
 
         // The zone rename, on every PC: the zone is named by the argument (found again by zone id through its map). The write is the one the
         // dialog made, and the same one the synced RenamableLabel setter makes. A call made while MP is not in a game, or while a command runs,
         // only runs the body.
-        // NoInlining: Multiplayer patches this method (sync prefix) - its caller (the patched ApplyChanges) must call it, never inline its body.
+        // NoInlining: Multiplayer patches this method (sync prefix) - its caller (the hook) must call it, never inline its body.
         [MethodImpl(MethodImplOptions.NoInlining)]
-        public static void SyncSetZoneLabel(Zone zone, string label)
+        public static void SyncApplyZoneChanges(Zone zone, string label, bool hasColor, Color color)
         {
             if (zone == null)
                 return;
 
             zone.label = label;
+
+            // The mod's saved per zone data, the same writes as ApplyChanges; GetOrCreateCustomData finds the entry by zone ID
+            var manager = Find.World?.GetComponent(zoneLabelManagerType);
+            var data = manager == null ? null : getOrCreateCustomData(manager, zone);
+            if (data != null)
+            {
+                customDataLabelField(data) = label;
+                customDataColorField(data) = hasColor ? color : null;
+            }
+
             RefreshFloorLabels();
         }
 
