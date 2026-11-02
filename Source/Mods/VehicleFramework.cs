@@ -227,6 +227,83 @@ namespace Multiplayer.Compat
             {
                 Log.Error("MPCompat :: Vehicle Framework step 10 (null pawn in caravan mass, FIXES row 271) not installed: " + e);
             }
+
+            // 11. Rows 361 / 360: the pawns VF appends to CaravanFormingUtility.AllSendablePawns (those aboard vehicles).
+            try
+            {
+                PatchSendablePawnsAboard();
+            }
+            catch (Exception e)
+            {
+                Log.Error("MPCompat :: Vehicle Framework step 11 (sendable pawns aboard vehicles, FIXES rows 361/360) not installed: " + e);
+            }
+        }
+
+        // Step 11: Vehicles.Ext_Vehicles.GetVehicle(this Pawn) (static, null = not aboard a vehicle)
+        private static FastInvokeHandler getPawnVehicle;
+        private static bool sendablePawnsLogged;
+
+        // Rows 361 / 360: VF's postfix on CaravanFormingUtility.AllSendablePawns (Patch_FormCaravanDialog.AllSendablePawnsInVehicles, Harmony id
+        // "SmashPhil.VehicleFramework") appends AllPawnsAboard of EVERY vehicle on the map, in VehiclePositionManager.claimants order. Vanilla's
+        // own list is faction-checked, VF's append is not. Ours is a postfix with Priority.Last, after VF's id, so it sees VF's finished list.
+        private static void PatchSendablePawnsAboard()
+        {
+            getPawnVehicle = MethodInvoker.GetHandler(GetDeclaredMethod(FindType("Vehicles.Ext_Vehicles"), "GetVehicle", [typeof(Pawn)]));
+
+            MpCompat.harmony.Patch(AccessTools.DeclaredMethod(typeof(CaravanFormingUtility), nameof(CaravanFormingUtility.AllSendablePawns)),
+                postfix: new HarmonyMethod(typeof(VehicleFramework), nameof(PostAllSendablePawns))
+                {
+                    priority = Priority.Last,
+                    after = ["SmashPhil.VehicleFramework"]
+                });
+        }
+
+        // Pawns aboard are the entries that are not spawned and have a vehicle (vanilla's list is spawned pawns only), so everything else
+        // stays untouched and in place. Row 361: aboard pawns whose vehicle is not this faction's, or who fail VF's own test in
+        // CaravanHelper.AllSendablePawnsInVehicles (pawn is the player's, a prisoner of the colony, or a capturable downed pawn), are dropped:
+        // in MP Faction.OfPlayer is the issuer's faction while the session is built, so the list is the same on every PC.
+        // Row 360: the rest goes after the others in thingIDNumber order, not in claimants order (that list is reordered on every move
+        // and not saved).
+        private static void PostAllSendablePawns(List<Pawn> __result, bool allowCapturableDownedPawns)
+        {
+            if (!MP.IsInMultiplayer || __result == null)
+                return;
+
+            try
+            {
+                var args = new object[1];
+                HashSet<Pawn> aboard = null;
+                List<Pawn> keep = null;
+                for (var i = 0; i < __result.Count; i++)
+                {
+                    var pawn = __result[i];
+                    if (pawn == null || pawn.Spawned)
+                        continue;
+                    args[0] = pawn;
+                    if (getPawnVehicle(null, args) is not Pawn vehicle)
+                        continue;
+                    aboard ??= [];
+                    keep ??= [];
+                    aboard.Add(pawn);
+                    if (vehicle.Faction == Faction.OfPlayer && (pawn.Faction == Faction.OfPlayer || pawn.IsPrisonerOfColony ||
+                        (allowCapturableDownedPawns && pawn.Downed && !pawn.mindState.WillJoinColonyIfRescued && CaravanUtility.ShouldAutoCapture(pawn, Faction.OfPlayer))))
+                        keep.Add(pawn);
+                }
+
+                if (aboard == null)
+                    return;
+
+                keep.Sort((a, b) => a.thingIDNumber.CompareTo(b.thingIDNumber));
+                __result.RemoveAll(aboard.Contains);
+                __result.AddRange(keep);
+            }
+            catch (Exception e)
+            {
+                if (sendablePawnsLogged)
+                    return;
+                sendablePawnsLogged = true;
+                Log.Error($"{LogPrefix}could not filter the pawns aboard vehicles in the caravan list (FIXES rows 361/360), list left as Vehicle Framework made it: {e}");
+            }
         }
 
         // Step 10: the mass passes through unchanged for a null pawn (a corpse), as VF does for a pawn not in a vehicle.
