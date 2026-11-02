@@ -114,6 +114,8 @@ namespace Multiplayer.Compat
                 return true;
             Log.Message(LogPrefix + "row 181: wreckage confirm skipped, the boss is already arriving or alive (ticks to arrival " +
                         ticksToArrival(comp) + ")");
+            if (MP.IsExecutingSyncCommandIssuedBySelf)
+                Messages.Message("The wreckage was already activated.", MessageTypeDefOf.RejectInput, false);
             return false;
         }
 
