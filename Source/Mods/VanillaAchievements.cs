@@ -17,7 +17,7 @@ namespace Multiplayer.Compat
     /// FIXES row 394 (mod sweep 2 Nov 2026): <c>Reward_RandomEvent.TryExecuteEvent</c> takes its incident target from
     /// <c>WorldRendererUtility.WorldRendered ? Find.WorldSelector.SingleSelectedObject as IIncidentTarget : null</c>, else
     /// <c>Find.CurrentMap</c>. It runs inside the synced <see cref="SyncedCalls"/>, but world view and world selection are per PC, so a PC
-    /// on the world map with a caravan or map selected at the purchase picked another target than the others (an incident on a different
+    /// on the world map with a caravan (or gravship) selected at the purchase picked another target than the others (an incident on a different
     /// map or caravan = different Rand use and state). A transpiler makes the world-view test false in multiplayer, so the target is
     /// always <c>Find.CurrentMap</c>, which is the command's pinned map on every PC. Single player keeps the mod's behaviour.
     /// </remarks>
@@ -63,6 +63,11 @@ namespace Multiplayer.Compat
             {
                 var randomEventMethod = AccessTools.DeclaredMethod(AccessTools.TypeByName("AchievementsExpanded.Reward_RandomEvent"), "TryExecuteEvent")
                     ?? throw new Exception("method Reward_RandomEvent.TryExecuteEvent not found");
+                // Count first, patch only on a match (as VanillaAchievementsSimGate does): a changed mod then logs an error and patches nothing.
+                var worldRendered = AccessTools.PropertyGetter(typeof(WorldRendererUtility), nameof(WorldRendererUtility.WorldRendered));
+                var calls = PatchProcessor.GetOriginalInstructions(randomEventMethod).Count(ci => ci.Calls(worldRendered));
+                if (calls != 1)
+                    throw new Exception($"Reward_RandomEvent.TryExecuteEvent has {calls} WorldRendered checks, expected 1 (mod changed)");
                 MpCompat.harmony.Patch(randomEventMethod, transpiler: new HarmonyMethod(typeof(VanillaAchievements), nameof(RandomEventTranspiler)));
             }
             catch (Exception e)
@@ -78,7 +83,6 @@ namespace Multiplayer.Compat
         {
             var worldRendered = AccessTools.PropertyGetter(typeof(WorldRendererUtility), nameof(WorldRendererUtility.WorldRendered));
             var replacement = AccessTools.Method(typeof(VanillaAchievements), nameof(WorldRenderedExceptInMp));
-            var replaced = 0;
 
             foreach (var ci in instr)
             {
@@ -86,14 +90,10 @@ namespace Multiplayer.Compat
                 {
                     ci.opcode = OpCodes.Call;
                     ci.operand = replacement;
-                    replaced++;
                 }
 
                 yield return ci;
             }
-
-            if (replaced != 1)
-                Log.Warning($"MPCompat :: Vanilla Achievements Expanded: expected 1 WorldRendered check in Reward_RandomEvent.TryExecuteEvent, replaced {replaced}");
         }
 
         private static bool usedReward = false;
