@@ -1,4 +1,6 @@
 using System;
+using System.Collections;
+using System.Collections.Generic;
 using System.Reflection;
 using System.Reflection.Emit;
 using HarmonyLib;
@@ -36,6 +38,9 @@ public class DefensivePositions
     private static FastInvokeHandler managerGetHandlerForPawnMethod;
     // PawnSavedPositions
     private static FastInvokeHandler pawnSavedPositionsOwnerGetter;
+    private static FastInvokeHandler pawnSavedPositionsShouldBeSavedGetter;
+    // WorldData
+    private static MethodInfo worldDataHandlerListFromDictionaryMethod;
 
     public DefensivePositions(ModContentPack mod)
     {
@@ -44,14 +49,23 @@ public class DefensivePositions
 
         // FIXES row 219: in multifaction MP saves every join point (autosave, a player joining) as the first player
         // faction (SaveLoad.SaveAndReload sets Faction.OfPlayer before SaveGameData). DP keeps a pawn's saved
-        // positions only if `owner.Faction == Faction.OfPlayer` (PawnSavedPositions.ShouldBeSaved, read by
-        // WorldData.ExposeData), so every other player faction lost its saved positions at each join point, on every
-        // PC alike. In MP, keep them for any player faction. Done whoever registers the sync methods below.
-        var shouldBeSaved = AccessTools.DeclaredPropertyGetter(savedPositionsType, "ShouldBeSaved");
-        if (shouldBeSaved != null)
-            MpCompat.harmony.Patch(shouldBeSaved, postfix: new HarmonyMethod(typeof(DefensivePositions), nameof(PostShouldBeSaved)));
-        else
-            Log.Warning("MPCompat :: Defensive Positions has no PawnSavedPositions.ShouldBeSaved, other player factions' positions may not be saved");
+        // positions only if `owner.Faction == Faction.OfPlayer` (PawnSavedPositions.ShouldBeSaved, filtered in
+        // WorldData.HandlerListFromDictionary from WorldData.ExposeData), so every other player faction lost its saved
+        // positions at each join point, on every PC alike. In MP, keep them for any player faction. Done whoever
+        // registers the sync methods below. A transpiler on ExposeData, not a patch on the tiny ShouldBeSaved getter or
+        // HandlerListFromDictionary: on 1.7 (CoreCLR) a tier-1 compiled caller can inline a small method and skip its patch.
+        try
+        {
+            var worldDataType = AccessTools.TypeByName("DefensivePositions.WorldData");
+            worldDataHandlerListFromDictionaryMethod = AccessTools.DeclaredMethod(worldDataType, "HandlerListFromDictionary");
+            pawnSavedPositionsShouldBeSavedGetter = MethodInvoker.GetHandler(AccessTools.DeclaredPropertyGetter(savedPositionsType, "ShouldBeSaved"));
+            MpCompat.harmony.Patch(AccessTools.DeclaredMethod(worldDataType, "ExposeData"),
+                transpiler: new HarmonyMethod(typeof(DefensivePositions), nameof(ReplaceHandlerListFromDictionary)));
+        }
+        catch (Exception e)
+        {
+            Log.Error($"MPCompat :: Defensive Positions save fix (other player factions' positions) failed, not applied: {e}");
+        }
 
         var compatType = AccessTools.TypeByName("DefensivePositions.Compat_MultiplayerAPI");
         if (compatType != null && !ModOwnLayerAlwaysFails(AccessTools.DeclaredMethod(compatType, "Initialize")))
@@ -98,14 +112,52 @@ public class DefensivePositions
         return false;
     }
 
-    // Same test as DP's own (owner set, not destroyed), but any player faction instead of only Faction.OfPlayer.
-    // Single player is unchanged. Without multifaction there is one player faction, so the result is unchanged too.
-    private static void PostShouldBeSaved(object __instance, ref bool __result)
+    private static IEnumerable<CodeInstruction> ReplaceHandlerListFromDictionary(IEnumerable<CodeInstruction> instr, MethodBase baseMethod)
     {
-        if (__result || !MP.IsInMultiplayer)
-            return;
+        var replacement = AccessTools.DeclaredMethod(typeof(DefensivePositions), nameof(HandlerListForSave));
+        var replacedCount = 0;
 
-        __result = pawnSavedPositionsOwnerGetter(__instance) is Pawn { Destroyed: false, Faction.IsPlayer: true };
+        foreach (var ci in instr)
+        {
+            if (worldDataHandlerListFromDictionaryMethod != null && ci.Calls(worldDataHandlerListFromDictionaryMethod))
+            {
+                ci.opcode = OpCodes.Call;
+                ci.operand = replacement;
+                yield return ci;
+                // Back to the List<PawnSavedPositionHandler> that the stfld after the call expects
+                yield return new CodeInstruction(OpCodes.Castclass, worldDataHandlerListFromDictionaryMethod.ReturnType);
+
+                replacedCount++;
+                continue;
+            }
+
+            yield return ci;
+        }
+
+        const int expected = 1;
+        if (replacedCount != expected)
+            Log.Warning($"Patched incorrect number of WorldData.HandlerListFromDictionary calls (patched {replacedCount}, expected {expected}) for method {baseMethod.Name}");
+    }
+
+    // DP's HandlerListFromDictionary (`dict.Values.Where(v => v.ShouldBeSaved).ToList()`, same order), but in MP the
+    // test is DP's own (owner set, not destroyed) with any player faction instead of only Faction.OfPlayer.
+    // Single player is unchanged. In MP without multifaction there is one player faction, so the result is unchanged.
+    private static object HandlerListForSave(object dict)
+    {
+        var list = (IList)Activator.CreateInstance(worldDataHandlerListFromDictionaryMethod.ReturnType);
+        if (dict is not IDictionary handlers)
+            return list;
+
+        foreach (var handler in handlers.Values)
+        {
+            var save = MP.IsInMultiplayer
+                ? pawnSavedPositionsOwnerGetter(handler) is Pawn { Destroyed: false, Faction.IsPlayer: true }
+                : (bool)pawnSavedPositionsShouldBeSavedGetter(handler);
+            if (save)
+                list.Add(handler);
+        }
+
+        return list;
     }
 
     private static object Manager => managerInstanceGetter(null);
