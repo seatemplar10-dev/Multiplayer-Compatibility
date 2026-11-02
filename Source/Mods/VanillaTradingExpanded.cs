@@ -36,13 +36,14 @@ namespace Multiplayer.Compat
     /// <c>Bank.TakeLoan</c> / <c>Bank.TryRepayFromBalance</c> on the clicking PC only (a new loan, the silver pod, the
     /// <c>loanLastTimeTaken</c> entry, a lower balance). Both are synced now. <c>LoanOption</c> and <c>Loan</c> have no id, so each
     /// travels as the faction of its bank plus its index in <c>bank.bankExtension.loanOptions</c> / <c>bank.loans</c>; a loan is checked
-    /// against its saved amounts and found again by them if the list moved between click and command. Both methods are also called by
-    /// the bank itself in the tick (<c>Bank.Tick</c>, <c>DepositAmount</c> setter); MP only syncs a call made from the UI, so the tick
-    /// path is unchanged. At execution a <c>TakeLoan</c> for an option that already has a loan is dropped (a second player's click),
-    /// as is one by a negotiator without a map.
-    /// The terminal's bank choice (<c>Building_TradingTerminal.currentVisitableFactionBank</c>, row 393b) is in
-    /// <c>VanillaTradingExpandedTerminal</c>. Not covered here: contracts, stock market, transactions. Each bank is shared by all
-    /// player factions (one saved balance).
+    /// against its saved amounts and found again by them if the list moved between click and command. <c>TryRepayFromBalance</c> is
+    /// also called by the bank itself (<c>Bank.Tick</c>, and the <c>DepositAmount</c> setter): MP only turns a call from the UI into a
+    /// command, so the tick path is unchanged. The setter also runs in UI time inside the unsynced stock market and contract
+    /// transactions, which then queue one repay command per overdue loan (the transaction itself stays a known gap). At execution a
+    /// <c>TakeLoan</c> is dropped when the window would not offer the button (loan already taken, cooldown running, no balance and no
+    /// fixed amount: a second player's click, or a withdrawal, arrived first) or when the negotiator has no map.
+    /// Opening the bank window from the terminal (row 393b) is a separate module, <c>VanillaTradingExpandedTerminal</c>.
+    /// Not covered here: contracts, stock market, transactions. Each bank is shared by all player factions (one saved balance).
     /// </remarks>
     [MpCompatFor("VanillaExpanded.VanillaTradingExpanded")]
     public class VanillaTradingExpanded
@@ -66,6 +67,10 @@ namespace Multiplayer.Compat
         private static FieldInfo loanRepayDateField;
         private static FieldInfo loanInitialRepayAmountField;
         private static MethodInfo loanIsTakenMethod;
+        private static MethodInfo bankLastTimeLoanTakenMethod;
+        private static MethodInfo bankDepositAmountGetter;
+        private static MethodInfo loanOptionRepayTicksMethod;
+        private static FieldInfo loanOptionFixedLoanAmountField;
 
         public VanillaTradingExpanded(ModContentPack mod)
         {
@@ -172,6 +177,14 @@ namespace Multiplayer.Compat
                 ?? throw new Exception("field Loan.initialRepayAmount not found");
             loanIsTakenMethod = AccessTools.DeclaredMethod(bankType, "LoanIsTaken")
                 ?? throw new Exception("method Bank.LoanIsTaken not found");
+            bankLastTimeLoanTakenMethod = AccessTools.DeclaredMethod(bankType, "LastTimeLoanWasTaken", new[] { loanOptionType })
+                ?? throw new Exception("method Bank.LastTimeLoanWasTaken(LoanOption) not found");
+            bankDepositAmountGetter = AccessTools.DeclaredPropertyGetter(bankType, "DepositAmount")
+                ?? throw new Exception("property Bank.DepositAmount not found");
+            loanOptionRepayTicksMethod = AccessTools.DeclaredMethod(loanOptionType, "GetRepayDateTicks")
+                ?? throw new Exception("method LoanOption.GetRepayDateTicks not found");
+            loanOptionFixedLoanAmountField = AccessTools.DeclaredField(loanOptionType, "fixedLoanAmount")
+                ?? throw new Exception("field LoanOption.fixedLoanAmount not found");
             var takeLoan = AccessTools.DeclaredMethod(bankType, "TakeLoan", new[] { typeof(Pawn), typeof(int), typeof(int), typeof(int), loanOptionType })
                 ?? throw new Exception("method Bank.TakeLoan(Pawn, int, int, int, LoanOption) not found");
             var repay = AccessTools.DeclaredMethod(bankType, "TryRepayFromBalance", new[] { loanType })
@@ -185,18 +198,33 @@ namespace Multiplayer.Compat
         }
 
         // The sending PC also runs this (MP syncs with a transpiler, so a prefix runs before the sync check): only the map test
-        // applies there. A loan for an option that is already taken is dropped at execution only, in the command's map time.
+        // applies there. The window's own conditions are checked at execution only, in the command's map time.
         private static bool PreTakeLoan(object __instance, Pawn negotiator, object loanOption)
             => negotiator?.Map != null
-            && !(MP.IsInMultiplayer && MP.IsExecutingSyncCommand && (bool)loanIsTakenMethod.Invoke(__instance, new[] { loanOption, null }));
+            && !(MP.IsInMultiplayer && MP.IsExecutingSyncCommand && LoanBlocked(__instance, loanOption));
 
+        // When DrawLoanOption shows no "Take loan" button: the option has a loan, its cooldown runs, or there is no balance and no fixed amount.
+        private static bool LoanBlocked(object bank, object loanOption)
+        {
+            if ((bool)loanIsTakenMethod.Invoke(bank, new[] { loanOption, null }))
+                return true;
+            var lastTaken = (int)bankLastTimeLoanTakenMethod.Invoke(bank, new[] { loanOption });
+            if (lastTaken > -1 && lastTaken + (int)loanOptionRepayTicksMethod.Invoke(loanOption, null) > Find.TickManager.TicksAbs)
+                return true;
+            return (int)bankDepositAmountGetter.Invoke(bank, null) <= 0 && loanOptionFixedLoanAmountField.GetValue(loanOption) == null;
+        }
+
+        // Banks of factions that are gone from the faction manager are skipped: the Faction reader could not find them again.
         private static IEnumerable<object> AllBanks()
         {
             var manager = managerInstanceField.GetValue(null);
             if (manager == null)
                 yield break;
             foreach (var bank in (IEnumerable)managerBanksGetter.Invoke(manager, null))
-                yield return bank;
+            {
+                if (bankParentFactionField(bank) is { } faction && Find.FactionManager.AllFactionsListForReading.Contains(faction))
+                    yield return bank;
+            }
         }
 
         private static IList LoanOptionsOf(object bank)
