@@ -19,8 +19,8 @@ namespace Multiplayer.Compat
     /// Cause. Dialog_ManageAreas.DoAreaRow does, on the click: "if (map.areaManager.TryMakeNewAllowed(out var area3))", then
     /// "foreach (IntVec3 activeCell in area.ActiveCells) { area3[activeCell] = true; }", else the "MaxAreasReached" message. Multiplayer
     /// syncs AreaManager.TryMakeNewAllowed itself (SyncMethods.cs: "SyncMethod.Register(typeof(AreaManager), nameof(AreaManager.TryMakeNewAllowed));").
-    /// In the interface that sync template sends the command and cancels the call, with the out parameter set to null and the result
-    /// to false (SyncTemplates.cs: CreateDefaultReturnValue). So on the clicking PC the branch never gets the new area: nothing is
+    /// In the interface that sync template sends the command and cancels the call, with the out parameter set to null (SyncTemplates.cs
+    /// prologue: CreateDefaultCodes + Stind_Ref) and the result to false (SyncTemplates.cs: CreateDefaultReturnValue). So on the clicking PC the branch never gets the new area: nothing is
     /// copied there, and the "else" branch shows a false "max areas" message. The command still makes a new, empty area on every PC
     /// (same ID, order, label and colour everywhere), so nothing desyncs: the copy is just never filled in.
     /// </para>
@@ -58,7 +58,7 @@ namespace Multiplayer.Compat
             if (doAreaRow == null || copyIcon == null || tryMakeNewAllowed == null || hook == null)
             {
                 Log.Warning($"{LogPrefix}Dialog_ManageAreas.DoAreaRow (found {doAreaRow != null}), TexButton.Copy ({copyIcon != null}) or " +
-                            $"AreaManager.TryMakeNewAllowed ({tryMakeNewAllowed != null}) not as expected, the Copy button stays local");
+                            $"AreaManager.TryMakeNewAllowed ({tryMakeNewAllowed != null}) or CopyButtonHook ({hook != null}) not as expected, the Copy button stays local");
                 return;
             }
 
@@ -156,11 +156,16 @@ namespace Multiplayer.Compat
         private static bool IsCall(CodeInstruction ci, MethodInfo method)
             => (ci.opcode == OpCodes.Call || ci.opcode == OpCodes.Callvirt) && ci.operand is MethodBase called && called.Equals(method);
 
-        // Runs in the interface, once per frame the button is drawn. Returns the click for the vanilla block behind the button.
+        // Runs in the interface, once per IMGUI event the button is drawn for (layout, repaint, input). Returns the click for the vanilla
+        // block behind the button.
         private static bool CopyButtonHook(bool clicked, Area area)
         {
-            if (!clicked || !installed || area == null || !MP.IsInMultiplayer || !MP.InInterface)
+            if (!clicked || !installed || area == null || !MP.IsInMultiplayer)
                 return clicked;
+
+            // Outside the interface (a reload or long event) the vanilla block would make an area on this PC only: drop the click
+            if (!MP.InInterface)
+                return false;
 
             var manager = area.areaManager;
             if (manager == null)
