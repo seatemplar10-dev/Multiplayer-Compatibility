@@ -182,14 +182,16 @@ namespace Multiplayer.Compat
             => thing == null ? null : session.GetTransferableByThingId(thing.thingIDNumber) as TransferableOneWay;
 
         // A seat pawn from its thing id (synced as an int, see PreFinalizeSeats): aboard this vehicle, else in the session.
+        // Null and destroyed entries are skipped: a thing that left the game loads back as null in a joiner's session list
+        // (MP CaravanFormingSession), and the host can still hold it destroyed. Without the guard the joiner throws, the host not.
         private static Pawn ResolveSeatPawn(ISessionWithTransferables session, List<Pawn> aboard, int pawnId)
         {
             if (pawnId < 0)
                 return null;
-            var pawn = aboard?.Find(p => p != null && p.thingIDNumber == pawnId);
+            var pawn = aboard?.Find(p => p is { Destroyed: false } && p.thingIDNumber == pawnId);
             if (pawn != null)
                 return pawn;
-            return (session.GetTransferableByThingId(pawnId) as TransferableOneWay)?.things.Find(t => t.thingIDNumber == pawnId) as Pawn;
+            return (session.GetTransferableByThingId(pawnId) as TransferableOneWay)?.things.Find(t => t is Pawn { Destroyed: false } && t.thingIDNumber == pawnId) as Pawn;
         }
 
         private static bool AnyVehicleSelected(List<TransferableOneWay> transferables)
