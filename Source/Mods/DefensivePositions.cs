@@ -139,23 +139,38 @@ public class DefensivePositions
             Log.Warning($"Patched incorrect number of WorldData.HandlerListFromDictionary calls (patched {replacedCount}, expected {expected}) for method {baseMethod.Name}");
     }
 
-    // DP's HandlerListFromDictionary (`dict.Values.Where(v => v.ShouldBeSaved).ToList()`, same order), but in MP the
-    // test is DP's own (owner set, not destroyed) with any player faction instead of only Faction.OfPlayer.
-    // Single player is unchanged. In MP without multifaction there is one player faction, so the result is unchanged.
+    // DP's HandlerListFromDictionary (`dict.Values.Where(v => v.ShouldBeSaved).ToList()`). Single player: unchanged,
+    // same test and same order. In MP: DP's test (owner set, not destroyed) with any player faction instead of only
+    // Faction.OfPlayer (MP's hidden Spectator faction is a player faction too, but it has no pawns), sorted by owner id.
+    // A gizmo adds an empty handler on the drawing PC only, so the dictionary order can differ per PC. The sort puts
+    // the handlers with positions (set by synced commands, so on every PC) in the same order on every PC.
     private static object HandlerListForSave(object dict)
     {
         var list = (IList)Activator.CreateInstance(worldDataHandlerListFromDictionaryMethod.ReturnType);
         if (dict is not IDictionary handlers)
             return list;
 
+        if (!MP.IsInMultiplayer)
+        {
+            foreach (var handler in handlers.Values)
+            {
+                if ((bool)pawnSavedPositionsShouldBeSavedGetter(handler))
+                    list.Add(handler);
+            }
+
+            return list;
+        }
+
+        var kept = new List<(int id, object handler)>();
         foreach (var handler in handlers.Values)
         {
-            var save = MP.IsInMultiplayer
-                ? pawnSavedPositionsOwnerGetter(handler) is Pawn { Destroyed: false, Faction.IsPlayer: true }
-                : (bool)pawnSavedPositionsShouldBeSavedGetter(handler);
-            if (save)
-                list.Add(handler);
+            if (pawnSavedPositionsOwnerGetter(handler) is Pawn { Destroyed: false, Faction.IsPlayer: true } owner)
+                kept.Add((owner.thingIDNumber, handler));
         }
+
+        kept.Sort((a, b) => a.id.CompareTo(b.id));
+        foreach (var (_, handler) in kept)
+            list.Add(handler);
 
         return list;
     }
