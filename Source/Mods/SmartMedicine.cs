@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using HarmonyLib;
 using Multiplayer.API;
 using RimWorld;
@@ -104,6 +105,11 @@ namespace Multiplayer.Compat
             stockUpPasteMethod = AccessTools.MethodDelegate<StockUpPasteSettingsDelegate>(pasteMethod);
             stockUpSettingsMethod = AccessTools.MethodDelegate<StockUpSettingsDelegate>(AccessTools.Method(type, "StockUpSettings"));
 
+            // We'll need the access to copiedPawn field to modify it when pasting. Looked up before the paste prefix is patched:
+            // a failed lookup after it would leave a prefix that throws on the clicking PC only.
+            smartMedicineCompType = AccessTools.TypeByName("SmartMedicine.SmartMedicineGameComp");
+            copiedPawnField = AccessTools.FieldRefAccess<Pawn>(smartMedicineCompType, "copiedPawn");
+
             MpCompat.harmony.Patch(pasteMethod,
                 prefix: new HarmonyMethod(typeof(SmartMedicine), nameof(PrePasteSettings)));
             MpCompat.harmony.Patch(AccessTools.Method(type, "SetStockCount", new[] { typeof(Pawn), typeof(ThingDef), typeof(int) }),
@@ -115,10 +121,6 @@ namespace Multiplayer.Compat
             // Our methods to sync
             MP.RegisterSyncMethod(typeof(SmartMedicine), nameof(SyncedSetStockCount));
             MP.RegisterSyncMethod(typeof(SmartMedicine), nameof(SyncedPasteSettings));
-
-            // We'll need the access to copiedPawn field to modify it when pasting
-            smartMedicineCompType = AccessTools.TypeByName("SmartMedicine.SmartMedicineGameComp");
-            copiedPawnField = AccessTools.FieldRefAccess<Pawn>(smartMedicineCompType, "copiedPawn");
         }
 
         private static bool PreSetStockCount(Pawn pawn, ThingDef thingDef, int count)
@@ -136,6 +138,8 @@ namespace Multiplayer.Compat
             return false;
         }
 
+        // NoInlining on every Synced* method: Multiplayer patches it (sync prefix), so its callers here must call it, never inline its body
+        [MethodImpl(MethodImplOptions.NoInlining)]
         private static void SyncedSetStockCount(Pawn pawn, ThingDef thingDef, int count)
         {
             var dict = stockUpSettingsMethod(pawn);
@@ -156,6 +160,7 @@ namespace Multiplayer.Compat
             return true;
         }
 
+        [MethodImpl(MethodImplOptions.NoInlining)]
         private static void SyncedPasteSettings(Pawn pawn, Pawn copiedPawn)
         {
             var comp = Current.Game.GetComponent(smartMedicineCompType);
@@ -184,12 +189,19 @@ namespace Multiplayer.Compat
         // The patched methods are lambdas run through a delegate, so no caller can inline them past the patch.
         private static void RegisterHediffCareMenu()
         {
+            var type = AccessTools.TypeByName("SmartMedicine.HediffRowPriorityCare");
+            const string menuMethod = "CreateCareMenuOptionsWithList";
+
+            // Older builds (the original mod, Continued for 1.5) still build the menu in LabelButton, synced as before
+            if (AccessTools.DeclaredMethod(type, menuMethod) == null && AccessTools.DeclaredMethod(type, "LabelButton") != null)
+            {
+                MpCompat.RegisterLambdaDelegate(type, "LabelButton", 0, 1);
+                return;
+            }
+
             var compType = AccessTools.TypeByName("SmartMedicine.PriorityCareSettingsComp");
             getHediffCare = AccessTools.MethodDelegate<Func<Dictionary<Hediff, MedicalCareCategory>>>(AccessTools.Method(compType, "Get"));
             getIgnoredHediffs = AccessTools.MethodDelegate<Func<HashSet<Hediff>>>(AccessTools.Method(compType, "GetIgnore"));
-
-            var type = AccessTools.TypeByName("SmartMedicine.HediffRowPriorityCare");
-            const string menuMethod = "CreateCareMenuOptionsWithList";
             var bedRest = MpMethodUtil.GetLambda(type, menuMethod, lambdaOrdinal: 0);
             var defaultCare = MpMethodUtil.GetLambda(type, menuMethod, lambdaOrdinal: 1);
             var setCare = MpMethodUtil.GetLambda(type, menuMethod, lambdaOrdinal: 3);
@@ -261,6 +273,7 @@ namespace Multiplayer.Compat
         }
 
         // Same changes as the three lambdas make, run on every PC from the synced call
+        [MethodImpl(MethodImplOptions.NoInlining)]
         private static void SyncedToggleBedRest(Hediff primaryHediff, List<Hediff> affectedHediffs)
         {
             var ignored = getIgnoredHediffs();
@@ -275,9 +288,11 @@ namespace Multiplayer.Compat
             }
         }
 
+        [MethodImpl(MethodImplOptions.NoInlining)]
         private static void SyncedClearHediffCare(Hediff primaryHediff)
             => getHediffCare().Remove(primaryHediff);
 
+        [MethodImpl(MethodImplOptions.NoInlining)]
         private static void SyncedSetHediffCare(List<Hediff> affectedHediffs, MedicalCareCategory care)
         {
             var hediffCare = getHediffCare();
@@ -378,6 +393,7 @@ namespace Multiplayer.Compat
             SyncedSetSurgeryUnlimited(pawn, now);
         }
 
+        [MethodImpl(MethodImplOptions.NoInlining)]
         private static void SyncedSetSurgeryUnlimited(Pawn pawn, bool unlimited)
             => SetSurgeryUnlimited(pawn, unlimited);
 
@@ -404,9 +420,13 @@ namespace Multiplayer.Compat
             SyncedSetSurgeryUnlimitedDefault(now);
         }
 
+        [MethodImpl(MethodImplOptions.NoInlining)]
         private static void SyncedSetSurgeryUnlimitedDefault(bool unlimited)
         {
-            var comp = Current.Game.GetComponent(surgeryUnlimitedCompType);
+            var comp = Current.Game?.GetComponent(surgeryUnlimitedCompType);
+            if (comp == null)
+                return;
+
             surgeryUnlimitedDefaultField(comp) = unlimited;
         }
 
