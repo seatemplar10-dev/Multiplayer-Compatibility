@@ -25,11 +25,19 @@ namespace Multiplayer.Compat
     /// thing id: every PC writes what a PC that just loaded writes. The dictionary is static and the mod never clears it on a game load, so a PC
     /// that reloads in-process (the host at every join point) also keeps the previous load's entries: in MP it is cleared when a game loads,
     /// and the load fills it from the save alone, like a fresh process (the joiner).
+    /// <para/>
+    /// FIXES row 182 (2 Nov 2026, row 180 run A2: the arbiter's first load lacked one entry that the host and the client had): the
+    /// row 240 clear runs only inside the component's own ExposeData, i.e. only for a save that holds the component. Both static tables are
+    /// now emptied at the start of every <c>Game.LoadGame</c> (Multiplayer's reloads load through it too, as in row 173), in every mode:
+    /// a load starts from what a fresh process has. <c>colonists_with_foodvariety_need</c> is refilled by <c>FinalizeInit</c>. The legacy
+    /// tables <c>old_pawns_and_diet</c> / <c>old_pawns_and_favourites</c> need nothing: the load sets them (null when the save has no such
+    /// node, decomp4981 Scribe_Collections.cs:538-540) and their PostLoadInit sets them to null.
     /// </remarks>
     [MpCompatFor("VanillaExpanded.VanillaFoodVarietyExpanded")]
     internal class VanillaFoodVarietyExpanded
     {
         private static FieldInfo pawnsAndDietField;
+        private static FieldInfo needListField;
 
         public VanillaFoodVarietyExpanded(ModContentPack mod)
         {
@@ -42,6 +50,17 @@ namespace Multiplayer.Compat
             var expose = AccessTools.DeclaredMethod("VanillaCookingExpandedVariety.GameComponent_FoodVariety:ExposeData")
                          ?? throw new System.MissingMethodException("VanillaCookingExpandedVariety.GameComponent_FoodVariety", "ExposeData");
             MpCompat.harmony.Patch(expose, prefix: new HarmonyMethod(typeof(VanillaFoodVarietyExpanded), nameof(PreExposeData)));
+
+            needListField = AccessTools.DeclaredField("VanillaCookingExpandedVariety.GameComponent_FoodVariety:colonists_with_foodvariety_need")
+                            ?? throw new System.MissingFieldException("VanillaCookingExpandedVariety.GameComponent_FoodVariety", "colonists_with_foodvariety_need");
+            MpCompat.harmony.Patch(AccessTools.DeclaredMethod(typeof(Game), nameof(Game.LoadGame)),
+                prefix: new HarmonyMethod(typeof(VanillaFoodVarietyExpanded), nameof(PreLoadGame)));
+        }
+
+        private static void PreLoadGame()
+        {
+            (pawnsAndDietField.GetValue(null) as IDictionary)?.Clear();
+            (needListField.GetValue(null) as IList)?.Clear();
         }
 
         private static bool PreRefreshList(Pawn pawnJustAdded)
