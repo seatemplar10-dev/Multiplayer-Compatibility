@@ -288,10 +288,12 @@ namespace Multiplayer.Compat
                 var index = handlerIndices[i];
                 if (pawn == null || pawn is VehiclePawn || index < 0 || index >= vehicle.handlers.Count)
                     continue;
+                // Row 361: every seat pawn needs a transferable in this session, aboard or not (a pawn aboard this vehicle that the
+                // faction filter dropped from the list, e.g. another faction's, has none and must not fill a seat).
+                if (TransferableOf(session, pawn) == null)
+                    continue;
                 if (!aboard.Contains(pawn))
                 {
-                    if (TransferableOf(session, pawn) == null)
-                        continue;
                     var current = seats.GetAssignment(pawn);
                     if (current != null && current.Vehicle != vehicle)
                         continue;
