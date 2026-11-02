@@ -96,7 +96,12 @@ namespace Multiplayer.Compat
             public Dictionary<string, string> last;
             // the delta sent and not yet executed here (cleared by SyncApply when this PC's own command runs)
             public string pending;
+            public float pendingAt;
         }
+
+        // A sent delta that has not come back after this long (real seconds) is no longer "pending": the command may never have run
+        // its body as a received command (it threw, it ran locally, ghost mode), and an identical edit must not stay silent for good.
+        private const float PendingSeconds = 3f;
 
         // apparel thingIDNumber -> last known saved state, for the apparel shown in a window of this PC
         private static readonly Dictionary<int, Tracked> tracked = new();
@@ -599,17 +604,18 @@ namespace Multiplayer.Compat
                 // Send FIRST, then take the edit back on this PC in finally (the synced command sets it everywhere, this PC included).
                 // If the undo throws, the command is already queued, so every PC still ends with the same value. If SyncApply runs
                 // locally instead of being sent (Multiplayer.dontSync), it re-applies values that are already there and the undo below
-                // takes them back: nothing changes and nothing differs.
+                // takes them back: nothing changes and nothing differs (its log line then reads bySelf=False, like a received command).
                 try
                 {
                     // the same edit again while its command has not come back (render code of the mod that writes every frame):
-                    // undone, not resent
+                    // undone, not resent. A pending delta older than PendingSeconds is sent again (the command may never have run).
                     var text = Serialize(sent);
-                    if (text != t.pending)
+                    if (text != t.pending || Time.realtimeSinceStartup - t.pendingAt > PendingSeconds)
                     {
                         if (CanSend(apparel))
                         {
                             t.pending = text;
+                            t.pendingAt = Time.realtimeSinceStartup;
                             SyncApply(apparel, text);
                         }
                         else
@@ -665,9 +671,26 @@ namespace Multiplayer.Compat
                     return;
                 inFill = true;
                 Rebaseline(apparel);
+                // Only apparel worn by the same wearer stay tracked (the graphics check and FinalizeFill use that set). Others are
+                // dropped, so a stripped item that another pawn now wears is never re-read here. One failing read drops that entry only.
+                var wearer = (apparel as Apparel)?.Wearer;
                 foreach (var t in tracked.Values.ToList())
-                    if (!ReferenceEquals(t.apparel, apparel))
-                        Rebaseline(t.apparel);
+                {
+                    if (ReferenceEquals(t.apparel, apparel))
+                        continue;
+                    try
+                    {
+                        if (wearer != null && t.apparel is Apparel { Wearer: { } other } && other == wearer)
+                            Rebaseline(t.apparel);
+                        else
+                            tracked.Remove(t.apparel.thingIDNumber);
+                    }
+                    catch (Exception e)
+                    {
+                        tracked.Remove(t.apparel.thingIDNumber);
+                        Log.ErrorOnce($"{LogPrefix}re-reading a tracked apparel failed, it is no longer watched: {e}", 0x3a0d9c06);
+                    }
+                }
             }
             catch (Exception e)
             {
@@ -684,7 +707,16 @@ namespace Multiplayer.Compat
             try
             {
                 if (Live && DialogApparel(__instance) is { } apparel)
+                {
                     Check(apparel);
+                    // The portrait drawn in this pass can write the other worn apparel of the wearer (render code of the mod), and PreFill
+                    // re-read them as a baseline: check them too, or such a write would be kept on this PC only.
+                    var wearer = (apparel as Apparel)?.Wearer;
+                    if (wearer != null)
+                        foreach (var t in tracked.Values.ToList())
+                            if (!ReferenceEquals(t.apparel, apparel) && t.apparel is Apparel { Wearer: { } other } && other == wearer)
+                                Check(t.apparel);
+                }
             }
             catch (Exception e)
             {
