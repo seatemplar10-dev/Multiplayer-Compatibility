@@ -1,4 +1,6 @@
 ﻿using System;
+using System.Linq;
+using System.Reflection;
 using HarmonyLib;
 using Multiplayer.API;
 using Verse;
@@ -46,7 +48,7 @@ namespace Multiplayer.Compat
                 MpCompat.RegisterLambdaDelegate(tabType, "PopupMenu", 0, 1);
             }
 
-            RegisterCombatExtendedMenu();
+            RegisterCombatExtendedMenu(mod.PackageId == "Sandy.RPGStyleInventory.avilmask.Revamped".ToLower());
         }
 
         /// <summary>
@@ -60,7 +62,7 @@ namespace Multiplayer.Compat
         /// and nothing syncs that. Its three branches: a worn apparel or held weapon starts <c>RemoveApparel</c> (with
         /// <c>haulDroppedApparel</c>) / <c>DropEquipment</c> through <c>Pawn_JobTracker.TryTakeOrderedJob</c> (MP syncs that call, so
         /// those two branches reached every PC anyway); an inventory item goes through <c>innerContainer.TryDrop</c> on the clicking PC
-        /// only, which spawns the item on one PC. Before either branch it also calls CE's <c>HoldTrackerForget</c>, which edits the
+        /// only, which spawns the item on one PC. Before any branch it also calls CE's <c>HoldTrackerForget</c>, which edits the
         /// saved <c>LoadoutManager</c> hold records on one PC only. CE's own gear tab syncs this action
         /// (<c>ITab_Inventory.SyncedInterfaceDropHaul</c>, registered by CE's ModPatches/Multiplayer part); the copy in Revamped's
         /// patch does not.
@@ -80,25 +82,37 @@ namespace Multiplayer.Compat
         /// <item>"Put away" (lambda 5): its only real call takes a <c>ThingOwner</c>, which MP cannot send, so the lambda is synced as a
         /// delegate with just its <c>SelPawnForGear</c> field (the same effect as CE's <c>SyncedTryTransferEquipmentToContainer(Pawn)</c>).</item>
         /// <item>Forced apparel clear / set (lambdas 1 and 2, closure <c>&lt;&gt;c__DisplayClass35_1</c>): synced as delegates with the
-        /// apparel and the pawn behind <c>CS$&lt;&gt;8__locals1</c>. The other fields (<c>tab</c> is an <c>object</c>) are left out.</item>
+        /// apparel and the pawn behind <c>CS$&lt;&gt;8__locals1</c>. The fields the lambdas do not read are left out: <c>eq</c> in this
+        /// closure, and <c>thing</c>, <c>tab</c> (an <c>object</c>) and <c>SelPawn</c> in the outer <c>&lt;&gt;c__DisplayClass35_0</c>.</item>
         /// </list>
-        /// Lambda ordinals are the compiler's names in Revamped's CEPatches.dll (sha256 043b55a3...); a rebuilt dll that renumbers them
-        /// makes the lookup throw, which is logged as a warning and leaves that one entry unsynced.
+        /// Lambda ordinals are the compiler's names in Revamped's CEPatches.dll (sha256 043b55a3...). A rebuilt dll that renumbers them
+        /// makes the lookup throw when a named field is missing (logged as a warning, that one entry stays unsynced). If the lambda now at
+        /// that ordinal has the same fields, it syncs the wrong entry without a warning, so re-check the ordinals when CEPatches.dll changes.
         /// </remarks>
-        private static void RegisterCombatExtendedMenu()
+        private static void RegisterCombatExtendedMenu(bool revamped)
         {
-            // Nested private class of Revamped's CEPatches.dll (absent from older RPG Style Inventory builds). Without CE the assembly
-            // is still loaded but never patches the menu (RPG_CEPatch's static constructor needs both mods), so nothing to sync then.
+            // Without CE, CEPatches.dll is still loaded but never patches the menu (RPG_CEPatch's static constructor needs both
+            // mods), so nothing to sync then
+            if (!ModsConfig.IsActive("CETeam.CombatExtended"))
+                return;
+
+            // Nested private class of Revamped's CEPatches.dll (absent from older RPG Style Inventory builds)
             var cePatches = AccessTools.TypeByName("CEPatches.RPG_CEPatch+RPG_CEPatches");
+            // The same lookup CEPatches makes for its own HoldTrackerForget call, so both find the same type
             var holdTracker = AccessTools.TypeByName("CombatExtended.Utility_HoldTracker");
             if (cePatches == null || holdTracker == null)
+            {
+                if (revamped)
+                    Log.Warning($"[MPCompat - RPG Style Inventory] {(cePatches == null ? "CEPatches.RPG_CEPatch+RPG_CEPatches" : "CombatExtended.Utility_HoldTracker")} not found, the Combat Extended gear tab menu stays unsynced");
                 return;
+            }
 
             var dropHaul = AccessTools.DeclaredMethod(cePatches, "InterfaceDropHaul");
             if (dropHaul == null)
                 Log.Warning("[MPCompat - RPG Style Inventory] CEPatches.RPG_CEPatches.InterfaceDropHaul not found, 'Drop and haul' stays unsynced");
             else
-                MP.RegisterSyncMethod(dropHaul).CancelIfAnyArgNull();
+                // Shift queues the haul job, as with MP's own sync of the vanilla InterfaceDrop
+                MP.RegisterSyncMethod(dropHaul).SetContext(SyncContext.QueueOrder_Down).CancelIfAnyArgNull();
 
             var forget = AccessTools.DeclaredMethod(holdTracker, "HoldTrackerForget", [typeof(Pawn), typeof(Thing)]);
             if (forget == null)
@@ -108,10 +122,15 @@ namespace Multiplayer.Compat
 
             TryRegister("'Equip'", () =>
             {
-                var compInventory = AccessTools.TypeByName("CombatExtended.CompInventory")
-                                    ?? throw new MissingMemberException("CombatExtended.CompInventory");
-                var switchTo = AccessTools.DeclaredMethod(compInventory, "TrySwitchToWeapon", [typeof(ThingWithComps), typeof(bool)])
-                               ?? throw new MissingMethodException("CombatExtended.CompInventory", "TrySwitchToWeapon(ThingWithComps, bool)");
+                // Taken from the call in CEAccess.trySwitchToWeapon, not looked up by name: a second CombatExtended.dll (one mod ships
+                // its own copy) could hold a CompInventory type that the menu never calls
+                var access = AccessTools.DeclaredMethod(AccessTools.TypeByName("CEPatches.CEAccess"), "trySwitchToWeapon")
+                             ?? throw new MissingMethodException("CEPatches.CEAccess", "trySwitchToWeapon");
+                var switchTo = PatchProcessor.GetOriginalInstructions(access)
+                                   .Select(instr => instr.operand)
+                                   .OfType<MethodInfo>()
+                                   .FirstOrDefault(m => m.Name == "TrySwitchToWeapon" && m.DeclaringType?.FullName == "CombatExtended.CompInventory")
+                               ?? throw new MissingMethodException("CombatExtended.CompInventory", "TrySwitchToWeapon (no call in CEAccess.trySwitchToWeapon)");
                 MP.RegisterSyncMethod(switchTo).CancelIfAnyArgNull();
             });
 
@@ -121,9 +140,15 @@ namespace Multiplayer.Compat
                     del.CancelIfAnyFieldNull();
             });
 
-            TryRegister("forced apparel clear / set", () =>
+            // One registration per lambda, so a failed second lookup cannot leave the first one registered without its null check
+            TryRegister("forced apparel clear", () =>
             {
-                foreach (var del in MpCompat.RegisterLambdaDelegate(cePatches, "DropDownThingMenu", ["CS$<>8__locals1/SelPawnForGear", "app"], 1, 2))
+                foreach (var del in MpCompat.RegisterLambdaDelegate(cePatches, "DropDownThingMenu", ["CS$<>8__locals1/SelPawnForGear", "app"], 1))
+                    del.CancelIfAnyFieldNull();
+            });
+            TryRegister("forced apparel set", () =>
+            {
+                foreach (var del in MpCompat.RegisterLambdaDelegate(cePatches, "DropDownThingMenu", ["CS$<>8__locals1/SelPawnForGear", "app"], 2))
                     del.CancelIfAnyFieldNull();
             });
         }
