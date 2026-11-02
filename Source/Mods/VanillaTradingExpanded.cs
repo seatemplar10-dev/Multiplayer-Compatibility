@@ -1,4 +1,8 @@
 using HarmonyLib;
+using Multiplayer.API;
+using RimWorld;
+using System;
+using System.Collections.Generic;
 using System.Reflection;
 using Verse;
 
@@ -23,7 +27,12 @@ namespace Multiplayer.Compat
     /// code made earlier in that load (a first-load joiner vs an Nth-load host), and VTE no longer advances the
     /// load-time stream for the code after it. VTE never sets <c>Rand.Seed</c> or pushes/pops itself, so the only
     /// single-machine effect is the seed its draws come from.
-    /// Not covered here: VTE's windows (bank, contracts, stock market, transactions) are not synced.
+    /// FIXES row 393 (mod sweep 2 Nov 2026): the bank window's Confirm button (<c>Window_Bank</c>) called <c>Bank.DepositSilver</c> /
+    /// <c>Bank.WithdrawSilver</c> on the clicking PC only, so the silver on the map (destroyed or dropped by pod) and the saved
+    /// <c>depositAmount</c> split. Both methods are synced now; the <c>Bank</c> target travels as its faction (<c>parentFaction</c>,
+    /// looked up again with <c>Utils.GetBank</c>). The silver stacks the deposit takes from travel as a <c>List&lt;Thing&gt;</c>.
+    /// Not covered here: the rest of VTE's windows (bank loans: <c>TakeLoan</c>, <c>TryRepayFromBalance</c>; contracts, stock market,
+    /// transactions) are not synced.
     /// </remarks>
     [MpCompatFor("VanillaExpanded.VanillaTradingExpanded")]
     public class VanillaTradingExpanded
@@ -32,6 +41,8 @@ namespace Multiplayer.Compat
         internal const string StartupSeedKey = "MpCompat.VanillaTradingExpanded.TradingManager.";
 
         private static MethodInfo initMarkupValuesMethod;
+        private static MethodInfo getBankMethod;
+        private static AccessTools.FieldRef<object, Faction> bankParentFactionField;
 
         public VanillaTradingExpanded(ModContentPack mod)
         {
@@ -56,6 +67,48 @@ namespace Multiplayer.Compat
                 MpCompat.harmony.Patch(AccessTools.DeclaredMethod(managerType, name),
                     prefix: new HarmonyMethod(typeof(VanillaTradingExpanded), nameof(PreSeededStartup)),
                     finalizer: new HarmonyMethod(typeof(VanillaTradingExpanded), nameof(FinalizeSeededStartup)));
+            }
+
+            // Row 393. Its own try/catch: a changed bank class must not take the determinism patches above down with it.
+            try
+            {
+                RegisterBankSyncs(utilsType);
+            }
+            catch (Exception e)
+            {
+                Log.Error($"MPCompat :: Vanilla Trading Expanded: bank deposit/withdraw stay unsynced: {e.Message}");
+            }
+        }
+
+        private static void RegisterBankSyncs(Type utilsType)
+        {
+            var bankType = AccessTools.TypeByName("VanillaTradingExpanded.Bank")
+                ?? throw new Exception("type VanillaTradingExpanded.Bank not found");
+            getBankMethod = AccessTools.DeclaredMethod(utilsType, "GetBank", new[] { typeof(Faction) })
+                ?? throw new Exception("method Utils.GetBank(Faction) not found");
+            bankParentFactionField = AccessTools.FieldRefAccess<object, Faction>(AccessTools.DeclaredField(bankType, "parentFaction")
+                ?? throw new Exception("field Bank.parentFaction not found"));
+            var deposit = AccessTools.DeclaredMethod(bankType, "DepositSilver", new[] { typeof(List<Thing>), typeof(int) })
+                ?? throw new Exception("method Bank.DepositSilver(List<Thing>, int) not found");
+            var withdraw = AccessTools.DeclaredMethod(bankType, "WithdrawSilver", new[] { typeof(Pawn), typeof(int) })
+                ?? throw new Exception("method Bank.WithdrawSilver(Pawn, int) not found");
+
+            MP.RegisterSyncWorker<object>(SyncBank, bankType);
+            MP.RegisterSyncMethod(deposit);
+            MP.RegisterSyncMethod(withdraw);
+        }
+
+        // A Bank is one per faction (TradingManager.banksByFaction), so the faction identifies it. Null on a missing bank.
+        private static void SyncBank(SyncWorker sync, ref object bank)
+        {
+            if (sync.isWriting)
+            {
+                sync.Write<Faction>(bank == null ? null : bankParentFactionField(bank));
+            }
+            else
+            {
+                var faction = sync.Read<Faction>();
+                bank = faction == null ? null : getBankMethod.Invoke(null, new object[] { faction });
             }
         }
 
