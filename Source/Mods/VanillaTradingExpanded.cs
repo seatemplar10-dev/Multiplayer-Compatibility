@@ -1,4 +1,8 @@
 using HarmonyLib;
+using Multiplayer.API;
+using RimWorld;
+using System;
+using System.Collections.Generic;
 using System.Reflection;
 using Verse;
 
@@ -23,7 +27,14 @@ namespace Multiplayer.Compat
     /// code made earlier in that load (a first-load joiner vs an Nth-load host), and VTE no longer advances the
     /// load-time stream for the code after it. VTE never sets <c>Rand.Seed</c> or pushes/pops itself, so the only
     /// single-machine effect is the seed its draws come from.
-    /// Not covered here: VTE's windows (bank, contracts, stock market, transactions) are not synced.
+    /// FIXES row 393 (mod sweep 2 Nov 2026): the bank window's Confirm button (<c>Window_Bank</c>) called <c>Bank.DepositSilver</c> /
+    /// <c>Bank.WithdrawSilver</c> on the clicking PC only, so the silver on the map (destroyed or dropped by pod) and the saved
+    /// <c>depositAmount</c> split. Both methods are synced now; the <c>Bank</c> target travels as its faction (<c>parentFaction</c>,
+    /// looked up again with <c>Utils.GetBank</c>). The silver stacks the deposit takes from travel as a <c>List&lt;Thing&gt;</c>.
+    /// Not covered here (Opus review of row 393, 2 Nov 2026): (1) opening the bank window: <c>TradingTerminal.GetBankOptions</c>'s float menu
+    /// lambda sets the static <c>currentVisitableFactionBank</c> on the clicking PC only, then orders the job; the other PCs' toil builds
+    /// <c>Window_Bank</c> with a null faction and throws; (2) bank loans (<c>TakeLoan</c>, <c>TryRepayFromBalance</c>); (3) contracts,
+    /// stock market, transactions. Each bank is shared by all player factions (one saved balance).
     /// </remarks>
     [MpCompatFor("VanillaExpanded.VanillaTradingExpanded")]
     public class VanillaTradingExpanded
@@ -32,6 +43,10 @@ namespace Multiplayer.Compat
         internal const string StartupSeedKey = "MpCompat.VanillaTradingExpanded.TradingManager.";
 
         private static MethodInfo initMarkupValuesMethod;
+        private static MethodInfo getBankMethod;
+        private static AccessTools.FieldRef<object, Faction> bankParentFactionField;
+        private static Type bankWindowType;
+        private static AccessTools.FieldRef<object, List<Thing>> bankWindowCachedThingsField;
 
         public VanillaTradingExpanded(ModContentPack mod)
         {
@@ -56,6 +71,80 @@ namespace Multiplayer.Compat
                 MpCompat.harmony.Patch(AccessTools.DeclaredMethod(managerType, name),
                     prefix: new HarmonyMethod(typeof(VanillaTradingExpanded), nameof(PreSeededStartup)),
                     finalizer: new HarmonyMethod(typeof(VanillaTradingExpanded), nameof(FinalizeSeededStartup)));
+            }
+
+            // Row 393. Its own try/catch: a changed bank class must not take the determinism patches above down with it.
+            try
+            {
+                RegisterBankSyncs(utilsType);
+            }
+            catch (Exception e)
+            {
+                Log.Error($"MPCompat :: Vanilla Trading Expanded: the bank deposit/withdraw sync is not fully registered: {e.InnerException ?? e}");
+            }
+        }
+
+        private static void RegisterBankSyncs(Type utilsType)
+        {
+            var bankType = AccessTools.TypeByName("VanillaTradingExpanded.Bank")
+                ?? throw new Exception("type VanillaTradingExpanded.Bank not found");
+            getBankMethod = AccessTools.DeclaredMethod(utilsType, "GetBank", new[] { typeof(Faction) })
+                ?? throw new Exception("method Utils.GetBank(Faction) not found");
+            bankParentFactionField = AccessTools.FieldRefAccess<object, Faction>(AccessTools.DeclaredField(bankType, "parentFaction")
+                ?? throw new Exception("field Bank.parentFaction not found"));
+            var deposit = AccessTools.DeclaredMethod(bankType, "DepositSilver", new[] { typeof(List<Thing>), typeof(int) })
+                ?? throw new Exception("method Bank.DepositSilver(List<Thing>, int) not found");
+            var withdraw = AccessTools.DeclaredMethod(bankType, "WithdrawSilver", new[] { typeof(Pawn), typeof(int) })
+                ?? throw new Exception("method Bank.WithdrawSilver(Pawn, int) not found");
+
+            var windowType = AccessTools.TypeByName("VanillaTradingExpanded.Window_Bank")
+                ?? throw new Exception("type VanillaTradingExpanded.Window_Bank not found");
+            bankWindowType = windowType;
+            bankWindowCachedThingsField = AccessTools.FieldRefAccess<object, List<Thing>>(AccessTools.DeclaredField(windowType, "cachedThings")
+                ?? throw new Exception("field Window_Bank.cachedThings not found"));
+
+            MP.RegisterSyncWorker<object>(SyncBank, bankType);
+            // The window nulls its silver cache when Confirm is clicked, but the command runs later: the cache then refills from stacks
+            // the deposit is about to destroy, and the next deposit would send them (read back as null, so the deposit stops early).
+            // Drop gone stacks before the deposit runs, and clear every open bank window's cache once either command has run.
+            MP.RegisterSyncMethod(deposit).SetPreInvoke(DropGoneSilver).SetPostInvoke(ClearBankWindowCaches);
+            MP.RegisterSyncMethod(withdraw).SetPostInvoke(ClearBankWindowCaches);
+            // A negotiator that left the map (dead, in a caravan) has no map: the original lowers the balance first, then throws on
+            // negotiator.Map. Skip the call instead. Same answer on every PC, runs on the sending PC too.
+            MpCompat.harmony.Patch(withdraw, prefix: new HarmonyMethod(typeof(VanillaTradingExpanded), nameof(PreWithdrawSilver)));
+        }
+
+        private static void DropGoneSilver(object instance, object[] args)
+        {
+            if (args[0] is List<Thing> silvers)
+                silvers.RemoveAll(thing => thing == null || thing.Destroyed);
+        }
+
+        private static void ClearBankWindowCaches(object instance, object[] args)
+        {
+            var windows = Find.WindowStack?.Windows;
+            if (windows == null)
+                return;
+            foreach (var window in windows)
+            {
+                if (window.GetType() == bankWindowType)
+                    bankWindowCachedThingsField(window) = null;
+            }
+        }
+
+        private static bool PreWithdrawSilver(Pawn negotiator) => negotiator?.Map != null;
+
+        // A Bank is one per faction (TradingManager.banksByFaction), so the faction identifies it. Null on a missing bank.
+        private static void SyncBank(SyncWorker sync, ref object bank)
+        {
+            if (sync.isWriting)
+            {
+                sync.Write<Faction>(bank == null ? null : bankParentFactionField(bank));
+            }
+            else
+            {
+                var faction = sync.Read<Faction>();
+                bank = faction == null ? null : getBankMethod.Invoke(null, new object[] { faction });
             }
         }
 
