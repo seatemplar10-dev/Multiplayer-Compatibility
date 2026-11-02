@@ -40,8 +40,8 @@ namespace Multiplayer.Compat
     /// map the player clicked in. (2) One IL rewrite for the buttons that write a field or a dictionary directly (<c>stfld</c> /
     /// <c>Dictionary.set_Item</c> / <c>Remove</c> / <c>Clear</c> / list reorder) to a hook that sends a sync call, and for the call
     /// sites of tiny methods the JIT can inline past a prefix (<c>AddGroup</c>, <c>InitSort</c>, <c>ResetGroupPolicies</c>,
-    /// <c>SearchForWork</c>), which stay unpatched. (3) Prefixes that replace a whole UI method (colour removal, manual priorities,
-    /// the group sort). (4) Priority.First prefixes that rebuild the per-pawn group cache in a fixed order before the simulation
+    /// <c>SearchForWork</c>), which stay unpatched. (3) Prefixes that replace a whole UI method (colour removal, manual priorities).
+    /// TG's own group sort is kept (en-US culture on every PC, synced list order). (4) Priority.First prefixes that rebuild the per-pawn group cache in a fixed order before the simulation
     /// reads it. (5) A last-priority postfix on the bill dialog menu (see <c>BillOptionsPostfix</c>). Every registered sync method
     /// and every patch method carries <c>NoInlining</c>.
     /// </para>
@@ -118,7 +118,8 @@ namespace Multiplayer.Compat
                 if (pawn == null)
                     continue;
 
-                var map = pawn.Spawned && pawn.Map != null ? pawn.Map : viewed;
+                // MapHeld: a carried pawn, a pawn in a casket or a corpse goes with the map MP's Thing worker gives it
+                var map = pawn.MapHeld ?? viewed;
                 var index = batches.FindIndex(b => b.map == map);
                 if (index < 0)
                 {
@@ -1042,48 +1043,6 @@ namespace Multiplayer.Compat
             CallUnwrapped(mResetPolicies, group);
         }
 
-        // ColonistGroup.Sort sorts the pawns by name or skill. The name compare of the game is a culture compare (it differs between
-        // PCs with another language setting) and ties keep the order of the list, so in multiplayer the sort is ordinal and ties go by
-        // thing id.
-        [MethodImpl(MethodImplOptions.NoInlining)]
-        private static bool SortPrefix(object __instance)
-        {
-            if (!active || !MP.IsInMultiplayer)
-                return true;
-
-            try
-            {
-                var list = GroupPawns(__instance);
-                var mode = Enum.GetName(tSortBy, fActiveSortBy.GetValue(__instance));
-                if (list != null && (mode == "Skills" || mode == "Name"))
-                {
-                    IEnumerable<Pawn> ordered;
-                    if (mode == "Skills")
-                    {
-                        var skill = fSkillDefSort.GetValue(__instance) as SkillDef;
-                        ordered = list.OrderByDescending(p => skill != null && p?.skills != null ? p.skills.GetSkill(skill).Level : 0)
-                            .ThenBy(p => p?.thingIDNumber ?? 0);
-                    }
-                    else
-                    {
-                        ordered = list.OrderBy(p => p?.Name?.ToStringShort ?? "", StringComparer.Ordinal).ThenBy(p => p?.thingIDNumber ?? 0);
-                    }
-
-                    var sorted = ordered.ToList();
-                    list.Clear();
-                    list.AddRange(sorted);
-                }
-
-                mUpdateData.Invoke(__instance, null);
-            }
-            catch (Exception e)
-            {
-                Log.Error($"{LogPrefix}the group sort failed: {e}");
-            }
-
-            return false;
-        }
-
         private const int FieldArea = 0, FieldDrug = 1, FieldApparel = 2, FieldFood = 3, FieldAutoDisband = 4, FieldSortBy = 5, FieldSkill = 6;
 
         // a, b: ids (area: map id and area id; policy: policy id; sort: enum value); -1 = none
@@ -1356,7 +1315,9 @@ namespace Multiplayer.Compat
                         option.action = () =>
                         {
                             original();
-                            if (ShouldSync())
+                            // only a bill that has a group needs the "no group" command
+                            if (ShouldSync() && bill is Bill_Production billWithGroup &&
+                                mBillsSelectedGroupGetter.Invoke(null, null) is IDictionary groupsOfBills && groupsOfBills.Contains(billWithGroup))
                                 SendBillGroup(bill, default);
                         };
                 }
@@ -1975,7 +1936,9 @@ namespace Multiplayer.Compat
             Feature("manual priorities", () =>
                 PatchMethod(Method(FindType("WorkMenu"), "DoManualPrioritiesCheckbox", typeof(Rect)), nameof(ManualPrioritiesPrefix), priority: Priority.First));
 
-            Feature("group sort", () => PatchMethod(Method(tGroup, "Sort"), nameof(SortPrefix), priority: Priority.First));
+            // ColonistGroup.Sort stays TG's own: the game sets the en-US culture on every PC (CultureInfoUtility, from Root), and
+            // the pawn list order it starts from is synced (arrows in ColonistGroup and ManagementMenu). A prefix on the 92 B Sort,
+            // whose hot caller is the world tick, could be inlined past on some PCs only and sort two ways.
 
             Feature("bill restriction", () =>
             {
@@ -2029,8 +1992,9 @@ namespace Multiplayer.Compat
             AddRewrite("reset group policies", ["Dialog_ResetGroup"], CallOf(mResetPolicies), nameof(HookResetGroupPolicies));
             AddRewrite("search for work (def)", SearchCallers, CallOf(mSearchDef), nameof(HookSearchForWorkDef));
             AddRewrite("search for work (enum)", SearchCallers, CallOf(mSearchEnum), nameof(HookSearchForWorkEnum));
-            AddRewrite("pawn list remove", ["ColonistGroup"], GenericCall(typeof(List<>), "RemoveAt", 1, typeof(Pawn)), nameof(HookPawnListRemoveAt));
-            AddRewrite("pawn list insert", ["ColonistGroup"], GenericCall(typeof(List<>), "Insert", 2, typeof(Pawn)), nameof(HookPawnListInsert));
+            // the in-group pawn arrows: ColonistGroup.DrawPawnArrows and ManagementMenu.DrawPawnArrows (their only List<Pawn> RemoveAt / Insert calls)
+            AddRewrite("pawn list remove", ["ColonistGroup", "ManagementMenu"], GenericCall(typeof(List<>), "RemoveAt", 1, typeof(Pawn)), nameof(HookPawnListRemoveAt));
+            AddRewrite("pawn list insert", ["ColonistGroup", "ManagementMenu"], GenericCall(typeof(List<>), "Insert", 2, typeof(Pawn)), nameof(HookPawnListInsert));
             AddRewrite("work priorities clear", ["WorkMenu", "WidgetsWorkGroup"],
                 GenericCall(typeof(Dictionary<,>), "Clear", 0, typeof(WorkTypeDef), typeof(int)), nameof(HookWorkPrioritiesClear));
             AddRewrite("work priorities remove", ["WorkMenu", "WidgetsWorkGroup"],
