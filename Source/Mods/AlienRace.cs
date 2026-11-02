@@ -42,7 +42,15 @@ namespace Multiplayer.Compat
             alienCompType = AccessTools.TypeByName("AlienRace.AlienPartGenerator+AlienComp");
             if (alienCompType == null) return;
 
-            overwriteColorChannelMethod = AccessTools.Method(alienCompType, "OverwriteColorChannel", new[] { typeof(string), typeof(Color), typeof(Color) });
+            // HAR 1.2 to 1.6 declare OverwriteColorChannel(string, Color?, Color?); 1.0 and 1.1 have no such method, and no build has a (string, Color, Color) overload.
+            // Invoke() boxes a Color for a Color? parameter, so ApplyAlienCompData passes plain Colors.
+            overwriteColorChannelMethod = AccessTools.Method(alienCompType, "OverwriteColorChannel", new[] { typeof(string), typeof(Color?), typeof(Color?) });
+            if (overwriteColorChannelMethod == null)
+            {
+                Log.Error("[MPCompat] Humanoid Alien Races: AlienComp.OverwriteColorChannel(string, Color?, Color?) not found, alien colours in the styling dialog stay unsynced");
+                return;
+            }
+
             originPawnField             = AccessTools.Field(AccessTools.TypeByName("Multiplayer.Client.Patches.StylingDialog_DummyPawn"), "origPawn");
             addonVariantsField          = AccessTools.Field(alienCompType, "addonVariants");
             addonColorsField            = AccessTools.Field(alienCompType, "addonColors");
@@ -173,8 +181,9 @@ namespace Multiplayer.Compat
             {
                 var linkData = Activator.CreateInstance(colorChannelLinkDataType);
                 linkOriginalChannelField.SetValue(linkData, kv.Key);
-                var t1 = (ICollection)linkTargetsOneField.GetValue(linkData);
-                var t2 = (ICollection)linkTargetsTwoField.GetValue(linkData);
+                // targetsChannelOne/Two are HashSet<ColorChannelLinkTargetData>, which is not a non-generic ICollection: keep them as object
+                var t1 = linkTargetsOneField.GetValue(linkData);
+                var t2 = linkTargetsTwoField.GetValue(linkData);
                 foreach (var (ch, idx) in kv.Value.targetsOne) AddToCollection(t1, ch, idx);
                 foreach (var (ch, idx) in kv.Value.targetsTwo) AddToCollection(t2, ch, idx);
                 links[kv.Key] = linkData;
@@ -184,7 +193,7 @@ namespace Multiplayer.Compat
             pawn.Drawer?.renderer?.SetAllGraphicsDirty();
         }
 
-        static void AddToCollection(ICollection col, string channel, int categoryIndex)
+        static void AddToCollection(object col, string channel, int categoryIndex)
         {
             var item = Activator.CreateInstance(colorChannelLinkTargetDataType);
             linkTargetChannelField.SetValue(item, channel);
