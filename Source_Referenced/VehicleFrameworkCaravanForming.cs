@@ -181,6 +181,17 @@ namespace Multiplayer.Compat
         private static TransferableOneWay TransferableOf(ISessionWithTransferables session, Thing thing)
             => thing == null ? null : session.GetTransferableByThingId(thing.thingIDNumber) as TransferableOneWay;
 
+        // A seat pawn from its thing id (synced as an int, see PreFinalizeSeats): aboard this vehicle, else in the session.
+        private static Pawn ResolveSeatPawn(ISessionWithTransferables session, List<Pawn> aboard, int pawnId)
+        {
+            if (pawnId < 0)
+                return null;
+            var pawn = aboard?.Find(p => p != null && p.thingIDNumber == pawnId);
+            if (pawn != null)
+                return pawn;
+            return (session.GetTransferableByThingId(pawnId) as TransferableOneWay)?.things.Find(t => t.thingIDNumber == pawnId) as Pawn;
+        }
+
         private static bool AnyVehicleSelected(List<TransferableOneWay> transferables)
             => transferables.Any(t => t != null && t.CountToTransfer > 0 && t.AnyThing is VehiclePawn);
 
@@ -238,15 +249,16 @@ namespace Multiplayer.Compat
                 return false;
             }
 
-            var pawns = new List<Pawn>();
+            // Pawns go as thing ids: a pawn already aboard is despawned inside a VehicleRoleHandler (see SyncedDisembarkPawn).
+            var pawnIds = new List<int>();
             var handlerIndices = new List<int>();
             foreach (var seat in __instance.Assignments)
             {
-                pawns.Add(seat.pawn);
+                pawnIds.Add(seat.pawn?.thingIDNumber ?? -1);
                 handlerIndices.Add(vehicle.handlers.IndexOf(seat.handler));
             }
 
-            SyncedSetVehicleSeats(session, vehicle, pawns, handlerIndices);
+            SyncedSetVehicleSeats(session, vehicle, pawnIds, handlerIndices);
             __result = true;
             return false;
         }
@@ -254,9 +266,11 @@ namespace Multiplayer.Compat
         // Synced. What VF's FinalizeSeats does after its check, on the session's transferables, on every PC. The list is checked
         // again here (the other player may have seated a pawn or ended the session in between): pawns not in this window, seated in
         // another vehicle, doubled or over a role's slots are dropped; a required role left short = no change.
-        private static void SyncedSetVehicleSeats(ISessionWithTransferables session, VehiclePawn vehicle, List<Pawn> pawns, List<int> handlerIndices)
+        // Pawns are resolved from their thing ids on every PC: this vehicle's pawns aboard, else the session's pawn transferables
+        // (which also hold the pawns aboard other vehicles). Ids that do not resolve are dropped.
+        private static void SyncedSetVehicleSeats(ISessionWithTransferables session, VehiclePawn vehicle, List<int> pawnIds, List<int> handlerIndices)
         {
-            if (session == null || vehicle == null || pawns == null || handlerIndices == null || pawns.Count != handlerIndices.Count)
+            if (session == null || vehicle == null || pawnIds == null || handlerIndices == null || pawnIds.Count != handlerIndices.Count)
                 return;
             var vehicleTransferable = TransferableOf(session, vehicle);
             if (vehicleTransferable == null)
@@ -265,9 +279,9 @@ namespace Multiplayer.Compat
             var seats = CaravanHelper.assignedSeats;
             var aboard = vehicle.AllPawnsAboard;
             var newSeats = new List<AssignedSeat>();
-            for (var i = 0; i < pawns.Count; i++)
+            for (var i = 0; i < pawnIds.Count; i++)
             {
-                var pawn = pawns[i];
+                var pawn = ResolveSeatPawn(session, aboard, pawnIds[i]);
                 var index = handlerIndices[i];
                 if (pawn == null || pawn is VehiclePawn || index < 0 || index >= vehicle.handlers.Count)
                     continue;
