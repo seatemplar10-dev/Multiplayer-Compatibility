@@ -1,4 +1,6 @@
 using System;
+using System.Collections;
+using System.Collections.Generic;
 using System.Reflection;
 using System.Reflection.Emit;
 using HarmonyLib;
@@ -36,9 +38,35 @@ public class DefensivePositions
     private static FastInvokeHandler managerGetHandlerForPawnMethod;
     // PawnSavedPositions
     private static FastInvokeHandler pawnSavedPositionsOwnerGetter;
+    private static FastInvokeHandler pawnSavedPositionsShouldBeSavedGetter;
+    // WorldData
+    private static MethodInfo worldDataHandlerListFromDictionaryMethod;
 
     public DefensivePositions(ModContentPack mod)
     {
+        var savedPositionsType = AccessTools.TypeByName("DefensivePositions.PawnSavedPositions");
+        pawnSavedPositionsOwnerGetter = MethodInvoker.GetHandler(AccessTools.PropertyGetter(savedPositionsType, "Owner"));
+
+        // FIXES row 219: in multifaction MP saves every join point (autosave, a player joining) as the first player
+        // faction (SaveLoad.SaveAndReload sets Faction.OfPlayer before SaveGameData). DP keeps a pawn's saved
+        // positions only if `owner.Faction == Faction.OfPlayer` (PawnSavedPositions.ShouldBeSaved, filtered in
+        // WorldData.HandlerListFromDictionary from WorldData.ExposeData), so every other player faction lost its saved
+        // positions at each join point, on every PC alike. In MP, keep them for any player faction. Done whoever
+        // registers the sync methods below. A transpiler on ExposeData, not a patch on the tiny ShouldBeSaved getter or
+        // HandlerListFromDictionary: on 1.7 (CoreCLR) a tier-1 compiled caller can inline a small method and skip its patch.
+        try
+        {
+            var worldDataType = AccessTools.TypeByName("DefensivePositions.WorldData");
+            worldDataHandlerListFromDictionaryMethod = AccessTools.DeclaredMethod(worldDataType, "HandlerListFromDictionary");
+            pawnSavedPositionsShouldBeSavedGetter = MethodInvoker.GetHandler(AccessTools.DeclaredPropertyGetter(savedPositionsType, "ShouldBeSaved"));
+            MpCompat.harmony.Patch(AccessTools.DeclaredMethod(worldDataType, "ExposeData"),
+                transpiler: new HarmonyMethod(typeof(DefensivePositions), nameof(ReplaceHandlerListFromDictionary)));
+        }
+        catch (Exception e)
+        {
+            Log.Error($"MPCompat :: Defensive Positions save fix (other player factions' positions) failed, not applied: {e}");
+        }
+
         var compatType = AccessTools.TypeByName("DefensivePositions.Compat_MultiplayerAPI");
         if (compatType != null && !ModOwnLayerAlwaysFails(AccessTools.DeclaredMethod(compatType, "Initialize")))
         {
@@ -49,9 +77,6 @@ public class DefensivePositions
         var managerType = AccessTools.TypeByName("DefensivePositions.DefensivePositionsManager");
         managerInstanceGetter = MethodInvoker.GetHandler(AccessTools.DeclaredPropertyGetter(managerType, "Instance"));
         managerGetHandlerForPawnMethod = MethodInvoker.GetHandler(AccessTools.DeclaredMethod(managerType, "GetHandlerForPawn"));
-
-        pawnSavedPositionsOwnerGetter = MethodInvoker.GetHandler(
-            AccessTools.PropertyGetter(AccessTools.TypeByName("DefensivePositions.PawnSavedPositions"), "Owner"));
 
         var handlerType = AccessTools.TypeByName("DefensivePositions.PawnSavedPositionHandler");
 
@@ -85,6 +110,69 @@ public class DefensivePositions
         }
 
         return false;
+    }
+
+    private static IEnumerable<CodeInstruction> ReplaceHandlerListFromDictionary(IEnumerable<CodeInstruction> instr, MethodBase baseMethod)
+    {
+        var replacement = AccessTools.DeclaredMethod(typeof(DefensivePositions), nameof(HandlerListForSave));
+        var replacedCount = 0;
+
+        foreach (var ci in instr)
+        {
+            if (worldDataHandlerListFromDictionaryMethod != null && ci.Calls(worldDataHandlerListFromDictionaryMethod))
+            {
+                ci.opcode = OpCodes.Call;
+                ci.operand = replacement;
+                yield return ci;
+                // Back to the List<PawnSavedPositionHandler> that the stfld after the call expects
+                yield return new CodeInstruction(OpCodes.Castclass, worldDataHandlerListFromDictionaryMethod.ReturnType);
+
+                replacedCount++;
+                continue;
+            }
+
+            yield return ci;
+        }
+
+        const int expected = 1;
+        if (replacedCount != expected)
+            Log.Warning($"Patched incorrect number of WorldData.HandlerListFromDictionary calls (patched {replacedCount}, expected {expected}) for method {baseMethod.Name}");
+    }
+
+    // DP's HandlerListFromDictionary (`dict.Values.Where(v => v.ShouldBeSaved).ToList()`). Single player: unchanged,
+    // same test and same order. In MP: DP's test (owner set, not destroyed) with any player faction instead of only
+    // Faction.OfPlayer (MP's hidden Spectator faction is a player faction too, but it has no pawns), sorted by owner id.
+    // A gizmo adds an empty handler on the drawing PC only, so the dictionary order can differ per PC. The sort puts
+    // the handlers with positions (set by synced commands, so on every PC) in the same order on every PC.
+    private static object HandlerListForSave(object dict)
+    {
+        var list = (IList)Activator.CreateInstance(worldDataHandlerListFromDictionaryMethod.ReturnType);
+        if (dict is not IDictionary handlers)
+            return list;
+
+        if (!MP.IsInMultiplayer)
+        {
+            foreach (var handler in handlers.Values)
+            {
+                if ((bool)pawnSavedPositionsShouldBeSavedGetter(handler))
+                    list.Add(handler);
+            }
+
+            return list;
+        }
+
+        var kept = new List<(int id, object handler)>();
+        foreach (var handler in handlers.Values)
+        {
+            if (pawnSavedPositionsOwnerGetter(handler) is Pawn { Destroyed: false, Faction.IsPlayer: true } owner)
+                kept.Add((owner.thingIDNumber, handler));
+        }
+
+        kept.Sort((a, b) => a.id.CompareTo(b.id));
+        foreach (var (_, handler) in kept)
+            list.Add(handler);
+
+        return list;
     }
 
     private static object Manager => managerInstanceGetter(null);
