@@ -93,6 +93,26 @@ namespace Multiplayer.Compat
         /// <summary>True while the code that runs belongs to another player: their command, or a tick / command in their faction.</summary>
         internal static bool IsForeignContext()
         {
+            // Row 401: a message shown while a PC loads (a joiner's "player connected" on the arbiter, run from a packet handler) has no
+            // World yet, so Faction.OfPlayerSilentFail threw and MP dropped the arbiter as a PacketReadException. Only a running game has a
+            // faction context. Current.Game?.World, not Find.World: Find.World dereferences Current.Game and throws when it is null.
+            if (Current.ProgramState != ProgramState.Playing || Current.Game?.World == null)
+                return false;
+
+            // Row 401: this patch runs inside Messages.Message / AcceptsMessage / PlayOneShotOnCamera, so it must never throw into the caller.
+            try
+            {
+                return IsForeignContextCore();
+            }
+            catch (Exception e)
+            {
+                Log.ErrorOnce($"[MPCompat] row 401: foreign-context check failed, the message stays visible: {e}", 0x40100001);
+                return false;
+            }
+        }
+
+        private static bool IsForeignContextCore()
+        {
             if (!MP.IsInMultiplayer || MP.InInterface)
                 return false;
 
