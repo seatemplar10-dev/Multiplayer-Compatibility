@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using System.Reflection.Emit;
+using System.Runtime.CompilerServices;
 using HarmonyLib;
 using Multiplayer.API;
 using RimWorld;
@@ -27,23 +28,30 @@ namespace Multiplayer.Compat
     /// </para>
     /// <para>
     /// Group identity. A group object exists once per PC, so a group is sent as <see cref="GroupRef"/> (kind, key, hint):
-    /// pawn group = its <c>groupID</c> (+ list index as hint), colony group = map unique id, caravan group = caravan id. A group
-    /// that cannot be named (a local object that is not yet in the world component) is never sent and the call runs locally.
+    /// pawn group = its <c>groupID</c> (+ list index as hint), colony group = map unique id, caravan group = caravan id. In
+    /// multiplayer a click that cannot be sent (a group that is not in the world component, an exception while sending) is
+    /// dropped with a Log.Error, never run on the clicking PC alone: a local run is a desync.
     /// </para>
     /// <para>
     /// Mechanisms. (1) <see cref="GroupCallPrefix"/>: one Priority.First prefix for every TacticalGroups method that takes a group
     /// as target (Add, Disband, work states, ...). In the interface it sends <see cref="SyncGroupCall"/> and skips the method.
-    /// Outside the interface (command, tick, load) it does nothing. (2) One IL rewrite for the buttons that write a field or a
-    /// dictionary directly (<c>stfld</c> / <c>Dictionary.set_Item</c> / <c>Remove</c> / <c>Clear</c> / <c>SetOrAdd</c> / list reorder)
-    /// to a hook that sends a sync call. (3) Prefixes that replace a whole UI method (colour removal, manual priorities).
-    /// (4) Priority.First prefixes that rebuild the per-pawn group cache in a fixed order before the simulation reads it.
+    /// Outside the interface (command, tick, load) it does nothing. A group call is a map command (the clicker's map, or the map of
+    /// its pawns, one command per map): Multiplayer sets <c>Find.CurrentMap</c> to the command's map, so <c>PawnGroup.Map</c> is the
+    /// map the player clicked in. (2) One IL rewrite for the buttons that write a field or a dictionary directly (<c>stfld</c> /
+    /// <c>Dictionary.set_Item</c> / <c>Remove</c> / <c>Clear</c> / list reorder) to a hook that sends a sync call, and for the call
+    /// sites of tiny methods the JIT can inline past a prefix (<c>AddGroup</c>, <c>InitSort</c>, <c>ResetGroupPolicies</c>,
+    /// <c>SearchForWork</c>), which stay unpatched. (3) Prefixes that replace a whole UI method (colour removal, manual priorities,
+    /// the group sort). (4) Priority.First prefixes that rebuild the per-pawn group cache in a fixed order before the simulation
+    /// reads it. (5) A last-priority postfix on the bill dialog menu (see <c>BillOptionsPostfix</c>). Every registered sync method
+    /// and every patch method carries <c>NoInlining</c>.
     /// </para>
     /// <para>
     /// Known gaps, not fixed here: the attack menu creates Lords from the interface (<c>LordMaker.MakeNewLord</c>, six paths);
     /// code that changes the group structure while drawing (<c>RecacheEntries</c> creating caravan groups, <c>GetPawnRowsInt</c>
     /// removing dead pawns, the <c>AllCaravanGroups</c> getter); the "enabled" check boxes of the policies (they only decide which
     /// PC sends a field change); formations and battle stations; display order in the colonist bar; presets (blocked in
-    /// multiplayer, the preset objects are per PC).
+    /// multiplayer, the preset objects are per PC); the area drag sends one command per area crossed; <c>ColonistGroup.SetName</c>
+    /// calls <c>Text.CalcHeight</c> inside the command (a display cache); <c>NormalizePawn</c> runs on every job end.
     /// </para>
     /// <para>
     /// Interim guard 65 (Ares <c>SeaWaylithCompat/Source/ColonyGroupsSimFix.cs</c>) removes the TacticalGroups patches on
@@ -68,6 +76,7 @@ namespace Multiplayer.Compat
             fFoodPolicy, fAutoDisband, fActiveSortBy, fSkillDefSort, fColorOptionColor, fColorOptionFavorite, fMenuGroup, fPickerMode,
             fPawnGroupsList, fCaravanGroupsDict, fColonyGroupsDict, fPawnsWithGroups, fCachedComps;
         private static MethodInfo mAddGroup, mColorOptionGetColor, mBillsSelectedGroupGetter, mMarkColonistsDirty;
+        private static MethodInfo mInitSort, mResetPolicies, mSearchDef, mSearchEnum, mUpdateData;
         private static FieldInfo fColonistBar;
         private static Func<ThingDef, bool> isHeadgear, isFeetGear, isLegsGear, isTorsoGear, isArmsGear;
         private static AccessTools.FieldRef<Pawn_PlayerSettings, Pawn> playerSettingsPawn;
@@ -82,6 +91,7 @@ namespace Multiplayer.Compat
             public int hint;
         }
 
+        [MethodImpl(MethodImplOptions.NoInlining)]
         private static void SyncGroupRef(SyncWorker sync, ref GroupRef value)
         {
             sync.Bind(ref value.kind);
@@ -90,6 +100,39 @@ namespace Multiplayer.Compat
         }
 
         private static bool ShouldSync() => active && MP.IsInMultiplayer && MP.InInterface;
+
+        // In multiplayer a click that cannot be sent is dropped, never run on this PC alone: a local run is a desync.
+        private static void Dropped(string what, Exception e = null)
+            => Log.Error($"{LogPrefix}{what}: the click is dropped (running it on this PC alone would desync){(e == null ? "" : ": " + e)}");
+
+        // A group call is a map command: Multiplayer sets Find.CurrentMap to the command's map while it runs, so PawnGroup.Map (which
+        // is Find.CurrentMap) is the map of the player who clicked. A call without a Map argument is a world command, and a world
+        // command pins the first player colony, which is the wrong map for a second faction. The map of a call is the map its pawns
+        // stand on, else the map the player views.
+        private static List<(Map map, List<Pawn> pawns)> SplitByMap(IEnumerable<Pawn> source)
+        {
+            var viewed = Find.CurrentMap;
+            var batches = new List<(Map map, List<Pawn> pawns)>();
+            foreach (var pawn in source)
+            {
+                if (pawn == null)
+                    continue;
+
+                var map = pawn.Spawned && pawn.Map != null ? pawn.Map : viewed;
+                var index = batches.FindIndex(b => b.map == map);
+                if (index < 0)
+                {
+                    batches.Add((map, [pawn]));
+                    continue;
+                }
+
+                batches[index].pawns.Add(pawn);
+            }
+
+            if (batches.Count == 0)
+                batches.Add((viewed, []));
+            return batches;
+        }
 
         private static object Comp => tTacticalGroups == null ? null : Find.World?.GetComponent(tTacticalGroups);
 
@@ -217,7 +260,9 @@ namespace Multiplayer.Compat
 
         // invoke = the method the sync call runs (a base declaration, so an override runs by virtual dispatch);
         // patched = the methods that get the prefix (the base and every override)
-        private static void AddCall(MethodInfo invoke, IEnumerable<MethodInfo> patched, List<MethodInfo> patchTargets)
+        // patch = false: the method is tiny, so the JIT can inline it into its callers and past a prefix. Its callers are rewritten
+        // instead (the rewrite hooks send the call through SendGroupCall), and the method itself stays unpatched.
+        private static void AddCall(MethodInfo invoke, IEnumerable<MethodInfo> patched, List<MethodInfo> patchTargets, bool patch = true)
         {
             var isStatic = invoke.IsStatic;
             var parms = invoke.GetParameters().Skip(isStatic ? 1 : 0).ToArray();
@@ -236,7 +281,8 @@ namespace Multiplayer.Compat
             foreach (var m in patched)
             {
                 callIds[MethodKey(m)] = id;
-                patchTargets.Add(m);
+                if (patch)
+                    patchTargets.Add(m);
             }
         }
 
@@ -277,9 +323,15 @@ namespace Multiplayer.Compat
                         foreach (var sub in subclasses)
                             if (AccessTools.DeclaredMethod(sub, name, args) is { } overrideMethod && overrideMethod != baseCall)
                                 patched.Add(overrideMethod);
-                    AddCall(baseCall, patched, patchTargets);
+                    // InitSort (14 bytes) and ResetGroupPolicies are called from known places: those call sites are rewritten
+                    var callSiteOnly = type == tGroup && (name == "InitSort" || name == "ResetGroupPolicies");
+                    AddCall(baseCall, patched, patchTargets, !callSiteOnly);
                     if (name == "SetName" && type == tGroup)
                         setNameId = callEntries.Count - 1;
+                    if (name == "InitSort" && type == tGroup)
+                        mInitSort = baseCall;
+                    if (name == "ResetGroupPolicies" && type == tGroup)
+                        mResetPolicies = baseCall;
                 }
                 catch (Exception e)
                 {
@@ -303,13 +355,16 @@ namespace Multiplayer.Compat
         }
 
         // two prefixes, so no prefix asks Harmony for __instance of a static method
+        [MethodImpl(MethodImplOptions.NoInlining)]
         private static bool GroupCallPrefix(object __instance, object[] __args, MethodBase __originalMethod)
             => SendGroupCall(__instance, __args, __originalMethod);
 
+        [MethodImpl(MethodImplOptions.NoInlining)]
         private static bool GroupCallPrefixStatic(object[] __args, MethodBase __originalMethod)
             => SendGroupCall(null, __args, __originalMethod);
 
         // Dialog_RenameColonistGroup.SetName: a tiny caller of ColonistGroup.SetName, which the JIT may inline into the dialog
+        [MethodImpl(MethodImplOptions.NoInlining)]
         private static bool RenameDialogPrefix(object __instance, string name)
         {
             if (!ShouldSync() || setNameId < 0)
@@ -318,15 +373,18 @@ namespace Multiplayer.Compat
             try
             {
                 if (!TryEncode(fMenuGroup.GetValue(__instance), out var groupRef))
-                    return true;
+                {
+                    Dropped("rename: the group is not in the group lists");
+                    return false;
+                }
 
-                SyncGroupCall(groupRef, setNameId, [], name ?? "", 0, false);
+                SyncGroupCall(groupRef, setNameId, [], name ?? "", 0, false, Find.CurrentMap);
                 return false;
             }
             catch (Exception e)
             {
-                Log.Error($"{LogPrefix}could not send the rename, it runs locally: {e}");
-                return true;
+                Dropped("the rename could not be sent", e);
+                return false;
             }
         }
 
@@ -342,7 +400,10 @@ namespace Multiplayer.Compat
                 var entry = callEntries[id];
                 var group = entry.isStatic ? __args[0] : __instance;
                 if (!TryEncode(group, out var groupRef))
-                    return true;
+                {
+                    Dropped($"group call {__originalMethod.Name}: the group is not in the group lists");
+                    return false;
+                }
 
                 var offset = entry.isStatic ? 1 : 0;
                 var pawns = new List<Pawn>();
@@ -355,15 +416,15 @@ namespace Multiplayer.Compat
                     switch (entry.kinds[k])
                     {
                         case 'P':
-                            if (arg == null) return true;
+                            if (arg == null) return DroppedArg(__originalMethod);
                             pawns.Add((Pawn) arg);
                             break;
                         case 'L':
-                            if (arg is not List<Pawn> list) return true;
+                            if (arg is not List<Pawn> list) return DroppedArg(__originalMethod);
                             pawns.AddRange(list.Where(p => p != null));
                             break;
                         case 'D':
-                            if (arg is not WorkTypeDef def) return true;
+                            if (arg is not WorkTypeDef def) return DroppedArg(__originalMethod);
                             text = def.defName;
                             break;
                         case 'E':
@@ -381,18 +442,28 @@ namespace Multiplayer.Compat
                     }
                 }
 
-                SyncGroupCall(groupRef, id, pawns, text, number, flag);
+                // one command per map: a command has one map, and Multiplayer throws when the pawns of one call stand on two maps
+                foreach (var (map, batch) in SplitByMap(pawns))
+                    SyncGroupCall(groupRef, id, batch, text, number, flag, map);
                 return false;
             }
             catch (Exception e)
             {
-                Log.Error($"{LogPrefix}could not send group call {__originalMethod?.Name}, it runs locally: {e}");
-                return true;
+                Dropped($"group call {__originalMethod?.Name} could not be sent", e);
+                return false;
             }
         }
 
+        private static bool DroppedArg(MethodBase method)
+        {
+            Dropped($"group call {method.Name} has an argument that cannot be sent");
+            return false;
+        }
+
         // Runs the TacticalGroups method on every PC. A group or a def that does not exist on this PC cancels the call.
-        public static void SyncGroupCall(GroupRef group, int id, List<Pawn> pawns, string text, int number, bool flag)
+        // map: not read. Writing it makes this a map command, so Find.CurrentMap is that map while the call runs.
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        public static void SyncGroupCall(GroupRef group, int id, List<Pawn> pawns, string text, int number, bool flag, Map map)
         {
             if (!active || id < 0 || id >= callEntries.Count)
                 return;
@@ -448,21 +519,54 @@ namespace Multiplayer.Compat
 
         // ---- group structure ---------------------------------------------------------------------------------------------------------
 
-        // TacticalGroups.AddGroup(List<Pawn>): "create group". Runs the vanilla code in a command on every PC.
-        private static bool AddGroupPrefix(List<Pawn> pawns)
+        // TacticalGroups.AddGroup(List<Pawn>) is 29 bytes, so the JIT can inline it into the colonist bar and past a prefix. The one
+        // call site (the "create group" button of TacticalColonistBar) is rewritten to this hook. In multiplayer the vanilla code runs
+        // in a command on every PC.
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        public static void HookAddGroup(object comp, List<Pawn> pawns)
         {
-            if (!ShouldSync() || pawns == null)
-                return true;
+            if (!ShouldSync())
+            {
+                CallUnwrapped(mAddGroup, comp, pawns);
+                return;
+            }
 
-            var list = pawns.Where(p => p != null).ToList();
-            if (list.Count == 0)
-                return true;
+            try
+            {
+                var list = pawns?.Where(p => p != null).ToList();
+                if (list == null || list.Count == 0)
+                    return;
 
-            SyncAddGroup(list);
-            return false;
+                var batches = SplitByMap(list);
+                if (batches.Count > 1)
+                {
+                    Messages.Message("A group cannot be made from colonists of different maps in multiplayer.", MessageTypeDefOf.RejectInput, false);
+                    return;
+                }
+
+                SyncAddGroup(list, batches[0].map);
+            }
+            catch (Exception e)
+            {
+                Dropped("creating the group could not be sent", e);
+            }
         }
 
-        public static void SyncAddGroup(List<Pawn> pawns)
+        // calls a Colony Groups method by reflection and throws what it threw, not a TargetInvocationException
+        private static void CallUnwrapped(MethodInfo method, object target, params object[] args)
+        {
+            try
+            {
+                method.Invoke(target, args);
+            }
+            catch (TargetInvocationException e) when (e.InnerException != null)
+            {
+                System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(e.InnerException).Throw();
+            }
+        }
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        public static void SyncAddGroup(List<Pawn> pawns, Map map)
         {
             if (!active || pawns == null || Comp is not { } comp)
                 return;
@@ -483,6 +587,7 @@ namespace Multiplayer.Compat
 
         // The group id of a new pawn group is "pawn group count + 1", which repeats after a disband. The id names the group in every
         // sync call, so a new group gets an id that no pawn group or former group has.
+        [MethodImpl(MethodImplOptions.NoInlining)]
         private static void CreateGroupIdPostfix(ref int __result)
         {
             if (!active || !MP.IsInMultiplayer)
@@ -516,27 +621,28 @@ namespace Multiplayer.Compat
             => caravanGroup == null ? null : fFormerGroups.GetValue(caravanGroup) as IDictionary;
 
         // PawnGroup.Map is Find.CurrentMap, which differs on each PC. The simulation reads it (CreateOrJoinColony, the group
-        // helpers), so while the game ticks it is the map of the first spawned pawn of the group. In a command Multiplayer sets
-        // Find.CurrentMap to the map of the player who clicked (the same on every PC), and that is what the click means.
+        // helpers), so while the game ticks it is the map of the spawned pawn of the group with the lowest thing id (the order of
+        // the group's pawn list is not the same on every PC). In the interface it is the map the player views. In a sync command
+        // it is the command's map: every group call is a map command (see SplitByMap), and Multiplayer sets Find.CurrentMap to the
+        // command's map, the same on every PC, so the postfix leaves it alone there.
+        [MethodImpl(MethodImplOptions.NoInlining)]
         private static void PawnGroupMapPostfix(object __instance, ref Map __result)
         {
             if (!active || !MP.IsInMultiplayer || MP.InInterface || MP.IsExecutingSyncCommand)
                 return;
 
-            Map map = null;
+            Pawn first = null;
             if (GroupPawns(__instance) is { } pawns)
                 foreach (var pawn in pawns)
-                    if (pawn is { Spawned: true, Map: not null })
-                    {
-                        map = pawn.Map;
-                        break;
-                    }
-            __result = map;
+                    if (pawn is { Spawned: true, Map: not null } && (first == null || pawn.thingIDNumber < first.thingIDNumber))
+                        first = pawn;
+            __result = first?.Map;
         }
 
         // Reorder arrows (PawnGroup.DrawOverlays): "RemoveAt(i); Insert(j, this)" on the pawn group list becomes one sync call.
         private static object pendingMove;
 
+        [MethodImpl(MethodImplOptions.NoInlining)]
         public static void HookListRemoveAt(IList list, int index)
         {
             if (ShouldSync() && ReferenceEquals(list, PawnGroupList))
@@ -548,12 +654,15 @@ namespace Multiplayer.Compat
             list.RemoveAt(index);
         }
 
+        [MethodImpl(MethodImplOptions.NoInlining)]
         public static void HookListInsert(IList list, int index, object group)
         {
             if (ShouldSync() && ReferenceEquals(list, PawnGroupList))
             {
                 if (pendingMove != null && ReferenceEquals(pendingMove, group) && TryEncode(group, out var groupRef))
                     SyncMoveGroup(groupRef, index);
+                else
+                    Dropped("moving the group could not be sent");
                 pendingMove = null;
                 return;
             }
@@ -561,6 +670,53 @@ namespace Multiplayer.Compat
             list.Insert(index, group);
         }
 
+        // In-group pawn arrows (ColonistGroup.DrawPawnArrows): "RemoveAt(i); Insert(j, pawn)" on the pawn list of a group. The order of
+        // that list decides which pawn gives the group its map, the order group commands walk the pawns in and the order of ties in a
+        // sort, so it is the same on every PC.
+        private static (List<Pawn> list, Pawn pawn) pendingPawnMove;
+
+        private static object GroupOfPawnList(List<Pawn> list) => FindGroup(g => ReferenceEquals(GroupPawns(g), list));
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        public static void HookPawnListRemoveAt(List<Pawn> list, int index)
+        {
+            if (ShouldSync() && GroupOfPawnList(list) != null)
+            {
+                pendingPawnMove = (list, index >= 0 && index < list.Count ? list[index] : null);
+                return;
+            }
+
+            list.RemoveAt(index);
+        }
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        public static void HookPawnListInsert(List<Pawn> list, int index, Pawn pawn)
+        {
+            if (ShouldSync() && GroupOfPawnList(list) is { } group)
+            {
+                if (ReferenceEquals(pendingPawnMove.list, list) && pendingPawnMove.pawn == pawn && pawn != null && TryEncode(group, out var groupRef))
+                    SyncMovePawn(groupRef, pawn, index);
+                else
+                    Dropped("moving the pawn in the group could not be sent");
+                pendingPawnMove = default;
+                return;
+            }
+
+            list.Insert(index, pawn);
+        }
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        public static void SyncMovePawn(GroupRef group, Pawn pawn, int index)
+        {
+            if (!active || pawn == null || Decode(group) is not { } target || GroupPawns(target) is not { } list || !list.Contains(pawn))
+                return;
+
+            list.Remove(pawn);
+            list.Insert(Math.Max(0, Math.Min(index, list.Count)), pawn);
+            MarkColonistsDirty();
+        }
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
         public static void SyncMoveGroup(GroupRef group, int index)
         {
             if (!active || Decode(group) is not { } target || PawnGroupList is not { } list)
@@ -585,6 +741,7 @@ namespace Multiplayer.Compat
         }
 
         // Presets are objects of the settings file of one PC, the other PCs do not have them.
+        [MethodImpl(MethodImplOptions.NoInlining)]
         private static bool ActivatePresetPrefix()
         {
             if (!ShouldSync())
@@ -631,6 +788,7 @@ namespace Multiplayer.Compat
             => (ci.opcode == OpCodes.Call || ci.opcode == OpCodes.Callvirt) && SameMethod(ci.operand, method);
 
         // one transpiler for every rewritten method: the instruction is replaced by a call of the hook with the same stack shape
+        [MethodImpl(MethodImplOptions.NoInlining)]
         private static IEnumerable<CodeInstruction> RewriteTranspiler(IEnumerable<CodeInstruction> instructions, MethodBase original)
         {
             if (original == null || !rewritesByMethod.TryGetValue(MethodKey(original), out var applicable))
@@ -729,7 +887,7 @@ namespace Multiplayer.Compat
             foreach (var rewrite in rewrites)
             {
                 if (counts.GetValueOrDefault(rewrite) == 0)
-                    Log.Warning($"{LogPrefix}rewrite '{rewrite.name}' found nothing to change, its buttons stay local");
+                    Log.Error($"{LogPrefix}rewrite '{rewrite.name}' found nothing to change, its buttons stay local (they desync)");
                 else
                     rewrite.count = counts[rewrite];
             }
@@ -741,86 +899,195 @@ namespace Multiplayer.Compat
 
         private static void Set(FieldInfo field, object target, object value) => field.SetValue(target, value);
 
+        // The hooks below replace a store into a group field. In multiplayer (interface) the store becomes a command, and it is never
+        // made on this PC alone: a value the command cannot carry (no group name, a null policy) drops the click.
+        // No PC keeps a value until the command has run on all of them, so a store of the value the group already has sends nothing.
+        private static bool SendField(object group, int field, int a, int b, string text, bool flag)
+        {
+            if (!TryEncode(group, out var groupRef))
+            {
+                Dropped("a group setting could not be sent: the group is not in the group lists");
+                return false;
+            }
+
+            SyncSetField(groupRef, field, a, b, text, flag);
+            return true;
+        }
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
         public static void HookGroupArea(object group, Area area)
         {
-            if (ShouldSync() && fGroupArea.GetValue(group) != area && TryEncode(group, out var groupRef))
+            if (ShouldSync())
             {
-                SyncSetField(groupRef, FieldArea, area == null ? -1 : area.Map.uniqueID, area == null ? -1 : area.ID, "", false);
+                if (fGroupArea.GetValue(group) != area)
+                    SendField(group, FieldArea, area == null ? -1 : area.Map.uniqueID, area == null ? -1 : area.ID, "", false);
                 return;
             }
 
             Set(fGroupArea, group, area);
         }
 
+        [MethodImpl(MethodImplOptions.NoInlining)]
         public static void HookGroupDrugPolicy(object group, DrugPolicy policy)
         {
-            if (ShouldSync() && policy != null && fDrugPolicy.GetValue(group) != policy && TryEncode(group, out var groupRef))
+            if (ShouldSync())
             {
-                SyncSetField(groupRef, FieldDrug, policy.id, 0, "", false);
+                if (policy != null && fDrugPolicy.GetValue(group) != policy)
+                    SendField(group, FieldDrug, policy.id, 0, "", false);
                 return;
             }
 
             Set(fDrugPolicy, group, policy);
         }
 
+        [MethodImpl(MethodImplOptions.NoInlining)]
         public static void HookGroupApparelPolicy(object group, ApparelPolicy policy)
         {
-            if (ShouldSync() && policy != null && fApparelPolicy.GetValue(group) != policy && TryEncode(group, out var groupRef))
+            if (ShouldSync())
             {
-                SyncSetField(groupRef, FieldApparel, policy.id, 0, "", false);
+                if (policy != null && fApparelPolicy.GetValue(group) != policy)
+                    SendField(group, FieldApparel, policy.id, 0, "", false);
                 return;
             }
 
             Set(fApparelPolicy, group, policy);
         }
 
+        [MethodImpl(MethodImplOptions.NoInlining)]
         public static void HookGroupFoodPolicy(object group, FoodPolicy policy)
         {
-            if (ShouldSync() && policy != null && fFoodPolicy.GetValue(group) != policy && TryEncode(group, out var groupRef))
+            if (ShouldSync())
             {
-                SyncSetField(groupRef, FieldFood, policy.id, 0, "", false);
+                if (policy != null && fFoodPolicy.GetValue(group) != policy)
+                    SendField(group, FieldFood, policy.id, 0, "", false);
                 return;
             }
 
             Set(fFoodPolicy, group, policy);
         }
 
+        [MethodImpl(MethodImplOptions.NoInlining)]
         public static void HookAutoDisband(object group, bool value)
         {
-            if (ShouldSync() && (bool) fAutoDisband.GetValue(group) != value && TryEncode(group, out var groupRef))
+            if (ShouldSync())
             {
-                SyncSetField(groupRef, FieldAutoDisband, 0, 0, "", value);
+                if ((bool) fAutoDisband.GetValue(group) != value)
+                    SendField(group, FieldAutoDisband, 0, 0, "", value);
                 return;
             }
 
             Set(fAutoDisband, group, value);
         }
 
+        // The sort menu: "Name" stores activeSortBy and then calls InitSort(group.activeSortBy). The store is a command, so the local
+        // field still has the old value when InitSort reads it. The value is remembered for the InitSort call that follows in the same
+        // click (HookInitSort), which sends one InitSort(Name).
+        private static object pendingSortGroup;
+        private static int pendingSortValue;
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
         public static void HookActiveSortBy(object group, int value)
         {
-            if (ShouldSync() && TryEncode(group, out var groupRef))
+            if (ShouldSync())
             {
-                SyncSetField(groupRef, FieldSortBy, value, 0, "", false);
+                pendingSortGroup = Enum.ToObject(tSortBy, value).ToString() == "Name" ? group : null;
+                pendingSortValue = value;
+                SendField(group, FieldSortBy, value, 0, "", false);
                 return;
             }
 
             Set(fActiveSortBy, group, Enum.ToObject(tSortBy, value));
         }
 
+        [MethodImpl(MethodImplOptions.NoInlining)]
         public static void HookSkillDefSort(object group, SkillDef skill)
         {
-            if (ShouldSync() && TryEncode(group, out var groupRef))
+            if (ShouldSync())
             {
-                SyncSetField(groupRef, FieldSkill, 0, 0, skill?.defName ?? "", false);
+                pendingSortGroup = null;
+                SendField(group, FieldSkill, 0, 0, skill?.defName ?? "", false);
                 return;
             }
 
             Set(fSkillDefSort, group, skill);
         }
 
+        // SortMenu calls InitSort(SortBy) in two lambdas. InitSort is 14 bytes, so the JIT can inline it past a prefix: the two call
+        // sites are rewritten to this hook, and InitSort itself is not patched.
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        public static void HookInitSort(object group, int sortBy)
+        {
+            if (ShouldSync())
+            {
+                if (ReferenceEquals(pendingSortGroup, group))
+                    sortBy = pendingSortValue;
+                pendingSortGroup = null;
+                SendGroupCall(group, [Enum.ToObject(tSortBy, sortBy)], mInitSort);
+                return;
+            }
+
+            CallUnwrapped(mInitSort, group, Enum.ToObject(tSortBy, sortBy));
+        }
+
+        // ColonistGroup.ResetGroupPolicies (79 bytes): called from one dialog button, rewritten the same way.
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        public static void HookResetGroupPolicies(object group)
+        {
+            if (ShouldSync())
+            {
+                SendGroupCall(group, [], mResetPolicies);
+                return;
+            }
+
+            CallUnwrapped(mResetPolicies, group);
+        }
+
+        // ColonistGroup.Sort sorts the pawns by name or skill. The name compare of the game is a culture compare (it differs between
+        // PCs with another language setting) and ties keep the order of the list, so in multiplayer the sort is ordinal and ties go by
+        // thing id.
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private static bool SortPrefix(object __instance)
+        {
+            if (!active || !MP.IsInMultiplayer)
+                return true;
+
+            try
+            {
+                var list = GroupPawns(__instance);
+                var mode = Enum.GetName(tSortBy, fActiveSortBy.GetValue(__instance));
+                if (list != null && (mode == "Skills" || mode == "Name"))
+                {
+                    IEnumerable<Pawn> ordered;
+                    if (mode == "Skills")
+                    {
+                        var skill = fSkillDefSort.GetValue(__instance) as SkillDef;
+                        ordered = list.OrderByDescending(p => skill != null && p?.skills != null ? p.skills.GetSkill(skill).Level : 0)
+                            .ThenBy(p => p?.thingIDNumber ?? 0);
+                    }
+                    else
+                    {
+                        ordered = list.OrderBy(p => p?.Name?.ToStringShort ?? "", StringComparer.Ordinal).ThenBy(p => p?.thingIDNumber ?? 0);
+                    }
+
+                    var sorted = ordered.ToList();
+                    list.Clear();
+                    list.AddRange(sorted);
+                }
+
+                mUpdateData.Invoke(__instance, null);
+            }
+            catch (Exception e)
+            {
+                Log.Error($"{LogPrefix}the group sort failed: {e}");
+            }
+
+            return false;
+        }
+
         private const int FieldArea = 0, FieldDrug = 1, FieldApparel = 2, FieldFood = 3, FieldAutoDisband = 4, FieldSortBy = 5, FieldSkill = 6;
 
         // a, b: ids (area: map id and area id; policy: policy id; sort: enum value); -1 = none
+        [MethodImpl(MethodImplOptions.NoInlining)]
         public static void SyncSetField(GroupRef group, int field, int a, int b, string text, bool flag)
         {
             if (!active || Decode(group) is not { } target)
@@ -864,34 +1131,44 @@ namespace Multiplayer.Compat
 
         // ---- hooks: hostility response and medical care of a pawn ---------------------------------------------------------------------
 
+        [MethodImpl(MethodImplOptions.NoInlining)]
         public static void HookHostilityResponse(Pawn_PlayerSettings settings, HostilityResponseMode mode)
         {
-            if (ShouldSync() && playerSettingsPawn(settings) is { } pawn && settings.hostilityResponse != mode)
+            if (ShouldSync())
             {
-                SyncHostilityResponse(pawn, mode);
+                if (playerSettingsPawn(settings) is not { } pawn)
+                    Dropped("hostility response: the settings have no pawn");
+                else if (settings.hostilityResponse != mode)
+                    SyncHostilityResponse(pawn, mode);
                 return;
             }
 
             settings.hostilityResponse = mode;
         }
 
+        [MethodImpl(MethodImplOptions.NoInlining)]
         public static void HookMedCare(Pawn_PlayerSettings settings, MedicalCareCategory care)
         {
-            if (ShouldSync() && playerSettingsPawn(settings) is { } pawn && settings.medCare != care)
+            if (ShouldSync())
             {
-                SyncMedCare(pawn, care);
+                if (playerSettingsPawn(settings) is not { } pawn)
+                    Dropped("medical care: the settings have no pawn");
+                else if (settings.medCare != care)
+                    SyncMedCare(pawn, care);
                 return;
             }
 
             settings.medCare = care;
         }
 
+        [MethodImpl(MethodImplOptions.NoInlining)]
         public static void SyncHostilityResponse(Pawn pawn, HostilityResponseMode mode)
         {
             if (active && pawn?.playerSettings != null)
                 pawn.playerSettings.hostilityResponse = mode;
         }
 
+        [MethodImpl(MethodImplOptions.NoInlining)]
         public static void SyncMedCare(Pawn pawn, MedicalCareCategory care)
         {
             if (active && pawn?.playerSettings != null)
@@ -922,19 +1199,23 @@ namespace Multiplayer.Compat
         }
 
         // Dictionary<BodyColor, ColorOption>.set_Item(mode, option) in the colour picker (colour, ideology colour, pawn favourite)
+        [MethodImpl(MethodImplOptions.NoInlining)]
         public static void HookBodyColorSet(object dict, int mode, object option)
         {
-            if (ShouldSync() && option != null
-                && FindGroup(g => fGroupColor.GetValue(g) is { } gc && ReferenceEquals(fBodyColors.GetValue(gc), dict)) is { } group
-                && TryEncode(group, out var groupRef))
+            // a dictionary that belongs to no group is not group state: it stays local
+            if (ShouldSync() && FindGroup(g => fGroupColor.GetValue(g) is { } gc && ReferenceEquals(fBodyColors.GetValue(gc), dict)) is { } group)
             {
-                SyncSetColor(groupRef, mode, (Color) fColorOptionColor.GetValue(option), (bool) fColorOptionFavorite.GetValue(option));
+                if (option == null || !TryEncode(group, out var groupRef))
+                    Dropped("the group colour could not be sent");
+                else
+                    SyncSetColor(groupRef, mode, (Color) fColorOptionColor.GetValue(option), (bool) fColorOptionFavorite.GetValue(option));
                 return;
             }
 
             ((IDictionary) dict)[Enum.ToObject(tBodyColor, mode)] = option;
         }
 
+        [MethodImpl(MethodImplOptions.NoInlining)]
         public static void SyncSetColor(GroupRef group, int mode, Color color, bool favorite)
         {
             if (!active || Decode(group) is not { } target)
@@ -960,6 +1241,7 @@ namespace Multiplayer.Compat
         }
 
         // Dialog_ColorPicker.RemoveColor: also resets the wanted colour of apparel and hair and stops the recolour job of every pawn
+        [MethodImpl(MethodImplOptions.NoInlining)]
         private static bool RemoveColorPrefix(object __instance)
         {
             if (!ShouldSync())
@@ -969,18 +1251,22 @@ namespace Multiplayer.Compat
             {
                 var group = fMenuGroup.GetValue(__instance);
                 if (!TryEncode(group, out var groupRef))
-                    return true;
+                {
+                    Dropped("the colour removal: the group is not in the group lists");
+                    return false;
+                }
 
                 SyncRemoveColor(groupRef, Convert.ToInt32(fPickerMode.GetValue(__instance)));
                 return false;
             }
             catch (Exception e)
             {
-                Log.Error($"{LogPrefix}could not send the colour removal, it runs locally: {e}");
-                return true;
+                Dropped("the colour removal could not be sent", e);
+                return false;
             }
         }
 
+        [MethodImpl(MethodImplOptions.NoInlining)]
         public static void SyncRemoveColor(GroupRef group, int mode)
         {
             if (!active || Decode(group) is not { } target)
@@ -1038,31 +1324,127 @@ namespace Multiplayer.Compat
 
         // ---- group bills (path 3) --------------------------------------------------------------------------------------------------
 
-        // BillsSelectedGroup.SetOrAdd(bill, group) in the bill dialog menu "any pawn of group ..."
-        public static void HookBillGroupSet(object dict, Bill_Production bill, object group)
+        // The bill dialog: Multiplayer wraps the options of Dialog_BillConfig.GeneratePawnRestrictionOptions in a field watch (a pick
+        // of the pawn restriction is sent as a field change). Colony Groups adds one option per pawn group to that menu in its own
+        // postfix, after the watch was made. That option runs bill.SetAnyPawnRestriction() (a change of the restriction on this PC
+        // alone, nobody watches it) and stores the group in a dictionary of this PC. And when a player picks "anyone" or a pawn later,
+        // nothing removes the stored group, because a field command sets the field without calling SetPawnRestriction. This postfix
+        // runs after both and changes every option of the menu:
+        //  - a Colony Groups option sends SyncBillGroup(bill, group): the command clears the restriction and stores the group on every PC.
+        //  - every other option runs as before (Multiplayer's watched field change) and then sends SyncBillGroup(bill, no group), so
+        //    the stored group is removed on every PC (the order of the two commands is the order of the clicks).
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private static void BillOptionsPostfix(Bill ___bill, ref IEnumerable<Widgets.DropdownMenuElement<Pawn>> __result)
         {
-            if (ShouldSync() && bill != null && TryEncode(group, out var groupRef))
+            if (!active || !MP.IsInMultiplayer || __result == null || ___bill == null)
+                return;
+
+            try
             {
-                SyncBillGroup(bill, groupRef);
+                var bill = ___bill;
+                var list = __result.ToList();
+                foreach (var element in list)
+                {
+                    var option = element.option;
+                    if (option?.action == null)
+                        continue;
+
+                    var original = option.action;
+                    if (ColonyGroupOfOption(original) is { } group)
+                        option.action = () => PickBillGroup(bill, group, original);
+                    else
+                        option.action = () =>
+                        {
+                            original();
+                            if (ShouldSync())
+                                SendBillGroup(bill, default);
+                        };
+                }
+
+                __result = list;
+            }
+            catch (Exception e)
+            {
+                Log.Error($"{LogPrefix}could not change the bill restriction menu, the group options stay local: {e}");
+            }
+        }
+
+        // The Colony Groups option is a lambda of HarmonyPatches_GroupBills that captured the pawn group
+        private static object ColonyGroupOfOption(Action action)
+        {
+            foreach (var d in action.GetInvocationList())
+            {
+                var declaring = d.Method.DeclaringType;
+                var inGroupBills = false;
+                for (var t = declaring; t != null; t = t.DeclaringType)
+                    if (t == tGroupBills)
+                        inGroupBills = true;
+                if (!inGroupBills || d.Target == null)
+                    continue;
+
+                foreach (var field in d.Target.GetType().GetFields(AccessTools.all))
+                    if (tPawnGroup.IsAssignableFrom(field.FieldType) && field.GetValue(d.Target) is { } group)
+                        return group;
+            }
+
+            return null;
+        }
+
+        private static void PickBillGroup(Bill bill, object group, Action original)
+        {
+            if (!ShouldSync())
+            {
+                original();
                 return;
             }
 
-            ((IDictionary) dict)[bill] = group;
+            if (!TryEncode(group, out var groupRef))
+            {
+                Dropped("the bill group: the group is not in the group lists");
+                return;
+            }
+
+            SendBillGroup(bill, groupRef);
         }
 
+        private static void SendBillGroup(Bill bill, GroupRef group)
+        {
+            try
+            {
+                SyncBillGroup(bill, group);
+            }
+            catch (Exception e)
+            {
+                Dropped("the bill group could not be sent", e);
+            }
+        }
+
+        // group.kind 0 = no group. A group also clears the pawn restriction, as the Colony Groups option does.
+        [MethodImpl(MethodImplOptions.NoInlining)]
         public static void SyncBillGroup(Bill bill, GroupRef group)
         {
-            if (!active || bill is not Bill_Production production || Decode(group) is not { } target)
+            if (!active || bill is not Bill_Production production || mBillsSelectedGroupGetter.Invoke(null, null) is not IDictionary dict)
                 return;
 
-            if (mBillsSelectedGroupGetter.Invoke(null, null) is IDictionary dict)
-                dict[production] = target;
+            if (group.kind == 0)
+            {
+                if (dict.Contains(production))
+                    dict.Remove(production);
+                return;
+            }
+
+            if (Decode(group) is not { } target)
+                return;
+
+            production.SetAnyPawnRestriction();
+            dict[production] = target;
         }
 
-        // TacticalGroups removes the selected group in a prefix of Bill.SetPawnRestriction / SetAnySlaveRestriction /
-        // SetAnyPawnRestriction. Those methods are sync methods of Multiplayer, whose check sits inside the method, after every prefix,
-        // so the prefix ran in the interface too and changed the clicking PC only. The prefix is replaced by this postfix, which skips
-        // the interface call.
+        // Colony Groups removes the selected group of a bill in a prefix of Bill.SetPawnRestriction / SetAnySlaveRestriction /
+        // SetAnyPawnRestriction. That prefix is taken off (LateSetup) and replaced by this postfix, which skips the interface call:
+        // the prefix ran in the interface too and changed the clicking PC alone. The postfix covers calls from code, not from the
+        // menu (the menu is BillOptionsPostfix).
+        [MethodImpl(MethodImplOptions.NoInlining)]
         private static void BillRestrictionPostfix(Bill __instance)
         {
             if (!active || (MP.IsInMultiplayer && MP.InInterface))
@@ -1074,22 +1456,33 @@ namespace Multiplayer.Compat
 
         // ---- group work priorities and manual priorities (path 2) -----------------------------------------------------------
 
+        [MethodImpl(MethodImplOptions.NoInlining)]
         public static void HookWorkPrioritiesClear(Dictionary<WorkTypeDef, int> dict)
         {
-            if (ShouldSync() && FindGroup(g => ReferenceEquals(fWorkPriorities.GetValue(g), dict)) is { } group && TryEncode(group, out var groupRef))
+            // a dictionary that belongs to no group is not group state: it stays local
+            if (ShouldSync() && FindGroup(g => ReferenceEquals(fWorkPriorities.GetValue(g), dict)) is { } group)
             {
-                SyncWorkPriorityClear(groupRef, "");
+                if (!TryEncode(group, out var groupRef))
+                    Dropped("clearing the group work priorities: the group is not in the group lists");
+                else
+                    SyncWorkPriorityClear(groupRef, "");
                 return;
             }
 
             dict.Clear();
         }
 
+        [MethodImpl(MethodImplOptions.NoInlining)]
         public static bool HookWorkPrioritiesRemove(Dictionary<WorkTypeDef, int> dict, WorkTypeDef def)
         {
-            if (ShouldSync() && def != null && FindGroup(g => ReferenceEquals(fWorkPriorities.GetValue(g), dict)) is { } group
-                && TryEncode(group, out var groupRef))
+            if (ShouldSync() && FindGroup(g => ReferenceEquals(fWorkPriorities.GetValue(g), dict)) is { } group)
             {
+                if (def == null || !TryEncode(group, out var groupRef))
+                {
+                    Dropped("removing a group work priority could not be sent");
+                    return false;
+                }
+
                 SyncWorkPriorityClear(groupRef, def.defName);
                 return dict.ContainsKey(def);
             }
@@ -1098,6 +1491,7 @@ namespace Multiplayer.Compat
         }
 
         // defName "" = remove every priority
+        [MethodImpl(MethodImplOptions.NoInlining)]
         public static void SyncWorkPriorityClear(GroupRef group, string defName)
         {
             if (!active || Decode(group) is not { } target || fWorkPriorities.GetValue(target) is not Dictionary<WorkTypeDef, int> dict)
@@ -1110,6 +1504,7 @@ namespace Multiplayer.Compat
         }
 
         // WorkMenu.DoManualPrioritiesCheckbox: the vanilla "manual priorities" game setting, drawn by the group work menu
+        [MethodImpl(MethodImplOptions.NoInlining)]
         private static bool ManualPrioritiesPrefix(Rect rect)
         {
             if (!ShouldSync())
@@ -1127,6 +1522,7 @@ namespace Multiplayer.Compat
             return false;
         }
 
+        [MethodImpl(MethodImplOptions.NoInlining)]
         public static void SyncManualPriorities(bool value)
         {
             if (!active || Current.Game?.playSettings == null || Current.Game.playSettings.useWorkPriorities == value)
@@ -1136,6 +1532,65 @@ namespace Multiplayer.Compat
             foreach (var pawn in PawnsFinder.AllMapsWorldAndTemporary_Alive)
                 if (pawn.Faction == Faction.OfPlayer && pawn.workSettings != null)
                     pawn.workSettings.Notify_UseWorkPrioritiesChanged();
+        }
+
+        // ---- "search for work" buttons ---------------------------------------------------------------------------------------------
+        // WorkSearchUtility.SearchForWork(WorkTypeEnum, ...) is 51 bytes, so the JIT can inline it into its callers and past Multiplayer's
+        // check. The callers (group menus) are rewritten to these hooks, which send SyncSearchForWork, one command per map.
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        public static void HookSearchForWorkDef(WorkTypeDef def, List<Pawn> pawns) => SearchForWork(def, 0, false, pawns);
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        public static void HookSearchForWorkEnum(int value, List<Pawn> pawns) => SearchForWork(null, value, true, pawns);
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private static void SearchForWork(WorkTypeDef def, int value, bool isEnum, List<Pawn> pawns)
+        {
+            if (!ShouldSync())
+            {
+                if (isEnum)
+                    CallUnwrapped(mSearchEnum, null, Enum.ToObject(workTypeEnumType, value), pawns);
+                else
+                    CallUnwrapped(mSearchDef, null, def, pawns);
+                return;
+            }
+
+            try
+            {
+                if (pawns == null || (!isEnum && def == null))
+                {
+                    Dropped("search for work has no pawns or no work type");
+                    return;
+                }
+
+                foreach (var (map, batch) in SplitByMap(pawns))
+                    SyncSearchForWork(batch, def?.defName ?? "", value, isEnum, map);
+            }
+            catch (Exception e)
+            {
+                Dropped("search for work could not be sent", e);
+            }
+        }
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        public static void SyncSearchForWork(List<Pawn> pawns, string defName, int value, bool isEnum, Map map)
+        {
+            if (!active || pawns == null)
+                return;
+
+            var list = pawns.Where(p => p != null).ToList();
+            try
+            {
+                if (isEnum)
+                    mSearchEnum.Invoke(null, [Enum.ToObject(workTypeEnumType, value), list]);
+                else if (DefDatabase<WorkTypeDef>.GetNamedSilentFail(defName) is { } def)
+                    mSearchDef.Invoke(null, [def, list]);
+            }
+            catch (TargetInvocationException e)
+            {
+                Log.Error($"{LogPrefix}search for work failed: {e.InnerException}");
+            }
         }
 
         // ---- the per pawn group cache (paths 1 and 2 read it in the simulation) ----------------------------------------------------
@@ -1211,8 +1666,10 @@ namespace Multiplayer.Compat
                     cache[apparel] = apparel.TryGetComp<CompColorable>();
         }
 
+        [MethodImpl(MethodImplOptions.NoInlining)]
         private static void EndCurrentJobPrefix(Pawn ___pawn) => NormalizePawn(___pawn);
 
+        [MethodImpl(MethodImplOptions.NoInlining)]
         private static void RecolorJobPrefix(Pawn pawn)
         {
             if (!active || !MP.IsInMultiplayer)
@@ -1228,6 +1685,7 @@ namespace Multiplayer.Compat
             }
         }
 
+        [MethodImpl(MethodImplOptions.NoInlining)]
         private static void DyeHairJobPrefix(Pawn pawn) => NormalizePawn(pawn);
 
         // ---- install: look up every member first ---------------------------------------------------------------------------------------
@@ -1291,6 +1749,9 @@ namespace Multiplayer.Compat
             fColonistBar = Fld(tUtils, "TacticalColonistBar");
             mMarkColonistsDirty = Method(tBar, "MarkColonistsDirty");
             mAddGroup = Method(tTacticalGroups, "AddGroup", typeof(List<Pawn>));
+            mUpdateData = Method(tGroup, "UpdateData");
+            mSearchDef = Method(workSearchType, "SearchForWork", typeof(WorkTypeDef), typeof(List<Pawn>));
+            mSearchEnum = Method(workSearchType, "SearchForWork", workTypeEnumType, typeof(List<Pawn>));
             mColorOptionGetColor = Method(tColorOption, "GetColor", typeof(Pawn));
             mBillsSelectedGroupGetter = AccessTools.PropertyGetter(tGroupBills, "BillsSelectedGroup")
                                         ?? throw new MissingMethodException(tGroupBills.FullName, "get_BillsSelectedGroup");
@@ -1387,21 +1848,24 @@ namespace Multiplayer.Compat
             return ci => IsCall(ci, setter);
         }
 
-        private static Func<CodeInstruction, bool> SetOrAddMatcher() => ci => IsCallOpcode(ci) && ci.operand is MethodInfo m && m.Name == "SetOrAdd"
-            && m.IsGenericMethod && m.GetParameters().Length == 3 && m.GetGenericArguments().SequenceEqual(new[] { typeof(Bill_Production), tPawnGroup });
+        // a call of one known method (the call sites of a tiny method that must not be patched itself)
+        private static Func<CodeInstruction, bool> CallOf(MethodInfo method) => ci => IsCall(ci, method);
+
+        private static readonly string[] SearchCallers = ["CaravanMenu", "OrderMenu", "WorkMenu", "WorkSearchUtility"];
 
         private static void RegisterSyncMethods()
         {
             foreach (var name in new[]
                      {
                          nameof(SyncGroupCall), nameof(SyncAddGroup), nameof(SyncMoveGroup), nameof(SyncSetField), nameof(SyncSetColor),
-                         nameof(SyncRemoveColor), nameof(SyncWorkPriorityClear), nameof(SyncManualPriorities)
+                         nameof(SyncRemoveColor), nameof(SyncWorkPriorityClear), nameof(SyncManualPriorities), nameof(SyncSearchForWork)
                      })
                 MP.RegisterSyncMethod(typeof(ColonyGroups), name);
 
             MP.RegisterSyncMethod(typeof(ColonyGroups), nameof(SyncHostilityResponse)).CancelIfAnyArgNull();
             MP.RegisterSyncMethod(typeof(ColonyGroups), nameof(SyncMedCare)).CancelIfAnyArgNull();
             MP.RegisterSyncMethod(typeof(ColonyGroups), nameof(SyncBillGroup)).CancelIfAnyArgNull();
+            MP.RegisterSyncMethod(typeof(ColonyGroups), nameof(SyncMovePawn)).CancelIfAnyArgNull();
         }
 
         // ---- late setup: Colony Groups makes its own Harmony patches after this module is built -----------------------------------------
@@ -1413,6 +1877,7 @@ namespace Multiplayer.Compat
         private static MethodInfo tgBillPrefix;
         private static readonly List<MethodBase> billRestrictionMethods = [];
 
+        [MethodImpl(MethodImplOptions.NoInlining)]
         private static void LateSetup()
         {
             if (!active || tgBillPrefix == null)
@@ -1463,7 +1928,6 @@ namespace Multiplayer.Compat
                 foreach (var target in targets)
                     PatchMethod(target, callEntries[callIds[MethodKey(target)]].isStatic ? nameof(GroupCallPrefixStatic) : nameof(GroupCallPrefix),
                         priority: Priority.First);
-                PatchMethod(mAddGroup, nameof(AddGroupPrefix), priority: Priority.First);
             }
             catch (Exception e)
             {
@@ -1511,14 +1975,14 @@ namespace Multiplayer.Compat
             Feature("manual priorities", () =>
                 PatchMethod(Method(FindType("WorkMenu"), "DoManualPrioritiesCheckbox", typeof(Rect)), nameof(ManualPrioritiesPrefix), priority: Priority.First));
 
-            Feature("work search", () =>
-            {
-                MP.RegisterSyncMethod(Method(workSearchType, "SearchForWork", typeof(WorkTypeDef), typeof(List<Pawn>))).CancelIfAnyArgNull();
-                MP.RegisterSyncMethod(Method(workSearchType, "SearchForWork", workTypeEnumType, typeof(List<Pawn>))).CancelIfAnyArgNull();
-            });
+            Feature("group sort", () => PatchMethod(Method(tGroup, "Sort"), nameof(SortPrefix), priority: Priority.First));
 
             Feature("bill restriction", () =>
             {
+                var optionsMethod = AccessTools.Method(typeof(Dialog_BillConfig), "GeneratePawnRestrictionOptions")
+                                    ?? throw new MissingMethodException("Dialog_BillConfig", "GeneratePawnRestrictionOptions");
+                PatchMethod(optionsMethod, postfix: nameof(BillOptionsPostfix), priority: Priority.Last);
+
                 var tgPrefix = AccessTools.DeclaredMethod(tGroupBills, "SetPawnRestriction", [typeof(Bill)])
                                ?? throw new MissingMethodException(tGroupBills.FullName, "SetPawnRestriction");
                 var methods = new List<MethodBase>();
@@ -1560,7 +2024,13 @@ namespace Multiplayer.Compat
             AddRewrite("medical care", ["MedicalCareUtilityGroup"], StoreMatcher(settings, "medCare"), nameof(HookMedCare));
             AddRewrite("group colour", ["Dialog_ColorPicker"], GenericCall(typeof(Dictionary<,>), "set_Item", 2, tBodyColor, tColorOption),
                 nameof(HookBodyColorSet));
-            AddRewrite("bill group", ["HarmonyPatches_GroupBills"], SetOrAddMatcher(), nameof(HookBillGroupSet));
+            AddRewrite("add group", ["TacticalColonistBar"], CallOf(mAddGroup), nameof(HookAddGroup));
+            AddRewrite("init sort", ["SortMenu"], CallOf(mInitSort), nameof(HookInitSort));
+            AddRewrite("reset group policies", ["Dialog_ResetGroup"], CallOf(mResetPolicies), nameof(HookResetGroupPolicies));
+            AddRewrite("search for work (def)", SearchCallers, CallOf(mSearchDef), nameof(HookSearchForWorkDef));
+            AddRewrite("search for work (enum)", SearchCallers, CallOf(mSearchEnum), nameof(HookSearchForWorkEnum));
+            AddRewrite("pawn list remove", ["ColonistGroup"], GenericCall(typeof(List<>), "RemoveAt", 1, typeof(Pawn)), nameof(HookPawnListRemoveAt));
+            AddRewrite("pawn list insert", ["ColonistGroup"], GenericCall(typeof(List<>), "Insert", 2, typeof(Pawn)), nameof(HookPawnListInsert));
             AddRewrite("work priorities clear", ["WorkMenu", "WidgetsWorkGroup"],
                 GenericCall(typeof(Dictionary<,>), "Clear", 0, typeof(WorkTypeDef), typeof(int)), nameof(HookWorkPrioritiesClear));
             AddRewrite("work priorities remove", ["WorkMenu", "WidgetsWorkGroup"],
