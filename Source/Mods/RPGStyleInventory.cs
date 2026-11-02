@@ -69,8 +69,21 @@ namespace Multiplayer.Compat
         /// "Forget hold" entry also calls on the clicking PC only. Both are called from simulation code as well
         /// (<c>HoldTrackerForget</c> from CE's drop-unused-inventory job giver); MP only intercepts a call made from interface code,
         /// so those calls are unchanged. <c>InterfaceDropHaul</c> is 271 bytes of IL, so the JIT will not inline it into the menu
-        /// lambda and skip the patch. Not covered here: the other entries of the same menu that write simulation state in the
-        /// clicking PC's interface code (forced apparel toggles, "put away", "equip").
+        /// lambda and skip the patch.
+        /// Three more entries of the same menu wrote simulation state on the clicking PC only. CE's own tab syncs "equip" and "put away"
+        /// (<c>SyncedTrySwitchToWeapon</c>, <c>SyncedTryTransferEquipmentToContainer</c>); the forced-apparel pair is what Revamped's own
+        /// <c>PopupMenu</c> registration above covers, but CEPatches replaces that menu:
+        /// <list type="bullet">
+        /// <item>"Equip" (<c>DropDownThingMenu</c> lambda 6 -> <c>CEAccess.trySwitchToWeapon</c> -> <c>CompInventory.TrySwitchToWeapon(eq, true)</c>):
+        /// the real method has explicit arguments, so it is registered itself (CE's wrapper calls it too, from inside its own synced
+        /// call, where MP does not intercept). Simulation callers (equip job, take-and-equip job giver, verbs) are unchanged.</item>
+        /// <item>"Put away" (lambda 5): its only real call takes a <c>ThingOwner</c>, which MP cannot send, so the lambda is synced as a
+        /// delegate with just its <c>SelPawnForGear</c> field (the same effect as CE's <c>SyncedTryTransferEquipmentToContainer(Pawn)</c>).</item>
+        /// <item>Forced apparel clear / set (lambdas 1 and 2, closure <c>&lt;&gt;c__DisplayClass35_1</c>): synced as delegates with the
+        /// apparel and the pawn behind <c>CS$&lt;&gt;8__locals1</c>. The other fields (<c>tab</c> is an <c>object</c>) are left out.</item>
+        /// </list>
+        /// Lambda ordinals are the compiler's names in Revamped's CEPatches.dll (sha256 043b55a3...); a rebuilt dll that renumbers them
+        /// makes the lookup throw, which is logged as a warning and leaves that one entry unsynced.
         /// </remarks>
         private static void RegisterCombatExtendedMenu()
         {
@@ -92,6 +105,40 @@ namespace Multiplayer.Compat
                 Log.Warning("[MPCompat - RPG Style Inventory] CombatExtended.Utility_HoldTracker.HoldTrackerForget not found, 'Forget hold' stays unsynced");
             else
                 MP.RegisterSyncMethod(forget).CancelIfAnyArgNull();
+
+            TryRegister("'Equip'", () =>
+            {
+                var compInventory = AccessTools.TypeByName("CombatExtended.CompInventory")
+                                    ?? throw new MissingMemberException("CombatExtended.CompInventory");
+                var switchTo = AccessTools.DeclaredMethod(compInventory, "TrySwitchToWeapon", [typeof(ThingWithComps), typeof(bool)])
+                               ?? throw new MissingMethodException("CombatExtended.CompInventory", "TrySwitchToWeapon(ThingWithComps, bool)");
+                MP.RegisterSyncMethod(switchTo).CancelIfAnyArgNull();
+            });
+
+            TryRegister("'Put away'", () =>
+            {
+                foreach (var del in MpCompat.RegisterLambdaDelegate(cePatches, "DropDownThingMenu", ["SelPawnForGear"], 5))
+                    del.CancelIfAnyFieldNull();
+            });
+
+            TryRegister("forced apparel clear / set", () =>
+            {
+                foreach (var del in MpCompat.RegisterLambdaDelegate(cePatches, "DropDownThingMenu", ["CS$<>8__locals1/SelPawnForGear", "app"], 1, 2))
+                    del.CancelIfAnyFieldNull();
+            });
+        }
+
+        // One failed lookup (a rebuilt CEPatches.dll that renumbers a lambda, a renamed CE method) must not stop the registrations around it
+        private static void TryRegister(string what, Action register)
+        {
+            try
+            {
+                register();
+            }
+            catch (Exception e)
+            {
+                Log.Warning($"[MPCompat - RPG Style Inventory] {what} entry of the Combat Extended gear tab menu stays unsynced: {e.Message}");
+            }
         }
 
         private static void SyncITab(SyncWorker sync, ref ITab_Pawn_Gear gearITab)
