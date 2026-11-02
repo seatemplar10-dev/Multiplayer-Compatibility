@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using HarmonyLib;
 using Multiplayer.API;
@@ -41,6 +42,29 @@ namespace Multiplayer.Compat
     ///    no relation is added inside our Entry scope, and CE's faction window and ideo button are refused.
     /// 7. CE's Delete of a page pawn keeps its list part and skips Pawn.Destroy and
     ///    WorldPawns.RemoveAndDiscardPawnViaGC, which would change the game on this PC only.
+    /// Row 193c (the three gaps 193b left open, 2 Nov):
+    /// 8. CE's pawn picker (DialogChoosePawn: other pawn of a thought, of a hediff such as pregnancy or a psychic bond, or a
+    ///    relation partner) lists every pawn of the game, real pawns included (its first entry is CE's "humanoid" list with no
+    ///    faction filter, PawnxTool.GetPawnList), and hands the choice straight to AddThought / AddHediff2. A real pawn stored
+    ///    in a page pawn is a cross-PC reference the page pawn's SendPawn bytes may not resolve, and removing such a hediff
+    ///    later runs vanilla code on the real pawn (Hediff_PsychicBond.PostRemoved -> Gene_PsychicBonding.RemoveBond). Another
+    ///    page pawn is no better (its local id resolves on no PC, the same reason 193b adds no relation). So the picker is
+    ///    refused while the page is open, like CE's faction window.
+    /// 9. CE callbacks that vanilla windows call run under Playing, outside the DoWindowContents wrap of 5: CE's xenotype editor
+    ///    DialogXenoType (it inherits GeneCreationDialogBase.DoWindowContents, so 5 never saw it) and every Dialog_MessageBox
+    ///    confirmation whose action is a CE closure (xenotype save, apparel, title renounce). Both are wrapped now, the same
+    ///    way (the confirmation also on its accept and cancel keys). Entry does not help with one write: GeneTool.SetPawnXenotype(CustomXenotype) adds the xenotype to
+    ///    Current.Game.customXenotypeDatabase, a list in the save that PawnGenerator.AdjustXenotypeForFactionlessPawn reads
+    ///    (Count, Rand.Range, TryRandomElement) - one PC with an extra entry draws other random numbers than the rest. For a
+    ///    page pawn that call runs against a throwaway database; the pawn carries its own xenotype name, icon and genes. The swap
+    ///    covers only the open page: MP's synced CreateFaction (PrepForMapGen) still adds the page's ForcedCustomXenotype to the
+    ///    real list on the editing PC only. That gap is MP's (vanilla's own page pick has it too), not fixed here.
+    /// 10. Checked, no patch: the JIT cannot inline a patched CE method into a CE caller, because CharacterEditor.dll is a
+    ///    Debug build (DebuggableAttribute with DisableOptimizations: the runtime compiles its methods unoptimized, and the
+    ///    DynamicMethod Harmony builds for a patched CE caller was measured to follow that too). Measured on the lab's
+    ///    Waylith CLR 10.0.13 with a Debug / Release pair of test assemblies carrying one tiny and one 57 to 77 byte method (the
+    ///    Release pair skipped the patch when the caller was compiled before it, or was patched first; the Debug pair
+    ///    never did). The constructor logs a warning if a CE update ever ships an optimized build.
     /// MP safety: a loaded pawn is per-PC input that stays local, in the pre-game page data, until the page's Next
     /// sends it to every PC inside the synced FactionCreator.SendPawn command (the pawn is written as bytes).
     /// </remarks>
@@ -59,6 +83,11 @@ namespace Multiplayer.Compat
         private static System.Reflection.MethodInfo apiGetter, selectedPawnGetter, selectedPawnSetter, listNameSetter;
         private static System.Reflection.FieldInfo colonistsLabel;
         private static Pawn deletingPagePawn;
+
+        // Row 193c: the non-virtual CE methods patched here (for the optimized-build warning), and the delegate fields of
+        // each window type (to tell a vanilla window with a CE callback from any other).
+        private static readonly List<System.Reflection.MethodBase> patchedCeMethods = new List<System.Reflection.MethodBase>();
+        private static readonly Dictionary<Type, System.Reflection.FieldInfo[]> delegateFieldsByType = new Dictionary<Type, System.Reflection.FieldInfo[]>();
 
         public CharacterEditor(ModContentPack mod)
         {
@@ -108,7 +137,10 @@ namespace Multiplayer.Compat
             MpCompat.harmony.Patch(slotFaction, prefix: new HarmonyMethod(self, nameof(PreSlotFaction)));
             MpCompat.harmony.Patch(passToWorld, prefix: new HarmonyMethod(self, nameof(PrePassToWorld)));
             MpCompat.harmony.Patch(capsuleContents, prefix: new HarmonyMethod(self, nameof(PreCapsuleContents)));
+            patchedCeMethods.AddRange(new[] { loadPawn, addOrCreate, passToWorld, setRelations, slotFaction });
             PatchPagePawnEdits(editorType, self);
+            PatchVanillaWindowPaths(self);
+            WarnIfCeIsOptimized();
         }
 
         // Row 193b: every CE edit of a page pawn runs like the page's own UI (ProgramState.Entry), not only the load.
@@ -128,6 +160,8 @@ namespace Multiplayer.Compat
                 return;
             }
 
+            patchedCeMethods.Add(changeList);
+            patchedCeMethods.Add(delete);
             var restore = new HarmonyMethod(self, nameof(RestoreProgramState));
             // Only CE's own DoWindowContents (review 193b: not Window.InnerWindowOnGUI, whose click / accept / cancel
             // handling also closes and notifies windows of other mods).
@@ -171,6 +205,149 @@ namespace Multiplayer.Compat
                 prefix: new HarmonyMethod(self, nameof(PreDiscardViaGC)));
         }
 
+        // Row 193c: the pawn picker, the vanilla windows that call CE code, and the xenotype database.
+        private static void PatchVanillaWindowPaths(Type self)
+        {
+            if (apiGetter == null || selectedPawnGetter == null)
+                return; // PatchPagePawnEdits logged the missing member
+
+            var choosePawn = AccessTools.DeclaredMethod("CharacterEditor.DialogChoosePawn:DoWindowContents");
+            if (choosePawn != null)
+                MpCompat.harmony.Patch(choosePawn, prefix: new HarmonyMethod(self, nameof(PreRefusedPawnPicker)));
+            else
+                Log.Warning($"{LogPrefix}DialogChoosePawn not found: CE's pawn picker can still pick a real pawn on the Settle page (FIXES row 193c)");
+
+            // DialogXenoType inherits GeneCreationDialogBase.DoWindowContents, so the wrap of every CE-declared
+            // DoWindowContents never saw it. Dialog_MessageBox runs its button, accept and cancel actions in these three.
+            var enter = new HarmonyMethod(self, nameof(PreVanillaWindowOfCe));
+            var restore = new HarmonyMethod(self, nameof(RestoreProgramState));
+            var rectArg = new[] { typeof(UnityEngine.Rect) };
+            var vanillaWindowMethods = new[]
+            {
+                AccessTools.DeclaredMethod(typeof(GeneCreationDialogBase), nameof(Window.DoWindowContents), rectArg),
+                AccessTools.DeclaredMethod(typeof(Dialog_MessageBox), nameof(Window.DoWindowContents), rectArg),
+                AccessTools.DeclaredMethod(typeof(Dialog_MessageBox), nameof(Window.OnAcceptKeyPressed)),
+                AccessTools.DeclaredMethod(typeof(Dialog_MessageBox), nameof(Window.OnCancelKeyPressed)),
+            };
+            foreach (var method in vanillaWindowMethods)
+            {
+                if (method == null)
+                {
+                    Log.Warning($"{LogPrefix}a vanilla window method was not found: CE's xenotype editor and confirmations stay outside the Settle page's Entry scope (FIXES row 193c)");
+                    continue;
+                }
+                MpCompat.harmony.Patch(method, prefix: enter, finalizer: restore);
+            }
+
+            var setXenotype = AccessTools.DeclaredMethod("CharacterEditor.GeneTool:SetPawnXenotype", new[] { typeof(Pawn), typeof(CustomXenotype), typeof(bool) });
+            if (setXenotype != null)
+            {
+                MpCompat.harmony.Patch(setXenotype, prefix: new HarmonyMethod(self, nameof(PreSetPawnXenotypeCustom)),
+                    finalizer: new HarmonyMethod(self, nameof(RestoreXenotypeDatabase)));
+                patchedCeMethods.Add(setXenotype);
+            }
+            else
+                Log.Warning($"{LogPrefix}GeneTool.SetPawnXenotype(CustomXenotype) not found: a custom xenotype set on a page pawn still adds to the real game's database (FIXES row 193c)");
+        }
+
+        // Row 193c: no pawn picker while the page is open. It lists every pawn of the game, and its choice goes straight into
+        // a thought or hediff (other pawn), or a relation (partner, parents): a real pawn, or another page pawn, referenced
+        // from a page pawn.
+        private static bool PreRefusedPawnPicker(Window __instance)
+        {
+            if (!gamePlusSetByUs)
+                return true;
+            __instance.Close(false);
+            RejectOnPage("choosing another pawn (thought, hediff, relation) is not available on the multifaction Settle page (Multiplayer).");
+            return false;
+        }
+
+        // Row 193c: a window that is not in CE's DoWindowContents wrap (an inherited vanilla one, or a vanilla confirmation
+        // box) but runs CE code gets the same Entry scope as a CE window, while the page is open and CE's selected pawn
+        // is a page pawn or none.
+        private static void PreVanillaWindowOfCe(Window __instance, ref int __state)
+        {
+            __state = 0;
+            if (gamePlusSetByUs && OwnedByCharacterEditor(__instance) && SelectedIsPageLocalOrNone())
+                TryEnterEntryState(ref __state);
+        }
+
+        // A window of a CE type, or a vanilla window with a delegate (Dialog_MessageBox: button and key actions) that is a
+        // CE method or a CE closure.
+        private static bool OwnedByCharacterEditor(Window window)
+        {
+            var type = window.GetType();
+            if (type.Assembly == ceAssembly)
+                return true;
+            if (!delegateFieldsByType.TryGetValue(type, out var fields))
+            {
+                var found = new List<System.Reflection.FieldInfo>();
+                const System.Reflection.BindingFlags flags = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public
+                    | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.DeclaredOnly;
+                for (var t = type; t != null && t != typeof(Window); t = t.BaseType)
+                    found.AddRange(t.GetFields(flags).Where(f => typeof(Delegate).IsAssignableFrom(f.FieldType)));
+                fields = found.ToArray();
+                delegateFieldsByType[type] = fields;
+            }
+            foreach (var field in fields)
+            {
+                if (field.GetValue(window) is Delegate action && action.Method.DeclaringType?.Assembly == ceAssembly)
+                    return true;
+            }
+            return false;
+        }
+
+        // Row 193c: GeneTool.SetPawnXenotype(CustomXenotype) adds the xenotype to Current.Game.customXenotypeDatabase. That list
+        // is in the save and PawnGenerator.AdjustXenotypeForFactionlessPawn reads it (Count, Rand.Range, TryRandomElement), so
+        // an entry on one PC draws other random numbers than on the rest. For a page pawn the call gets a throwaway database.
+        // The pawn keeps its xenotype name, icon and genes. This covers only the time the page is open: CE also sets the page's
+        // generation request ForcedCustomXenotype on the editing PC, and MP's synced CreateFaction runs PrepForMapGen, which adds
+        // that xenotype to the real list on that PC only (an MP gap, vanilla's own page pick leaks the same way).
+        private static void PreSetPawnXenotypeCustom(Pawn __0, ref CustomXenotypeDatabase __state)
+        {
+            __state = null;
+            if (!gamePlusSetByUs || Current.Game == null || !IsPageLocal(__0))
+                return;
+            __state = Current.Game.customXenotypeDatabase;
+            Current.Game.customXenotypeDatabase = new CustomXenotypeDatabase();
+        }
+
+        private static void RestoreXenotypeDatabase(CustomXenotypeDatabase __state)
+        {
+            if (__state != null && Current.Game != null)
+                Current.Game.customXenotypeDatabase = __state;
+        }
+
+        // Row 193c, item 10: the tripwire for an optimized CharacterEditor.dll. A patch on a small CE method can be skipped when
+        // the JIT inlines the method into a CE caller; the Debug build CE ships today is never inlined into. 128: the CoreCLR
+        // default inliner's IL limit (larger methods can still be inlined at hot call sites, so this list is a lower bound).
+        private const int InlineWarnIlBytes = 128;
+
+        private static void WarnIfCeIsOptimized()
+        {
+            try
+            {
+                var debuggable = ceAssembly.GetCustomAttributes(typeof(System.Diagnostics.DebuggableAttribute), false)
+                    .OfType<System.Diagnostics.DebuggableAttribute>().FirstOrDefault();
+                if (debuggable != null && debuggable.IsJITOptimizerDisabled)
+                    return;
+                var small = new List<string>();
+                foreach (var method in patchedCeMethods)
+                {
+                    var size = method.GetMethodBody()?.GetILAsByteArray()?.Length ?? -1;
+                    if (size >= 0 && size <= InlineWarnIlBytes)
+                        small.Add($"{method.DeclaringType?.Name}.{method.Name} ({size} bytes of IL)");
+                }
+                if (small.Count > 0)
+                    Log.Warning($"{LogPrefix}CharacterEditor.dll is no longer a Debug build, so the JIT may inline these patched methods into CE callers "
+                        + $"and skip their patches (FIXES row 193c): {string.Join(", ", small)}. Patch the callers instead.");
+            }
+            catch (Exception e)
+            {
+                Log.Warning($"{LogPrefix}could not check whether CharacterEditor.dll is an optimized build: {e.Message}");
+            }
+        }
+
         private static bool PageOpen => MP.IsInMultiplayer && Find.WindowStack != null && Find.WindowStack.IsOpen(multifactionPageType);
 
         private static void PrePageDoWindowContents(Page_ConfigureStartingPawns __instance)
@@ -206,7 +383,8 @@ namespace Multiplayer.Compat
             // CE's casket on the map, and CE's item / capsule windows offer map actions.
             try
             {
-                foreach (var window in Find.WindowStack.Windows.Where(w => w.GetType().Assembly == ceAssembly).ToList())
+                // Also CE's vanilla confirmation boxes: one left open would run its CE action later, outside the Entry scope
+                foreach (var window in Find.WindowStack.Windows.Where(OwnedByCharacterEditor).ToList())
                     window.Close(false);
             }
             catch (Exception e)
@@ -216,24 +394,26 @@ namespace Multiplayer.Compat
             ClearGamePlus();
         }
 
-        // __state: the ProgramState to restore, or -1 when this call did not switch.
+        // __state: the ProgramState to restore plus 1, or 0 when this call did not switch. 0 must mean "no switch": Harmony
+        // sets __state to 0 before the prefixes run, so when another owner's earlier prefix throws, ours never runs but our
+        // finalizer still does (a plain ProgramState 0 is Entry, and restoring it would leave the game in Entry on one PC).
         private static void PreEnterEntryState(ref int __state) => TryEnterEntryState(ref __state);
 
         private static void TryEnterEntryState(ref int __state)
         {
-            __state = -1;
+            __state = 0;
             if (Current.ProgramState != ProgramState.Playing || MP.IsExecutingSyncCommand || !PageOpen)
                 return;
-            __state = (int)Current.ProgramState;
+            __state = (int)Current.ProgramState + 1;
             Current.programStateInt = ProgramState.Entry;
             entryDepth++;
         }
 
         private static void RestoreProgramState(int __state)
         {
-            if (__state < 0)
+            if (__state <= 0)
                 return;
-            Current.programStateInt = (ProgramState)__state;
+            Current.programStateInt = (ProgramState)(__state - 1);
             entryDepth--;
         }
 
@@ -279,7 +459,7 @@ namespace Multiplayer.Compat
         // PC only, instead of sending a command whose target no other PC can find. A real pawn selected: old path.
         private static void PreCeWindowContents(ref int __state)
         {
-            __state = -1;
+            __state = 0;
             if (gamePlusSetByUs && SelectedIsPageLocalOrNone())
                 TryEnterEntryState(ref __state);
         }
@@ -314,7 +494,7 @@ namespace Multiplayer.Compat
 
         private static void PreCeFloatMenuChosen(FloatMenuOption __instance, ref int __state)
         {
-            __state = -1;
+            __state = 0;
             if (gamePlusSetByUs && __instance.action?.Method.DeclaringType?.Assembly == ceAssembly && SelectedIsPageLocalOrNone())
                 TryEnterEntryState(ref __state);
         }
