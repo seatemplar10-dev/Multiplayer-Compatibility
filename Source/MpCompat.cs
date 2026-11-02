@@ -28,6 +28,8 @@ namespace Multiplayer.Compat
             ForeignFactionMessages.Patch(harmony);
             // FIXES row 180: the dev-mode-only ConfigErrors side effects on every PC (DeterministicConfigErrors.cs)
             LongEventHandler.ExecuteWhenFinished(DeterministicConfigErrors.Run);
+            // FIXES row 262 root cause: races that get a training tracker but have no trainability (RaceTrainabilityFix.cs)
+            LongEventHandler.ExecuteWhenFinished(RaceTrainabilityFix.Run);
             // FIXES row 262: NullReferenceException in Pawn_TrainingTracker.CanAssignToTrain during every reload (TrainingTrackerLoadGuard.cs)
             try
             {
