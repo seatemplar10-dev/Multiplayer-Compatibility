@@ -59,6 +59,17 @@ namespace Multiplayer.Compat
     /// Re-review follow-up: (g) F3 precision edits are held locally while this machine's SetOriginalDrawData is in flight; (h) F6a the
     /// ordering Job is dropped in a finalizer; (i) F10 DecorationBaseTab.Setup (simulation) drops the comps' stat caches; (j) F8 the
     /// per-command log is off unless built with MPCOMPAT_RIMDARK_LOG.
+    /// 2 Nov (FIXES row 369, Opus review of the 1.2.117 port; these changes act on the 1.2.117 path only, the 1.2.32 path is untouched):
+    /// (a) a Close of a dialog that is NOT the one the pawn's waiting job holds (a confirm box that outlived the job) only removes the
+    /// window: its real Close would run OnClose / Reset of the tabs on this machine alone. (b) Windows the dialog opens from its own draw
+    /// (colour picker, float menus, confirm boxes) are removed together with it, so a click in one of them cannot write comp state on one
+    /// machine after the job ended. Only direct children are tracked; GuardPrefix still lets other UI-time callers (pawn generation, other
+    /// mods) run locally, so it cannot just drop every call that comes without a dialog. (c) Genes40k 1.1.102's SetChapterIcon /
+    /// SetRankIcon / SetSlotColour / SwapShoulderIcons are small and not virtual, so the tab's call sites are redirected to NoInlining
+    /// wrappers (as for TryAccept). (d) The Close command carries the job's loadID and acts only on that job. (e) SetDecorationColours is
+    /// required, an unknown Genes40k shoulder comp fails the module, and an accept without a pawn is ignored.
+    /// Hosted MP only: on a standalone server only the issuer reloads at a join point, Core40k does not save the station dialog field, so
+    /// the waiting toil can diverge.
     /// Status: [unverified] compiled only, not run in game.
     /// </remarks>
     [MpCompatFor("phonicmas.rimdark.frameworkcore")]
@@ -94,6 +105,10 @@ namespace Multiplayer.Compat
         private static readonly Dictionary<MethodBase, int> redirectHits = new();
         // pawns (thingIDNumber) whose Close command is on its way: Accept / Close clicked again meanwhile are ignored
         private static readonly HashSet<int> closing = new();
+        // Windows a customization dialog opened from its own draw (colour picker, float menus, confirm boxes) -> that dialog; they are removed
+        // when the dialog leaves the window stack. drawingDialogs = the dialogs whose DoWindowContents is running now (a stack).
+        private static readonly List<(Window child, Window owner)> dialogChildren = new();
+        private static readonly List<Window> drawingDialogs = new();
 
         // registration bookkeeping
         private static readonly HashSet<MethodBase> registered = new();
@@ -429,6 +444,17 @@ namespace Multiplayer.Compat
                 Try("patch " + dialog.Name + ".Close", () =>
                     Patch(dialogCloseMethods[dialog], prefix: nameof(PreDialogClose), prefixPriority: Priority.Normal));
 
+            // the windows a dialog opens from its draw are removed with it (the job's finish action removes the dialog without Close)
+            foreach (var dialog in dialogTypes)
+                Try("patch " + dialog.Name + ".DoWindowContents (child windows)", () =>
+                    Patch(AccessTools.DeclaredMethod(dialog, "DoWindowContents"), prefix: nameof(PreDialogDraw), finalizer: nameof(FinalizeDialogDraw),
+                        prefixPriority: Priority.Normal));
+            Try("patch WindowStack.Add (child windows)", () =>
+                Patch(AccessTools.DeclaredMethod(typeof(WindowStack), nameof(WindowStack.Add), new[] { typeof(Window) }), postfix: nameof(PostWindowStackAddTrack)));
+            Try("patch WindowStack.TryRemove (child windows)", () =>
+                Patch(AccessTools.DeclaredMethod(typeof(WindowStack), nameof(WindowStack.TryRemove), new[] { typeof(Window), typeof(bool) }),
+                    postfix: nameof(PostWindowStackTryRemove)));
+
             Try("redirect the accept calls of DecorationWorkUtility.TryAccept", () =>
             {
                 foreach (var caller in acceptCallers)
@@ -478,6 +504,21 @@ namespace Multiplayer.Compat
             }
         }
 
+        // Same for an instance method (the redirect wrappers of the Genes40k shoulder tab).
+        private static void InvokeOn(MethodInfo method, object target, params object[] args)
+        {
+            if (target == null)
+                throw new NullReferenceException();
+            try
+            {
+                method.Invoke(target, args);
+            }
+            catch (TargetInvocationException e) when (e.InnerException != null)
+            {
+                ExceptionDispatchInfo.Capture(e.InnerException).Throw();
+            }
+        }
+
         private static bool CustomizeDialogOpenForPawn(Pawn pawn)
         {
             var windows = Find.WindowStack?.Windows;
@@ -513,11 +554,22 @@ namespace Multiplayer.Compat
         // Interface time with this pawn's customization window open = the Accept click: send it. Singleplayer, a simulation call or the module
         // off keeps the original, local behaviour. A Close command already on its way: the click is a double click, ignored. Interface time
         // WITHOUT the window (the job ended while the confirm window was up; the only callers are the two dialogs' Accept) is ignored too:
-        // running the write here would change this machine only.
+        // running the write here would change this machine only. So is an accept with no pawn at all (no command can be tied to a pawn).
         private static AcceptMode ModeForAccept(Pawn pawn)
         {
-            if (!active || !MP.IsInMultiplayer || !MP.InInterface || pawn == null)
+            if (!active || !MP.IsInMultiplayer || !MP.InInterface)
                 return AcceptMode.Local;
+            if (pawn == null)
+            {
+                if (!warnedStaleAccept)
+                {
+                    warnedStaleAccept = true;
+                    Log.Warning($"{LogPrefix}an accept came in with no pawn to tie it to (the comps left their pawn): ignored, nothing was changed.");
+                }
+
+                return AcceptMode.Ignore;
+            }
+
             if (!CustomizeDialogOpenForPawn(pawn))
             {
                 if (!warnedStaleAccept)
@@ -627,21 +679,27 @@ namespace Multiplayer.Compat
             => InvokeOriginal(settleFromMapMethod, pawn);
 
         // Prefix of both dialogs' Close(bool). Interface time, and this window is the dialog the pawn's waiting job holds: queue ONE command
-        // that closes it on every machine and skip the local close. Any other close (a window left over from an ended job, the command
-        // itself running the original, singleplayer) runs as before.
+        // that closes it on every machine and skip the local close. Interface time and ANY OTHER dialog (a window left over from an ended
+        // job, e.g. the confirm box of Accept outlived the job and its confirm now closes the dialog): the real Close would run OnClose /
+        // Reset of every tab, i.e. comp.Reset(), on this machine only. Only remove the window, nothing else. The command itself running the
+        // original, and singleplayer, run as before.
         private static bool PreDialogClose(Window __instance, bool doCloseSound)
         {
             if (!active || !MP.IsInMultiplayer || !MP.InInterface || !TryGetDialogPawn(__instance, out var pawn) || pawn == null)
                 return true;
             if (!ReferenceEquals(CurrentStationDialog(pawn), __instance))
-                return true;
+            {
+                Find.WindowStack.TryRemove(__instance, doCloseSound);
+                return false;
+            }
+
             if (!closing.Add(pawn.thingIDNumber))
                 return false;
 
             FlushAllDrawData();
             try
             {
-                SyncCloseDialog(pawn, doCloseSound);
+                SyncCloseDialog(pawn, doCloseSound, pawn.CurJob?.loadID ?? -1);
                 return false;
             }
             catch (Exception e)
@@ -654,11 +712,19 @@ namespace Multiplayer.Compat
 
         // Runs on every machine: the real Close() of the dialog object the pawn's job holds. It sets Closed, runs OnClose / Reset of the tabs
         // and removes the window where there is one. The job's own waiting toil then moves on at the same tick everywhere.
+        // jobId = loadID of the pawn's job when the close was clicked: a command that arrives after that job ended (and maybe after
+        // another customize job began) must not close the new job's dialog.
         [MethodImpl(MethodImplOptions.NoInlining)]
-        private static void SyncCloseDialog(Pawn pawn, bool doCloseSound)
+        private static void SyncCloseDialog(Pawn pawn, bool doCloseSound, int jobId)
         {
             if (pawn != null)
                 closing.Remove(pawn.thingIDNumber);
+            if (pawn?.CurJob == null || pawn.CurJob.loadID != jobId)
+            {
+                Log.Warning($"{LogPrefix}a close for {pawn?.LabelShort ?? "null"} (job {jobId}) came in after that job ended (now {pawn?.CurJob?.loadID.ToString() ?? "none"}): ignored.");
+                return;
+            }
+
             var dialog = CurrentStationDialog(pawn);
             if (dialog == null)
                 return;
@@ -676,6 +742,70 @@ namespace Multiplayer.Compat
 
                     return;
                 }
+        }
+
+        // The job's finish action removes the dialog with WindowStack.TryRemove, not Close, so a colour picker or a float menu the dialog had
+        // opened stays on screen, and the click that finishes it writes comp state (ColoringBaseTab: multiColor.DrawColor = newColour) on this
+        // machine only. Windows added while a dialog is drawing (= opened by one of its tabs) are therefore remembered with that dialog and
+        // removed when it leaves the window stack, by whatever path. GuardPrefix cannot do this by dropping every call that comes without a
+        // dialog: pawn generation (Core40kUtils.SetupCustomizationForThing / ForPawn, Genes40kUtils.ApplyChapterColours, the starting chapter
+        // scenario part, CompChapterColor.InitialColors) and other mods call the same setters at interface time on purpose, locally.
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private static void PreDialogDraw(Window __instance, ref bool __state)
+        {
+            __state = false;
+            if (!active || !MP.IsInMultiplayer || !MP.InInterface)
+                return;
+            __state = true;
+            drawingDialogs.Add(__instance);
+        }
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private static void FinalizeDialogDraw(bool __state)
+        {
+            if (__state && drawingDialogs.Count > 0)
+                drawingDialogs.RemoveAt(drawingDialogs.Count - 1);
+        }
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private static void PostWindowStackAddTrack(Window window)
+        {
+            if (drawingDialogs.Count == 0 || window == null || !active || !MP.IsInMultiplayer || !MP.InInterface || TryGetDialogPawn(window, out _))
+                return;
+            try
+            {
+                var windows = Find.WindowStack?.Windows;
+                if (windows == null || !windows.Contains(window))
+                    return;
+                dialogChildren.RemoveAll(c => !windows.Contains(c.child));
+                dialogChildren.Add((window, drawingDialogs[drawingDialogs.Count - 1]));
+            }
+            catch (Exception e)
+            {
+                Log.Warning($"{LogPrefix}could not note a window opened by the customization window: {e.GetType().Name}: {e.Message}");
+            }
+        }
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private static void PostWindowStackTryRemove(Window window, bool __result)
+        {
+            if (!__result || dialogChildren.Count == 0 || window == null || !active || !MP.IsInMultiplayer || !TryGetDialogPawn(window, out _))
+                return;
+            try
+            {
+                var children = dialogChildren.Where(c => c.owner == window).Select(c => c.child).ToList();
+                dialogChildren.RemoveAll(c => c.owner == window);
+                int removed = 0;
+                foreach (var child in children)
+                    if (Find.WindowStack.TryRemove(child, false))
+                        removed++;
+                if (removed > 0)
+                    Log.Message($"{LogPrefix}{window.GetType().Name} left the window stack: {removed} window(s) it had opened were closed with it.");
+            }
+            catch (Exception e)
+            {
+                Log.Warning($"{LogPrefix}could not close the windows opened by the customization window: {e.GetType().Name}: {e.Message}");
+            }
         }
 
         // After each of the four commands, on every machine.
@@ -854,8 +984,13 @@ namespace Multiplayer.Compat
             PlanSync("SetDecorationColourOne", Declared(deco, "SetDecorationColourOne", decorationDefType, colour), true);
             PlanSync("SetDecorationColourTwo", Declared(deco, "SetDecorationColourTwo", decorationDefType, colour), true);
             PlanSync("SetDecorationColourThree", Declared(deco, "SetDecorationColourThree", decorationDefType, colour), true);
-            // 1.2.117 only: the preset menu sets the three colours in one call
-            PlanSyncOptional("SetDecorationColours", Declared(deco, "SetDecorationColours", decorationDefType, colour, colour, colour), false);
+            // 1.2.117 only: the preset menu sets the three colours in one call. Required there (a build that waits for the window and has no
+            // such member is not the one this module was written for); 1.2.32 does not have it and does not need it.
+            var setColours = Declared(deco, "SetDecorationColours", decorationDefType, colour, colour, colour);
+            if (waitFlow)
+                PlanSync("SetDecorationColours", setColours, false);
+            else
+                PlanSyncOptional("SetDecorationColours", setColours, false);
             PlanSync("SetDecorationMask", Declared(deco, "SetDecorationMask", decorationDefType, maskDefType), false);
             PlanSync("SetDecorationToParentColors", Declared(deco, "SetDecorationToParentColors", decorationDefType), false);
             PlanSync("SetDefaultColors", Declared(deco, "SetDefaultColors", decorationDefType, typeof(bool)), true);
@@ -1305,8 +1440,10 @@ namespace Multiplayer.Compat
         //   edit the decorations of the item's CompDecorative. Synced the same way (a prefix lets the call out only while the window is open).
         //   The comp's per-machine BeginEditing / EndEditing flag is set by the tab's Setup / OnClose, which run inside the simulation on every
         //   machine (the dialog is built there, and Close is a synced command, see the wait-flow region), so it needs no sync of its own.
-        // - Neither shape found: the Genes40k tab part stays OFF with a warning (its edits are then local, as without the module); the rest of
-        //   the module keeps working.
+        //   With the 1.2.117 flow the tab's call sites of the four methods are also redirected to NoInlining wrappers (they are small enough
+        //   to be inlined past the patch); a call site that is not found fails the module.
+        // - Neither shape found: with the 1.2.32 flow the Genes40k tab part stays OFF with a warning (its edits are then local, as without the
+        //   module); the rest of the module keeps working. With the 1.2.117 flow it fails the module (the all-or-nothing rule).
         private static void RegisterShoulderIconTab()
         {
             var comp = AccessTools.TypeByName("Genes40k.CompChapterColorWithShoulderDecoration");
@@ -1340,18 +1477,147 @@ namespace Multiplayer.Compat
             }
             else if (newMethods.Count > 0 && newMethods.All(m => m.method != null))
             {
+                // Core40k 1.2.117 flow only: the four methods are small and not virtual, so the JIT may inline them into the tab's draw code,
+                // past the sync patch. Look up the call sites first (throws when one is missing), register, then redirect them.
+                if (waitFlow)
+                    PlanShoulderRedirects(newMethods);
                 foreach (var (name, method) in newMethods)
                     PlanSync("CompChapterColorWithShoulderDecoration." + name, method, false);
                 RegisterPlans();
+                if (waitFlow)
+                    PatchShoulderRedirects();
             }
             else
             {
-                Log.Warning($"{LogPrefix}the Genes40k shoulder-icon comp has neither the setters nor the methods this module knows " +
-                            $"(missing: {string.Join(", ", oldNames.Zip(oldSetters, (n, s) => s == null ? n : null).Where(n => n != null))} / " +
-                            $"{string.Join(", ", newMethods.Where(m => m.method == null).Select(m => m.name))}). " +
-                            "Its shoulder-icon tab is NOT synced: edits made there stay local to one machine.");
+                var unknown = $"the Genes40k shoulder-icon comp has neither the setters nor the methods this module knows " +
+                              $"(missing: {string.Join(", ", oldNames.Zip(oldSetters, (n, s) => s == null ? n : null).Where(n => n != null))} / " +
+                              $"{string.Join(", ", newMethods.Where(m => m.method == null).Select(m => m.name))}). ";
+                // The all-or-nothing rule: with the 1.2.117 flow an unsynced tab would write on one machine only, so the module stays off.
+                if (waitFlow)
+                    throw new MissingMemberException(unknown + "Its shoulder-icon tab would not be synced.");
+                Log.Warning($"{LogPrefix}{unknown}Its shoulder-icon tab is NOT synced: edits made there stay local to one machine.");
             }
         }
+
+        // The Genes40k 1.1.102 methods the shoulder tab calls (Core40k 1.2.117 flow), redirected at their call sites in the tab (its draw
+        // methods and the lambdas of those) to the wrappers below. Same technique as the TryAccept calls: a call site that is changed cannot
+        // be inlined past the sync patch, and the wrapper reaches the original through reflection.
+        private static readonly Dictionary<string, MethodInfo> shoulderMethods = new();
+        private static readonly List<(MethodInfo callee, MethodInfo redirect)> shoulderRedirects = new();
+        private static readonly List<MethodBase> shoulderCallers = new();
+        private static readonly Dictionary<MethodInfo, int> shoulderSites = new();
+        private static readonly Dictionary<MethodInfo, int> shoulderHits = new();
+
+        private static (MethodInfo callee, MethodInfo redirect) ShoulderRedirectFor(MethodBase operand)
+        {
+            if (operand == null)
+                return default;
+            foreach (var pair in shoulderRedirects)
+                if (operand == pair.callee || (operand.MetadataToken == pair.callee.MetadataToken && operand.Module == pair.callee.Module))
+                    return pair;
+            return default;
+        }
+
+        // Lookup only (nothing patched yet). A call site that is not found is a failure of the feature (the caller's Try counts it).
+        private static void PlanShoulderRedirects(List<(string name, MethodInfo method)> methods)
+        {
+            shoulderMethods.Clear();
+            shoulderRedirects.Clear();
+            shoulderCallers.Clear();
+            shoulderSites.Clear();
+            shoulderHits.Clear();
+            foreach (var (name, method) in methods)
+            {
+                shoulderMethods[name] = method;
+                shoulderRedirects.Add((method, AccessTools.DeclaredMethod(typeof(RimDark40kCustomization), "Redirect" + name)
+                                               ?? throw new MissingMethodException(typeof(RimDark40kCustomization).FullName, "Redirect" + name)));
+            }
+
+            var tabType = TypeNamed("Genes40k.ShoulderPadIconTab");
+            foreach (var type in new[] { tabType }.Concat(tabType.GetNestedTypes(AccessTools.all)))
+                foreach (var method in AccessTools.GetDeclaredMethods(type))
+                {
+                    if (method.IsAbstract || method.GetMethodBody() == null)
+                        continue;
+                    try
+                    {
+                        foreach (var instruction in PatchProcessor.GetOriginalInstructions(method))
+                        {
+                            if (instruction.opcode != OpCodes.Call && instruction.opcode != OpCodes.Callvirt)
+                                continue;
+                            var callee = ShoulderRedirectFor(instruction.operand as MethodBase).callee;
+                            if (callee == null)
+                                continue;
+                            if (shoulderCallers.All(m => m != method))
+                                shoulderCallers.Add(method);
+                            shoulderSites[callee] = (shoulderSites.TryGetValue(callee, out var sites) ? sites : 0) + 1;
+                        }
+                    }
+                    catch (Exception e)
+                    {
+                        Log.Warning($"{LogPrefix}could not read the code of {type.Name}.{method.Name}: {e.GetType().Name}: {e.Message}");
+                    }
+                }
+
+            var missing = shoulderRedirects.Where(r => !shoulderSites.ContainsKey(r.callee)).Select(r => r.callee.Name).ToList();
+            if (missing.Count > 0)
+            {
+                Log.Error($"{LogPrefix}no call site of {string.Join(", ", missing)} found in {tabType.Name} or its lambdas.");
+                throw new MissingMethodException($"no call site of {string.Join(", ", missing)} found in {tabType.Name} or its lambdas");
+            }
+        }
+
+        private static void PatchShoulderRedirects()
+        {
+            foreach (var caller in shoulderCallers)
+                Patch(caller, transpiler: nameof(RedirectShoulderCalls));
+            foreach (var (callee, _) in shoulderRedirects)
+                if (!shoulderHits.TryGetValue(callee, out var hits) || hits < shoulderSites[callee])
+                {
+                    Log.Error($"{LogPrefix}the transpilers changed {hits} of {shoulderSites[callee]} call(s) of {callee.Name}.");
+                    throw new MissingMethodException($"the transpilers did not change every call of {callee.Name}");
+                }
+
+            Log.Message($"{LogPrefix}Genes40k shoulder tab: {shoulderSites.Values.Sum()} call site(s) in {shoulderCallers.Count} method(s) redirected to NoInlining wrappers.");
+        }
+
+        // Harmony transpiler on the shoulder tab's draw methods and their lambdas: same stack, only the callee differs (the object receiver
+        // and the arguments are passed on as they are).
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private static IEnumerable<CodeInstruction> RedirectShoulderCalls(IEnumerable<CodeInstruction> instructions)
+        {
+            foreach (var instruction in instructions)
+            {
+                if ((instruction.opcode == OpCodes.Call || instruction.opcode == OpCodes.Callvirt) && instruction.operand is MethodBase operand)
+                {
+                    var (original, redirect) = ShoulderRedirectFor(operand);
+                    if (redirect != null)
+                    {
+                        shoulderHits[original] = (shoulderHits.TryGetValue(original, out var hits) ? hits : 0) + 1;
+                        instruction.opcode = OpCodes.Call;
+                        instruction.operand = redirect;
+                    }
+                }
+
+                yield return instruction;
+            }
+        }
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private static void RedirectSetChapterIcon(object comp, object def)
+            => InvokeOn(shoulderMethods["SetChapterIcon"], comp, def);
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private static void RedirectSetRankIcon(object comp, object def)
+            => InvokeOn(shoulderMethods["SetRankIcon"], comp, def);
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private static void RedirectSetSlotColour(object comp, bool chapterSlot, Color colour)
+            => InvokeOn(shoulderMethods["SetSlotColour"], comp, chapterSlot, colour);
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private static void RedirectSwapShoulderIcons(object comp)
+            => InvokeOn(shoulderMethods["SwapShoulderIcons"], comp);
 
         // ShoulderPadIconTab.DrawTab sets Left/RightShoulderIconColour = white EVERY FRAME while the chosen icon takes no colour. With the
         // window open: skip the call when the saved colour already is that value, or when the same value went out in the last second and
