@@ -16,6 +16,8 @@ namespace Multiplayer.Compat
         // Lambdas 1-26 = shrink / offset / altitude steps, 27 = "untuck when used" (writes the mod settings; synced so both
         // PCs flip together, since those settings also feed path cost). Lambda 0 (show/hide the adjust gizmos) is a local
         // UI flag. Copy fills a static local clipboard and stays local; paste sends the copied values.
+        // The mirror button passes method groups (not lambdas), so the six mirror / toggle methods are registered by name;
+        // MirrorOffsets is also called from sim code (gravship placement), which still runs it directly.
         // Both PCs must still run the same Tucked Furniture mod settings (zero-path-cost offsets, keep path cost in use).
         private static Type compType;
         private static FieldInfo copiedSettingsField;
@@ -36,6 +38,12 @@ namespace Multiplayer.Compat
             MpCompat.RegisterLambdaMethod(compType, "CompGetGizmosExtra", lambdas);
             MP.RegisterSyncMethod(compType, "ResetToDefault");
             MP.RegisterSyncMethod(compType, "ResetSavedRotationOffsets");
+            MP.RegisterSyncMethod(compType, "MirrorEastWestOffset");
+            MP.RegisterSyncMethod(compType, "MirrorSouthNorthOffset");
+            MP.RegisterSyncMethod(compType, "MirrorOffsets");
+            MP.RegisterSyncMethod(compType, "ToggleGraphicMirrors");
+            MP.RegisterSyncMethod(compType, "ToggleGraphicEastWest");
+            MP.RegisterSyncMethod(compType, "ToggleGraphicSouthNorth");
 
             MP.RegisterSyncMethod(typeof(TuckedFurniture), nameof(SyncedPaste));
             MpCompat.harmony.Patch(pasteMethod, prefix: new HarmonyMethod(typeof(TuckedFurniture), nameof(PrePasteSettings)));
