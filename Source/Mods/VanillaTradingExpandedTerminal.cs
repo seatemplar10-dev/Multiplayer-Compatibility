@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using System.Reflection.Emit;
+using System.Runtime.CompilerServices;
 using HarmonyLib;
 using Multiplayer.API;
 using RimWorld;
@@ -20,8 +21,8 @@ namespace Multiplayer.Compat
     /// from that field on every PC, so the other PCs built it with a null faction and threw, and the saved terminal differed
     /// between PCs. A transpiler turns the field write into a synced call, so every PC sets the field in the command queue
     /// before the job order that follows it (both are map commands of the same map, executed in order).
-    /// Known and left: the terminal has one field, so two players who pick different banks in the same tick window share the
-    /// later choice (the same on every PC). The bank window itself opens on every PC (UI only). Opening a window needs no sync,
+    /// Known and left: the terminal has one field, so the last bank picked before the first pawn reaches the terminal wins on every PC,
+    /// even when that pick's own job fails (the terminal is reserved). Single player behaves the same way. The bank window itself opens on every PC (UI only). Opening a window needs no sync,
     /// and what its buttons change is synced by <c>VanillaTradingExpanded</c> (deposit, withdraw, loans).
     /// </remarks>
     [MpCompatFor("VanillaExpanded.VanillaTradingExpanded")]
@@ -74,6 +75,9 @@ namespace Multiplayer.Compat
             }
         }
 
+        // MP patches this method when it is registered. NoInlining keeps the JIT from copying the body into the lambda first (MP's own
+        // MarkNoInlining does nothing on CoreCLR).
+        [MethodImpl(MethodImplOptions.NoInlining)]
         private static void SyncedSetBankFaction(Thing terminal, Faction faction) => bankFactionFieldRef(terminal) = faction;
     }
 }
