@@ -74,6 +74,22 @@ public class DefensivePositions
             return;
         }
 
+        // FIXES row 219: the mod's own layer still runs later (HugsLib StaticInitialize), throws on its version check before
+        // it registers anything and logs "Failed to apply Multiplayer API compatibility layer: ... MP API version mismatch"
+        // as an ERROR at every start. This module replaces that layer, so skip it.
+        if (compatType != null)
+        {
+            try
+            {
+                MpCompat.harmony.Patch(AccessTools.DeclaredMethod(compatType, "Initialize"),
+                    prefix: new HarmonyMethod(typeof(DefensivePositions), nameof(SkipModOwnLayer)));
+            }
+            catch (Exception e)
+            {
+                Log.Warning($"MPCompat :: Could not skip Defensive Positions' own Multiplayer layer, its version mismatch error stays: {e}");
+            }
+        }
+
         var managerType = AccessTools.TypeByName("DefensivePositions.DefensivePositionsManager");
         managerInstanceGetter = MethodInvoker.GetHandler(AccessTools.DeclaredPropertyGetter(managerType, "Instance"));
         managerGetHandlerForPawnMethod = MethodInvoker.GetHandler(AccessTools.DeclaredMethod(managerType, "GetHandlerForPawn"));
@@ -107,6 +123,20 @@ public class DefensivePositions
         catch (Exception e)
         {
             Log.Warning($"MPCompat :: Could not read Defensive Positions' own Multiplayer layer, not registering: {e}");
+        }
+
+        return false;
+    }
+
+    private static bool loggedSkip;
+
+    // Prefix on Compat_MultiplayerAPI.Initialize: never run the mod's always-failing layer (FIXES row 219)
+    private static bool SkipModOwnLayer()
+    {
+        if (!loggedSkip)
+        {
+            loggedSkip = true;
+            Log.Message("MPCompat :: Defensive Positions' own Multiplayer layer skipped (its MP API check always fails, this module replaces it; FIXES row 219)");
         }
 
         return false;
