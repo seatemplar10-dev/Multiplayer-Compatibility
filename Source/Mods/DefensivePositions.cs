@@ -39,6 +39,20 @@ public class DefensivePositions
 
     public DefensivePositions(ModContentPack mod)
     {
+        var savedPositionsType = AccessTools.TypeByName("DefensivePositions.PawnSavedPositions");
+        pawnSavedPositionsOwnerGetter = MethodInvoker.GetHandler(AccessTools.PropertyGetter(savedPositionsType, "Owner"));
+
+        // FIXES row 219: in multifaction MP saves every join point (autosave, a player joining) as the first player
+        // faction (SaveLoad.SaveAndReload sets Faction.OfPlayer before SaveGameData). DP keeps a pawn's saved
+        // positions only if `owner.Faction == Faction.OfPlayer` (PawnSavedPositions.ShouldBeSaved, read by
+        // WorldData.ExposeData), so every other player faction lost its saved positions at each join point, on every
+        // PC alike. In MP, keep them for any player faction. Done whoever registers the sync methods below.
+        var shouldBeSaved = AccessTools.DeclaredPropertyGetter(savedPositionsType, "ShouldBeSaved");
+        if (shouldBeSaved != null)
+            MpCompat.harmony.Patch(shouldBeSaved, postfix: new HarmonyMethod(typeof(DefensivePositions), nameof(PostShouldBeSaved)));
+        else
+            Log.Warning("MPCompat :: Defensive Positions has no PawnSavedPositions.ShouldBeSaved, other player factions' positions may not be saved");
+
         var compatType = AccessTools.TypeByName("DefensivePositions.Compat_MultiplayerAPI");
         if (compatType != null && !ModOwnLayerAlwaysFails(AccessTools.DeclaredMethod(compatType, "Initialize")))
         {
@@ -49,9 +63,6 @@ public class DefensivePositions
         var managerType = AccessTools.TypeByName("DefensivePositions.DefensivePositionsManager");
         managerInstanceGetter = MethodInvoker.GetHandler(AccessTools.DeclaredPropertyGetter(managerType, "Instance"));
         managerGetHandlerForPawnMethod = MethodInvoker.GetHandler(AccessTools.DeclaredMethod(managerType, "GetHandlerForPawn"));
-
-        pawnSavedPositionsOwnerGetter = MethodInvoker.GetHandler(
-            AccessTools.PropertyGetter(AccessTools.TypeByName("DefensivePositions.PawnSavedPositions"), "Owner"));
 
         var handlerType = AccessTools.TypeByName("DefensivePositions.PawnSavedPositionHandler");
 
@@ -85,6 +96,16 @@ public class DefensivePositions
         }
 
         return false;
+    }
+
+    // Same test as DP's own (owner set, not destroyed), but any player faction instead of only Faction.OfPlayer.
+    // Single player is unchanged. Without multifaction there is one player faction, so the result is unchanged too.
+    private static void PostShouldBeSaved(object __instance, ref bool __result)
+    {
+        if (__result || !MP.IsInMultiplayer)
+            return;
+
+        __result = pawnSavedPositionsOwnerGetter(__instance) is Pawn { Destroyed: false, Faction.IsPlayer: true };
     }
 
     private static object Manager => managerInstanceGetter(null);
