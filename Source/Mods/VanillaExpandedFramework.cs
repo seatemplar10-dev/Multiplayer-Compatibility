@@ -1087,27 +1087,73 @@ namespace Multiplayer.Compat
 
             var type = AccessTools.TypeByName("VEF.Buildings.Dialog_ChooseGraphic");
             var thingToChangeField = AccessTools.DeclaredField(type, "thingToChange");
+
+            // Buffer the instructions, so that we can hand them back untouched if anything we need is missing
+            var instructions = instr.ToList();
+
+            // The "i" (int) loop variable is captured by a lambda, so the compiler moved it into a display class
+            // (named "<>c__DisplayClassN_0", the N changes between versions) and keeps an instance of it in a local.
+            // The index of that local changes whenever VEF adds, removes or reorders locals in DoWindowContents
+            // (this patch used to hard-code 5, which is a string local in the current VEF, while the display class is local 3),
+            // so it can't be hard-coded.
+            // Instead find it by its type: the local that is loaded right before reading the "i" (int) field
+            // of the display class has to be a local of that display class.
             FieldInfo indexField = null;
-
-            foreach (var ci in instr)
+            CodeInstruction displayClassLocalLoad = null;
+            var indexFieldPosition = -1;
+            for (var pos = 1; pos < instructions.Count; pos++)
             {
-                if (indexField == null && (ci.opcode == OpCodes.Ldfld || ci.opcode == OpCodes.Stfld) && ci.operand is FieldInfo { Name: "i" } field)
+                if (instructions[pos].opcode == OpCodes.Ldfld && instructions[pos].operand is FieldInfo { Name: "i" } field &&
+                    field.FieldType == typeof(int) && IsLocalLoad(instructions[pos - 1].opcode))
+                {
                     indexField = field;
+                    displayClassLocalLoad = instructions[pos - 1];
+                    indexFieldPosition = pos;
+                    break;
+                }
+            }
 
-                if (ci.opcode == OpCodes.Call && ci.operand is MethodInfo method && method == targetMethod && indexField != null)
+            // Only the call after the index was read is the one we want
+            var callPositions = new List<int>();
+            for (var pos = Math.Max(indexFieldPosition, 0); pos < instructions.Count; pos++)
+            {
+                if (instructions[pos].opcode == OpCodes.Call && instructions[pos].operand is MethodInfo method && method == targetMethod)
+                    callPositions.Add(pos);
+            }
+
+            // If we're missing something, leave the original code as is (the dialog still works, but the change won't be synced)
+            if (targetMethod == null || replacementMethod == null || thingToChangeField == null || displayClassLocalLoad == null || callPositions.Count == 0)
+            {
+                Log.Warning("MPCompat :: Could not patch VEF.Buildings.Dialog_ChooseGraphic:DoWindowContents, choosing a graphic from the dialog will not be synced. " +
+                    $"Found: ButtonInvisible method {targetMethod != null}, replacement method {replacementMethod != null}, thingToChange field {thingToChangeField != null}, " +
+                    $"display class local {displayClassLocalLoad != null}, ButtonInvisible calls {callPositions.Count}");
+                return instructions;
+            }
+
+            var result = new List<CodeInstruction>(instructions.Count + callPositions.Count * 5);
+            for (var pos = 0; pos < instructions.Count; pos++)
+            {
+                var ci = instructions[pos];
+                if (callPositions.Contains(pos))
                 {
                     ci.operand = replacementMethod;
 
-                    yield return new CodeInstruction(OpCodes.Ldarg_0);
-                    yield return new CodeInstruction(OpCodes.Ldfld, thingToChangeField); // Load in the "thingToChange" (Thing) field
-                    yield return new CodeInstruction(OpCodes.Ldloc_S, 5); // Load in the local of type "<>c__DisplayClass9_0"
-                    yield return new CodeInstruction(OpCodes.Ldfld, indexField); // Load in the "i" (int) from the nested type
-                    yield return new CodeInstruction(OpCodes.Ldarg_0); // Load in the instance (Dialog_ChooseGraphic)
+                    result.Add(new CodeInstruction(OpCodes.Ldarg_0));
+                    result.Add(new CodeInstruction(OpCodes.Ldfld, thingToChangeField)); // Load in the "thingToChange" (Thing) field
+                    result.Add(new CodeInstruction(displayClassLocalLoad.opcode, displayClassLocalLoad.operand)); // Load in the local of the display class type (found above, by the type declaring "i")
+                    result.Add(new CodeInstruction(OpCodes.Ldfld, indexField)); // Load in the "i" (int) from the nested type
+                    result.Add(new CodeInstruction(OpCodes.Ldarg_0)); // Load in the instance (Dialog_ChooseGraphic)
                 }
 
-                yield return ci;
+                result.Add(ci);
             }
+
+            return result;
         }
+
+        private static bool IsLocalLoad(OpCode opcode) =>
+            opcode == OpCodes.Ldloc || opcode == OpCodes.Ldloc_S ||
+            opcode == OpCodes.Ldloc_0 || opcode == OpCodes.Ldloc_1 || opcode == OpCodes.Ldloc_2 || opcode == OpCodes.Ldloc_3;
 
         private static void SyncCompGlower(SyncWorker sync, ref CompGlower glower)
         {
