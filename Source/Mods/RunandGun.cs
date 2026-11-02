@@ -8,6 +8,7 @@ namespace Multiplayer.Compat
     /// <summary>RunAndGun by roolo</summary>
     /// <see href="https://github.com/rheirman/RunAndGun"/>
     /// <see href="https://steamcommunity.com/sharedfiles/filedetails/?id=1204108550"/>
+    // The Continued mod (MemeGoddess.RunAndGun, 3562365100) is covered by RunandGunContinued.cs (FIXES row 395); do not add its id here, both modules would load.
     [MpCompatFor("roolo.RunAndGun")]
     class RunandGun
     {
