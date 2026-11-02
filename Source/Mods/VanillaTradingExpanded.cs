@@ -2,6 +2,7 @@ using HarmonyLib;
 using Multiplayer.API;
 using RimWorld;
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Reflection;
 using Verse;
@@ -31,10 +32,17 @@ namespace Multiplayer.Compat
     /// <c>Bank.WithdrawSilver</c> on the clicking PC only, so the silver on the map (destroyed or dropped by pod) and the saved
     /// <c>depositAmount</c> split. Both methods are synced now; the <c>Bank</c> target travels as its faction (<c>parentFaction</c>,
     /// looked up again with <c>Utils.GetBank</c>). The silver stacks the deposit takes from travel as a <c>List&lt;Thing&gt;</c>.
-    /// Not covered here (Opus review of row 393, 2 Nov 2026): (1) opening the bank window: <c>TradingTerminal.GetBankOptions</c>'s float menu
-    /// lambda sets the static <c>currentVisitableFactionBank</c> on the clicking PC only, then orders the job; the other PCs' toil builds
-    /// <c>Window_Bank</c> with a null faction and throws; (2) bank loans (<c>TakeLoan</c>, <c>TryRepayFromBalance</c>); (3) contracts,
-    /// stock market, transactions. Each bank is shared by all player factions (one saved balance).
+    /// FIXES row 393c (follow-up, 2 Nov 2026): the loan buttons of <c>Window_Bank</c> ("Take loan", "Repay from balance") called
+    /// <c>Bank.TakeLoan</c> / <c>Bank.TryRepayFromBalance</c> on the clicking PC only (a new loan, the silver pod, the
+    /// <c>loanLastTimeTaken</c> entry, a lower balance). Both are synced now. <c>LoanOption</c> and <c>Loan</c> have no id, so each
+    /// travels as the faction of its bank plus its index in <c>bank.bankExtension.loanOptions</c> / <c>bank.loans</c>; a loan is checked
+    /// against its saved amounts and found again by them if the list moved between click and command. Both methods are also called by
+    /// the bank itself in the tick (<c>Bank.Tick</c>, <c>DepositAmount</c> setter); MP only syncs a call made from the UI, so the tick
+    /// path is unchanged. At execution a <c>TakeLoan</c> for an option that already has a loan is dropped (a second player's click),
+    /// as is one by a negotiator without a map.
+    /// The terminal's bank choice (<c>Building_TradingTerminal.currentVisitableFactionBank</c>, row 393b) is in
+    /// <c>VanillaTradingExpandedTerminal</c>. Not covered here: contracts, stock market, transactions. Each bank is shared by all
+    /// player factions (one saved balance).
     /// </remarks>
     [MpCompatFor("VanillaExpanded.VanillaTradingExpanded")]
     public class VanillaTradingExpanded
@@ -47,6 +55,17 @@ namespace Multiplayer.Compat
         private static AccessTools.FieldRef<object, Faction> bankParentFactionField;
         private static Type bankWindowType;
         private static AccessTools.FieldRef<object, List<Thing>> bankWindowCachedThingsField;
+
+        // Row 393c
+        private static FieldInfo managerInstanceField;
+        private static MethodInfo managerBanksGetter;
+        private static FieldInfo bankLoansField;
+        private static FieldInfo bankExtensionField;
+        private static FieldInfo extensionLoanOptionsField;
+        private static FieldInfo loanOptionIdField;
+        private static FieldInfo loanRepayDateField;
+        private static FieldInfo loanInitialRepayAmountField;
+        private static MethodInfo loanIsTakenMethod;
 
         public VanillaTradingExpanded(ModContentPack mod)
         {
@@ -112,6 +131,187 @@ namespace Multiplayer.Compat
             // A negotiator that left the map (dead, in a caravan) has no map: the original lowers the balance first, then throws on
             // negotiator.Map. Skip the call instead. Same answer on every PC, runs on the sending PC too.
             MpCompat.harmony.Patch(withdraw, prefix: new HarmonyMethod(typeof(VanillaTradingExpanded), nameof(PreWithdrawSilver)));
+
+            // Row 393c. Own try/catch: a changed loan class must not undo the deposit and withdraw syncs above.
+            try
+            {
+                RegisterLoanSyncs(bankType);
+            }
+            catch (Exception e)
+            {
+                Log.Error($"MPCompat :: Vanilla Trading Expanded: the bank loan sync (take, repay from balance) is not fully registered: {e.InnerException ?? e}");
+            }
+        }
+
+        private static void RegisterLoanSyncs(Type bankType)
+        {
+            var loanType = AccessTools.TypeByName("VanillaTradingExpanded.Loan")
+                ?? throw new Exception("type VanillaTradingExpanded.Loan not found");
+            var loanOptionType = AccessTools.TypeByName("VanillaTradingExpanded.LoanOption")
+                ?? throw new Exception("type VanillaTradingExpanded.LoanOption not found");
+            var extensionType = AccessTools.TypeByName("VanillaTradingExpanded.BankExtension")
+                ?? throw new Exception("type VanillaTradingExpanded.BankExtension not found");
+            var managerType = AccessTools.TypeByName("VanillaTradingExpanded.TradingManager")
+                ?? throw new Exception("type VanillaTradingExpanded.TradingManager not found");
+
+            managerInstanceField = AccessTools.DeclaredField(managerType, "Instance")
+                ?? throw new Exception("field TradingManager.Instance not found");
+            managerBanksGetter = AccessTools.DeclaredPropertyGetter(managerType, "Banks")
+                ?? throw new Exception("property TradingManager.Banks not found");
+            bankLoansField = AccessTools.DeclaredField(bankType, "loans")
+                ?? throw new Exception("field Bank.loans not found");
+            bankExtensionField = AccessTools.DeclaredField(bankType, "bankExtension")
+                ?? throw new Exception("field Bank.bankExtension not found");
+            extensionLoanOptionsField = AccessTools.DeclaredField(extensionType, "loanOptions")
+                ?? throw new Exception("field BankExtension.loanOptions not found");
+            loanOptionIdField = AccessTools.DeclaredField(loanType, "loanOptionId")
+                ?? throw new Exception("field Loan.loanOptionId not found");
+            loanRepayDateField = AccessTools.DeclaredField(loanType, "repayDate")
+                ?? throw new Exception("field Loan.repayDate not found");
+            loanInitialRepayAmountField = AccessTools.DeclaredField(loanType, "initialRepayAmount")
+                ?? throw new Exception("field Loan.initialRepayAmount not found");
+            loanIsTakenMethod = AccessTools.DeclaredMethod(bankType, "LoanIsTaken")
+                ?? throw new Exception("method Bank.LoanIsTaken not found");
+            var takeLoan = AccessTools.DeclaredMethod(bankType, "TakeLoan", new[] { typeof(Pawn), typeof(int), typeof(int), typeof(int), loanOptionType })
+                ?? throw new Exception("method Bank.TakeLoan(Pawn, int, int, int, LoanOption) not found");
+            var repay = AccessTools.DeclaredMethod(bankType, "TryRepayFromBalance", new[] { loanType })
+                ?? throw new Exception("method Bank.TryRepayFromBalance(Loan) not found");
+
+            MP.RegisterSyncWorker<object>(SyncLoanOption, loanOptionType);
+            MP.RegisterSyncWorker<object>(SyncLoan, loanType);
+            MP.RegisterSyncMethod(takeLoan).CancelIfAnyArgNull();
+            MP.RegisterSyncMethod(repay).CancelIfAnyArgNull();
+            MpCompat.harmony.Patch(takeLoan, prefix: new HarmonyMethod(typeof(VanillaTradingExpanded), nameof(PreTakeLoan)));
+        }
+
+        // The sending PC also runs this (MP syncs with a transpiler, so a prefix runs before the sync check): only the map test
+        // applies there. A loan for an option that is already taken is dropped at execution only, in the command's map time.
+        private static bool PreTakeLoan(object __instance, Pawn negotiator, object loanOption)
+            => negotiator?.Map != null
+            && !(MP.IsInMultiplayer && MP.IsExecutingSyncCommand && (bool)loanIsTakenMethod.Invoke(__instance, new[] { loanOption, null }));
+
+        private static IEnumerable<object> AllBanks()
+        {
+            var manager = managerInstanceField.GetValue(null);
+            if (manager == null)
+                yield break;
+            foreach (var bank in (IEnumerable)managerBanksGetter.Invoke(manager, null))
+                yield return bank;
+        }
+
+        private static IList LoanOptionsOf(object bank)
+        {
+            var extension = bank == null ? null : bankExtensionField.GetValue(bank);
+            return extension == null ? null : extensionLoanOptionsField.GetValue(extension) as IList;
+        }
+
+        private static IList LoansOf(object bank) => bank == null ? null : bankLoansField.GetValue(bank) as IList;
+
+        private static object BankOf(Faction faction) => faction == null ? null : getBankMethod.Invoke(null, new object[] { faction });
+
+        // A LoanOption is one entry of its bank's bankExtension.loanOptions: sent as that bank's faction and the index.
+        private static void SyncLoanOption(SyncWorker sync, ref object loanOption)
+        {
+            if (sync.isWriting)
+            {
+                Faction faction = null;
+                var index = -1;
+                if (loanOption != null)
+                {
+                    foreach (var bank in AllBanks())
+                    {
+                        index = LoanOptionsOf(bank)?.IndexOf(loanOption) ?? -1;
+                        if (index >= 0)
+                        {
+                            faction = bankParentFactionField(bank);
+                            break;
+                        }
+                    }
+                }
+
+                sync.Write(index >= 0);
+                if (index >= 0)
+                {
+                    sync.Write<Faction>(faction);
+                    sync.Write(index);
+                }
+            }
+            else
+            {
+                loanOption = null;
+                if (!sync.Read<bool>())
+                    return;
+                var options = LoanOptionsOf(BankOf(sync.Read<Faction>()));
+                var index = sync.Read<int>();
+                if (options != null && index >= 0 && index < options.Count)
+                    loanOption = options[index];
+            }
+        }
+
+        private static bool LoanMatches(object loan, int optionId, int repayDate, int initialRepayAmount)
+            => (int)loanOptionIdField.GetValue(loan) == optionId
+            && (int)loanRepayDateField.GetValue(loan) == repayDate
+            && (int)loanInitialRepayAmountField.GetValue(loan) == initialRepayAmount;
+
+        // A Loan has no id: it is sent as its bank's faction and its index in bank.loans, plus the three amounts that never change
+        // (option, repay date, initial repay amount). The list can lose a loan between click and command, so the index is checked
+        // and the loan is searched by those amounts when it moved. Null when it is gone (repaid meanwhile): the call is cancelled.
+        private static void SyncLoan(SyncWorker sync, ref object loan)
+        {
+            if (sync.isWriting)
+            {
+                Faction faction = null;
+                var index = -1;
+                if (loan != null)
+                {
+                    foreach (var bank in AllBanks())
+                    {
+                        index = LoansOf(bank)?.IndexOf(loan) ?? -1;
+                        if (index >= 0)
+                        {
+                            faction = bankParentFactionField(bank);
+                            break;
+                        }
+                    }
+                }
+
+                sync.Write(index >= 0);
+                if (index >= 0)
+                {
+                    sync.Write<Faction>(faction);
+                    sync.Write(index);
+                    sync.Write((int)loanOptionIdField.GetValue(loan));
+                    sync.Write((int)loanRepayDateField.GetValue(loan));
+                    sync.Write((int)loanInitialRepayAmountField.GetValue(loan));
+                }
+            }
+            else
+            {
+                loan = null;
+                if (!sync.Read<bool>())
+                    return;
+                var loans = LoansOf(BankOf(sync.Read<Faction>()));
+                var index = sync.Read<int>();
+                var optionId = sync.Read<int>();
+                var repayDate = sync.Read<int>();
+                var initialRepayAmount = sync.Read<int>();
+                if (loans == null)
+                    return;
+                if (index >= 0 && index < loans.Count && LoanMatches(loans[index], optionId, repayDate, initialRepayAmount))
+                {
+                    loan = loans[index];
+                    return;
+                }
+
+                foreach (var candidate in loans)
+                {
+                    if (LoanMatches(candidate, optionId, repayDate, initialRepayAmount))
+                    {
+                        loan = candidate;
+                        return;
+                    }
+                }
+            }
         }
 
         private static void DropGoneSilver(object instance, object[] args)
