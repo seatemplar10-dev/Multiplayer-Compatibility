@@ -1,7 +1,10 @@
 using System;
+using System.Runtime.CompilerServices;
 using System.Threading;
 using HarmonyLib;
 using Multiplayer.API;
+using RimWorld.Planet;
+using SmashTools;
 using Vehicles;
 using Vehicles.World;
 using Verse;
@@ -19,14 +22,23 @@ namespace Multiplayer.Compat
     /// In MP the daily job now calls VF's own <c>RecalculateAllPerceivedPathCostsFor</c> for one def per world tick, in
     /// VF's def order, then VF's <c>RecalculateWinterPercentAt</c> for every tile with the TicksAbs of the start tick (the
     /// value the inline run used). The flags are set as VF's own <c>GridInitializerState</c> sets them for its worker task:
-    /// Initialized false and Recalculating true until the last step, so the job does not start again. Not exact: until a
-    /// def's turn comes, its grid still holds yesterday's costs. Single player sees the same during its worker task.
-    /// Every PC runs the same step on the same world tick: no Rand, no clock, nothing per PC.
+    /// Initialized false and Recalculating true until the last step, so the job does not start again. Each step runs in a
+    /// prefix of <c>WorldComponentTick</c>, before VF's dev-mode <c>FlashWorldGrid</c>, which reads this PC's debug picks
+    /// and can throw on one PC only (a postfix would then be skipped on that PC). Every PC runs the same step on the same
+    /// world tick: no Rand, no clock, nothing per PC.
     /// </para>
     /// <para>
-    /// The job state is not saved, and neither is VF's grid. A reload (join point, resync) builds a new grid whose
-    /// allPathCostsRecalculatedDayOfYear is -1. That first fill still runs whole and inline, as before, so a loaded game
-    /// never reads an empty grid. Single player is unchanged.
+    /// Not exact: until a def's turn comes, its grid holds yesterday's costs (single player sees the same during its
+    /// worker task), and game code between steps runs as usual - a vehicle caravan that starts a path recalculates its
+    /// own defs (<c>EnsureWorldGridInitialized</c>), and a tile changed during the job reaches only the later defs.
+    /// VF's "Regen WorldGrid" debug action mid-job does the whole job inline and clears Recalculating: the job then stops.
+    /// </para>
+    /// <para>
+    /// The job state is not saved, and neither is VF's grid. In hosted MP a join point, resync or rejoin reloads every
+    /// PC: SmashTools' world-removed event drops the job, and the new grid (allPathCostsRecalculatedDayOfYear -1) still
+    /// gets its first fill whole and inline, as before, so a loaded game never reads an empty grid. A standalone server
+    /// reloads only the issuing PC; VF's unsaved grid already differs between PCs there, with or without this job.
+    /// Single player is unchanged: the MP-only code sits in methods that are compiled only when MP calls them.
     /// </para>
     /// </remarks>
     [MpCompatFor("SmashPhil.VehicleFramework")]
@@ -40,72 +52,90 @@ namespace Multiplayer.Compat
         public VehicleFrameworkWorldGrid(ModContentPack mod)
         {
             var type = typeof(WorldVehiclePathGrid);
-            // The steps call these directly; a VF update that renames one fails here, at load, and patches nothing.
-            foreach (var name in new[] { nameof(WorldVehiclePathGrid.RecalculateAllPerceivedPathCostsFor), nameof(WorldVehiclePathGrid.RecalculateWinterPercentAt) })
-                _ = AccessTools.DeclaredMethod(type, name) ?? throw new MissingMethodException(type.FullName, name);
-            _ = AccessTools.DeclaredField(type, nameof(WorldVehiclePathGrid.allPathCostsRecalculatedDayOfYear))
-                ?? throw new MissingFieldException(type.FullName, nameof(WorldVehiclePathGrid.allPathCostsRecalculatedDayOfYear));
+            // Every VF member the job uses, with its signature: a VF update that changes one fails here, at load,
+            // before anything is patched.
+            Require(AccessTools.DeclaredMethod(type, nameof(WorldVehiclePathGrid.RecalculateAllPerceivedPathCostsFor), [typeof(VehicleDef), typeof(CancellationToken)]), type, "RecalculateAllPerceivedPathCostsFor(VehicleDef, CancellationToken)");
+            Require(AccessTools.DeclaredMethod(type, nameof(WorldVehiclePathGrid.RecalculateWinterPercentAt), [typeof(PlanetTile), typeof(int?)]), type, "RecalculateWinterPercentAt(PlanetTile, int?)");
+            Require(AccessTools.DeclaredPropertyGetter(type, nameof(WorldVehiclePathGrid.Recalculating)), type, "get_Recalculating");
+            Require(AccessTools.DeclaredPropertySetter(type, nameof(WorldVehiclePathGrid.Recalculating)), type, "set_Recalculating");
+            Require(AccessTools.DeclaredPropertySetter(type, nameof(WorldVehiclePathGrid.Initialized)), type, "set_Initialized");
+            Require(AccessTools.DeclaredPropertyGetter(type, nameof(WorldVehiclePathGrid.DayOfYearAt0Long)), type, "get_DayOfYearAt0Long");
+            if (AccessTools.DeclaredField(type, nameof(WorldVehiclePathGrid.allPathCostsRecalculatedDayOfYear))?.FieldType != typeof(int))
+                throw new MissingFieldException(type.FullName, nameof(WorldVehiclePathGrid.allPathCostsRecalculatedDayOfYear));
+            var start = Require(AccessTools.DeclaredMethod(type, nameof(WorldVehiclePathGrid.RecalculateAllPathCostsAsync), Type.EmptyTypes), type, "RecalculateAllPathCostsAsync()");
+            var tick = Require(AccessTools.DeclaredMethod(type, nameof(WorldVehiclePathGrid.WorldComponentTick), Type.EmptyTypes), type, "WorldComponentTick()");
 
-            var start = AccessTools.DeclaredMethod(type, nameof(WorldVehiclePathGrid.RecalculateAllPathCostsAsync))
-                        ?? throw new MissingMethodException(type.FullName, nameof(WorldVehiclePathGrid.RecalculateAllPathCostsAsync));
-            var tick = AccessTools.DeclaredMethod(type, nameof(WorldVehiclePathGrid.WorldComponentTick))
-                       ?? throw new MissingMethodException(type.FullName, nameof(WorldVehiclePathGrid.WorldComponentTick));
-            MpCompat.harmony.Patch(start, prefix: new HarmonyMethod(typeof(VehicleFrameworkWorldGrid), nameof(StartDailyJob)));
-            MpCompat.harmony.Patch(tick, postfix: new HarmonyMethod(typeof(VehicleFrameworkWorldGrid), nameof(StepDailyJob)));
+            GameEvent.OnWorldRemoved += () => slicedGrid = null;
+            // The step first: alone it does nothing (no job is ever started), so a failure to patch the start leaves VF as it was.
+            MpCompat.harmony.Patch(tick, prefix: new HarmonyMethod(typeof(VehicleFrameworkWorldGrid), nameof(PreWorldComponentTick)));
+            MpCompat.harmony.Patch(start, prefix: new HarmonyMethod(typeof(VehicleFrameworkWorldGrid), nameof(PreRecalculateAllPathCosts)));
         }
 
-        private static bool StartDailyJob(WorldVehiclePathGrid __instance)
-        {
-            // The first fill after a load, single player, and VF's own "already running" check keep VF's code.
-            if (!MP.IsInMultiplayer || __instance.allPathCostsRecalculatedDayOfYear < 0 || __instance.Recalculating)
-                return true;
+        private static System.Reflection.MethodInfo Require(System.Reflection.MethodInfo method, Type type, string name)
+            => method ?? throw new MissingMethodException(type.FullName, name);
 
-            __instance.allPathCostsRecalculatedDayOfYear = WorldVehiclePathGrid.DayOfYearAt0Long;
-            __instance.Initialized = false;
-            __instance.Recalculating = true;
-            slicedGrid = __instance;
+        private static bool PreRecalculateAllPathCosts(WorldVehiclePathGrid __instance)
+            => !MP.IsInMultiplayer || !TryStartDailyJob(__instance);
+
+        private static void PreWorldComponentTick(WorldVehiclePathGrid __instance)
+        {
+            if (slicedGrid != null)
+                StepDailyJob(__instance);
+        }
+
+        // The first fill after a load and VF's own "already running" check keep VF's code (returns false).
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private static bool TryStartDailyJob(WorldVehiclePathGrid grid)
+        {
+            if (grid.allPathCostsRecalculatedDayOfYear < 0 || grid.Recalculating)
+                return false;
+
+            grid.allPathCostsRecalculatedDayOfYear = WorldVehiclePathGrid.DayOfYearAt0Long;
+            grid.Initialized = false;
+            grid.Recalculating = true;
+            slicedGrid = grid;
             nextDef = 0;
             startTicksAbs = GenTicks.TicksAbs;
-            return false;
+            return true;
         }
 
-        private static void StepDailyJob(WorldVehiclePathGrid __instance)
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private static void StepDailyJob(WorldVehiclePathGrid grid)
         {
-            if (slicedGrid == null)
-                return;
-            // A grid of an earlier world (the game reloaded while the job ran): drop the job.
-            if (slicedGrid != __instance)
+            // A grid of an earlier world, or VF's debug action finished the job inline: drop the job.
+            if (slicedGrid != grid || !grid.Recalculating)
             {
                 slicedGrid = null;
                 return;
             }
 
             var done = true;
+            var defs = DefDatabase<VehicleDef>.AllDefsListForReading;
             try
             {
-                var defs = DefDatabase<VehicleDef>.AllDefsListForReading;
                 if (nextDef < defs.Count)
                 {
-                    __instance.RecalculateAllPerceivedPathCostsFor(defs[nextDef++], CancellationToken.None);
+                    grid.RecalculateAllPerceivedPathCostsFor(defs[nextDef], CancellationToken.None);
+                    nextDef++;
                     done = false;
                 }
                 else
                 {
                     for (int i = 0; i < Find.WorldGrid.TilesCount; i++)
-                        __instance.RecalculateWinterPercentAt(i, startTicksAbs);
+                        grid.RecalculateWinterPercentAt(i, startTicksAbs);
                 }
             }
             catch (Exception e)
             {
                 // VF's worker task logs and ends the job; GridInitializerState still resets the flags.
-                Log.Error($"[MPCompat - Vehicle Framework] Daily world path grid job failed (next def {nextDef}): {e}");
-                done = true;
+                var step = nextDef < defs.Count ? defs[nextDef].defName : "winter percents";
+                Log.Error($"[MPCompat - Vehicle Framework] Daily world path grid job failed at {step}: {e}");
             }
 
             if (done)
             {
-                __instance.Recalculating = false;
-                __instance.Initialized = true;
+                grid.Recalculating = false;
+                grid.Initialized = true;
                 slicedGrid = null;
             }
         }
