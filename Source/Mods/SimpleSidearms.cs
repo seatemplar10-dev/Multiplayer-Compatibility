@@ -228,6 +228,8 @@ namespace Multiplayer.Compat
                     Log.Warning($"[MPCompat] row 315: SyncInitVerbsForComp read a null comp: thing {thingId} (ThingsById hit {thingHit}), " +
                                 $"holder {holderId} (ThingsById hit {holderHit}, {holder?.GetType().Name ?? "none"}, spawned {holder?.Spawned}), " +
                                 $"sender path {holderPath}, found again {found != null}, comp {comp != null}");
+                else
+                    LogFirstNullRead(thingId, holderId, holderPath, thingHit, found != null);
 
                 if (comp == null)
                     return;
@@ -235,6 +237,30 @@ namespace Multiplayer.Compat
 
             if (comp.verbTracker != null && comp.verbTracker.verbs == null)
                 comp.verbTracker.InitVerbsFromZero();
+        }
+
+        // FIXES row 315 desync A diagnostic, always on: one line per weapon per game when the comp reads back null.
+        // The same line (thing, tick) in both players' logs = the null read happens on every PC (sender's lag race,
+        // not the desync). A line in one log only = the PCs already differ there. bySelf names the sending PC.
+        // Log-only state, never read by synced code.
+        private static readonly HashSet<int> loggedNullReads = new();
+        private static int loggedNullReadsGame; // identity hash of Current.Game, own copy: a receiving PC never runs TrySendInitVerbs
+
+        private static void LogFirstNullRead(int thingId, int holderId, string holderPath, bool thingHit, bool foundAgain)
+        {
+            var game = System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(Current.Game);
+            if (loggedNullReadsGame != game)
+            {
+                loggedNullReads.Clear();
+                loggedNullReadsGame = game;
+            }
+
+            if (!loggedNullReads.Add(thingId))
+                return;
+
+            Log.Warning($"[MPCompat] row 315: SyncInitVerbsForComp null comp, first for this weapon: thing {thingId} " +
+                        $"(ThingsById hit {thingHit}, found again {foundAgain}), holder {holderId}, sender path {holderPath}, " +
+                        $"tick {Find.TickManager?.TicksGame}, bySelf {MP.IsExecutingSyncCommandIssuedBySelf}");
         }
 
         #endregion
