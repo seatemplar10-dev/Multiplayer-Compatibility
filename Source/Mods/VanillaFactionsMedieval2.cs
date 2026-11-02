@@ -29,8 +29,8 @@ namespace Multiplayer.Compat
 
         public VanillaFactionsMedieval2(ModContentPack mod)
         {
-            // Archery target uses RNG for fleck visuals - but only when the player is looking at it,
-            // which may not be the case in MP for all players.
+            // Archery target uses RNG for its arrow fleck, from the sim tick (WatchTickAction). ThrowObjectAt in the 1.6 dll has no
+            // camera or view check, so the draws do not depend on the player looking at it. The push/pop isolation is a harmless guard.
             PatchingUtilities.PatchPushPopRand("VFEMedieval.JobDriver_PlayArchery:ThrowObjectAt");
 
             // Rally ability gizmo - adds hediff to wearer
