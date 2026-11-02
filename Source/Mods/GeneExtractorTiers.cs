@@ -1,6 +1,7 @@
 using System;
 using HarmonyLib;
 using Multiplayer.API;
+using RimWorld;
 using Verse;
 
 namespace Multiplayer.Compat
@@ -53,6 +54,24 @@ namespace Multiplayer.Compat
             // <>c__DisplayClass66_0.<OpenFloatMenuGenePicker>b__1 = `targetGene = gene;` with the fields `gene` (a GeneDef) and `<>4__this` (the building).
             // The menu is built from saved state only (selectedPawn.genes, the genepacks on the building's map).
             Try(20, "Select gene", () => MpCompat.RegisterLambdaDelegate(type, "OpenFloatMenuGenePicker", 1));
+
+            // FIXES row 268: ExposeData scribes allowedNutritionSettings with Array.Empty<object>(), so after a load its owner is null.
+            // Multiplayer syncs 'Paste settings' (StorageSettings.CopyFrom) by the owner, and a null owner is dropped on every client.
+            // Same repair Multiplayer does for CompBiosculpterPod (Patches.cs StoragesKeepsTheirOwners).
+            Try(268, "Nutrition settings owner", () =>
+            {
+                nutritionSettingsField = AccessTools.FieldRefAccess<StorageSettings>(type, "allowedNutritionSettings");
+                MpCompat.harmony.Patch(AccessTools.DeclaredMethod(type, "ExposeData"),
+                    postfix: new HarmonyMethod(typeof(GeneExtractorTiers), nameof(PostExposeData)));
+            });
+        }
+
+        private static AccessTools.FieldRef<object, StorageSettings> nutritionSettingsField;
+
+        private static void PostExposeData(Thing __instance)
+        {
+            if (Scribe.mode == LoadSaveMode.PostLoadInit && nutritionSettingsField(__instance) is { } settings)
+                settings.owner ??= (IStoreSettingsParent)__instance;
         }
 
         private static void Try(int gap, string what, Action register)

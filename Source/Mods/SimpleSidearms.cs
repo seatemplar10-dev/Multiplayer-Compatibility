@@ -204,37 +204,93 @@ namespace Multiplayer.Compat
             return sb.ToString();
         }
 
-        // A null comp no longer throws: the method looks the weapon up again (same game state on every PC) and logs
-        // the miss under -mplabssverbslog. comp MUST stay the LAST param: MP's ThingComp reader returns early on a
-        // null parent without reading its comp index (SyncDictRimWorld.cs ThingComp worker), so any arg after comp
-        // would read shifted bytes.
+        // A null comp no longer throws: the method looks the weapon up again (same game state on every PC). Every read
+        // goes to LogInitVerbsRead (always on), or under -mplabssverbslog every null read is logged in full instead.
+        // comp MUST stay the LAST param: MP's ThingComp reader returns early on a null parent without reading its comp
+        // index (SyncDictRimWorld.cs ThingComp worker), so any arg after comp would read shifted bytes.
         [MpCompatSyncMethod]
         private static void SyncInitVerbsForComp(int thingId, int holderId, string holderPath, CompEquippable comp)
         {
-            if (comp == null)
+            var nullRead = comp == null;
+            var thingHit = false;
+            var foundAgain = false;
+            if (nullRead)
             {
                 Thing holder = null;
                 var holderHit = holderId >= 0 && MP.TryGetThingById(holderId, out holder);
-                var thingHit = MP.TryGetThingById(thingId, out var byId);
+                thingHit = MP.TryGetThingById(thingId, out var byId);
                 Thing found = null;
                 if (holderHit && holder.thingIDNumber == thingId)
                     found = holder; // spawned weapon: GetFirstSpawnedParentThing returned the weapon itself
                 else if (holderHit && holder is IThingHolder thingHolder)
                     found = ThingOwnerUtility.GetAllThingsRecursively(thingHolder).Find(t => t.thingIDNumber == thingId);
                 found ??= byId;
+                foundAgain = found != null;
                 comp = (found as ThingWithComps)?.GetComp<CompEquippable>();
 
                 if (LabSsVerbsLog)
                     Log.Warning($"[MPCompat] row 315: SyncInitVerbsForComp read a null comp: thing {thingId} (ThingsById hit {thingHit}), " +
                                 $"holder {holderId} (ThingsById hit {holderHit}, {holder?.GetType().Name ?? "none"}, spawned {holder?.Spawned}), " +
-                                $"sender path {holderPath}, found again {found != null}, comp {comp != null}");
-
-                if (comp == null)
-                    return;
+                                $"sender path {holderPath}, found again {foundAgain}, comp {comp != null}, " +
+                                $"tick {Find.TickManager?.TicksGame}, bySelf {MP.IsExecutingSyncCommandIssuedBySelf}");
             }
+
+            if (!LabSsVerbsLog)
+                LogInitVerbsRead(thingId, holderId, holderPath, nullRead, thingHit, foundAgain, comp != null);
+
+            if (comp == null)
+                return;
 
             if (comp.verbTracker != null && comp.verbTracker.verbs == null)
                 comp.verbTracker.InitVerbsFromZero();
+        }
+
+        // FIXES row 315 desync A diagnostic, always on. Per weapon: one line for its first command (null comp or not),
+        // then one more each time the read result changes, at most 5 lines per weapon per game.
+        // Reading rule for the two players' logs: match on thing + tick and compare only the result part (before ';').
+        // Same result on both PCs = the null read happens on every PC (the sender's lag race, not the desync).
+        // A different result = the PCs already differ there. If a line has no partner at that tick, compare it with the
+        // other PC's latest earlier line for that thing (a PC logs only result changes). "log since" is this PC's first
+        // command after its last game load: a reloaded PC starts with an empty history and logs its first read again.
+        // bySelf is True only on the sending PC, and False on every PC while catching up, so it is never compared.
+        // Log-only state, never read by synced code.
+        private const int InitVerbsLogMaxPerWeapon = 5;
+        private static readonly Dictionary<int, (int lines, string result)> initVerbsLogged = new();
+        private static int initVerbsLoggedGame; // identity hash of Current.Game, own copy: a receiving PC never runs TrySendInitVerbs
+        private static int initVerbsLoggedSince;
+
+        private static void LogInitVerbsRead(int thingId, int holderId, string holderPath, bool nullRead, bool thingHit, bool foundAgain, bool compAfter)
+        {
+            try
+            {
+                var tick = Find.TickManager?.TicksGame ?? -1;
+                var game = System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(Current.Game);
+                if (initVerbsLoggedGame != game)
+                {
+                    initVerbsLogged.Clear();
+                    initVerbsLoggedGame = game;
+                    initVerbsLoggedSince = tick;
+                }
+
+                var result = nullRead
+                    ? $"comp null True, ThingsById hit {thingHit}, found again {foundAgain}, comp after {compAfter}"
+                    : "comp null False";
+                var lines = 0;
+                if (initVerbsLogged.TryGetValue(thingId, out var last))
+                {
+                    if (last.result == result || last.lines >= InitVerbsLogMaxPerWeapon)
+                        return;
+                    lines = last.lines;
+                }
+                initVerbsLogged[thingId] = (lines + 1, result);
+
+                Log.Warning($"[MPCompat] row 315: SyncInitVerbsForComp thing {thingId} tick {tick}: {result}; holder {holderId}, " +
+                            $"sender path {holderPath}, bySelf {MP.IsExecutingSyncCommandIssuedBySelf}, log since tick {initVerbsLoggedSince}");
+            }
+            catch
+            {
+                // Diagnostic only: logging must never change what the synced command does on this PC
+            }
         }
 
         #endregion
