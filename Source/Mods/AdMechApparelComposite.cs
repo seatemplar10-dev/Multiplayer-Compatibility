@@ -27,15 +27,24 @@ namespace Multiplayer.Compat
     /// Graphic caches (ShoulderPadEntry.graphic, Thing.graphicInt, Graphic.path) are visual only and stay local.
     /// Those writes are spread over menu lambdas (compiler generated closures) and a ref parameter, so the module does not patch each one.
     /// It watches the saved fields instead: while this PC has such a window open (multiplayer, interface code), every frame of the window
-    /// and every call of AdeptusApparelUtility.UpdateApparelGraphicsFor (every writer ends with it) compares the fields with the last
-    /// known state. A difference is taken back at once on this PC and sent as ONE synced command (SyncApply: the apparel Thing and the
-    /// changed keys only), which sets the same fields on every PC, so the saved state never differs between PCs. The command carries
-    /// only the keys that changed (not the whole state), so two commands from one click (ColorSelector returns, THEN the caller sets the
-    /// Active flag) do not undo each other. A command from another player on the same apparel updates the known state too.
+    /// and every call of AdeptusApparelUtility.UpdateApparelGraphicsFor (most writers end with it; the Active flag after ColorSelector
+    /// and the inventory-apparel paths do not) compares the fields with the last known state. A difference is sent as ONE synced
+    /// command (SyncApply: the apparel Thing and the changed keys only) and then taken back on this PC, so the command sets the same
+    /// fields on every PC and the saved state never differs between PCs. The command carries only the keys that changed (not the whole
+    /// state), so two commands from one click (ColorSelector returns, THEN the caller sets the Active flag) do not undo each other. A
+    /// command from another player on the same apparel updates the known state too.
     /// A difference counts as a window edit only when it appears INSIDE a window action: the window's FillMainRect (colour swatches
-    /// and buttons; the state is re-read at its start, so a simulation write between frames, e.g. the vanilla recolor job, is never
-    /// taken for an edit) or FloatMenuOption.Chosen (the menus; same re-read at its start). The UpdateApparelGraphicsFor prefix checks
-    /// only inside those two scopes. Nothing ticks inside OnGUI, so no simulation write can fall inside a scope.
+    /// and buttons; every tracked apparel is re-read at its start, so a simulation write between frames, e.g. the vanilla recolor job,
+    /// is never taken for an edit) or FloatMenuOption.Chosen (the menus; same re-read at its start). The UpdateApparelGraphicsFor prefix
+    /// checks only inside those two scopes. Nothing ticks inside OnGUI, so no simulation write can fall inside a scope. The end-of-scope
+    /// check runs in a Harmony FINALIZER, so a write followed by an exception in the mod's code is still sent and taken back.
+    /// The portraits drawn at the top of FillMainRect can run the mod's render code (ApparelAddonGraphicRecordGetter), which writes
+    /// ShoulderPadEntry.activeOption / faction. For the clicker's own pawn (the Gear tab button needs Faction.OfPlayer) that write is a
+    /// function of synced state, so it is sent like an edit and every PC gets the same value.
+    /// Known gap, NOT fixed here (pre-existing in the mod, needs its own render-guard module): on a PC whose player faction is not the
+    /// wearer's faction, that render code takes the "other faction" branch (Faction.OfPlayer) and writes activeOption from the faction
+    /// texture tag, the pawn kind's apparel tags or Options.RandomElement() (UI-time Rand), so pauldron variants of another player's pawn
+    /// can differ on that PC after any graphics rebuild, with or without this module.
     /// Getters of the mod that fill saved fields lazily while the window draws (CompColorableTwoFaction.FactionDef, ShoulderPadEntry.Props
     /// through Options) are called once when the state is read in interface code, BEFORE the baseline is taken, so their writes are part
     /// of the baseline and never an edit. A send identical to one that is still in flight is not repeated.
@@ -87,7 +96,12 @@ namespace Multiplayer.Compat
             public Dictionary<string, string> last;
             // the delta sent and not yet executed here (cleared by SyncApply when this PC's own command runs)
             public string pending;
+            public float pendingAt;
         }
+
+        // A sent delta that has not come back after this long (real seconds) is no longer "pending": the command may never have run
+        // its body as a received command (it threw, it ran locally, ghost mode), and an identical edit must not stay silent for good.
+        private const float PendingSeconds = 3f;
 
         // apparel thingIDNumber -> last known saved state, for the apparel shown in a window of this PC
         private static readonly Dictionary<int, Tracked> tracked = new();
@@ -113,11 +127,11 @@ namespace Multiplayer.Compat
             }
 
             MP.RegisterSyncMethod(AccessTools.DeclaredMethod(typeof(AdMechApparelComposite), nameof(SyncApply)));
-            Patch(AccessTools.DeclaredMethod(dialogType, "FillMainRect"), prefix: nameof(PreFill), postfix: nameof(PostFill), finalizer: nameof(FinalizeFill));
+            Patch(AccessTools.DeclaredMethod(dialogType, "FillMainRect"), prefix: nameof(PreFill), finalizer: nameof(FinalizeFill));
             Patch(AccessTools.DeclaredMethod(dialogType, "PostClose"), postfix: nameof(PostDialogClose));
             Patch(AccessTools.DeclaredMethod(utilType, "UpdateApparelGraphicsFor"), prefix: nameof(PreUpdateApparelGraphics));
             Patch(AccessTools.DeclaredMethod(typeof(FloatMenuOption), nameof(FloatMenuOption.Chosen), new[] { typeof(bool), typeof(FloatMenu) }),
-                prefix: nameof(PreChosen), postfix: nameof(PostChosen), finalizer: nameof(FinalizeChosen));
+                prefix: nameof(PreChosen), finalizer: nameof(FinalizeChosen));
             Patch(AccessTools.DeclaredMethod(typeof(Game), nameof(Game.FinalizeInit)), postfix: nameof(PostGameFinalizeInit));
             active = true;
             Log.Message($"{LogPrefix}1 sync method registered, 5 patches installed, active=True.");
@@ -529,6 +543,8 @@ namespace Multiplayer.Compat
             if (!active || thing == null || !compositeType.IsInstanceOfType(thing))
                 return;
             var kv = Parse(delta);
+            // lab evidence: the state BEFORE this command; equal on every PC = nothing drifted since the last command on this apparel
+            var pre = Hash(Serialize(Capture(thing)));
             ApplyDelta(thing, kv);
             RefreshVisuals(thing);
             var state = Capture(thing);
@@ -539,7 +555,7 @@ namespace Multiplayer.Compat
                     t.pending = null; // this PC's own command has come back
             }
 
-            Log.Message($"{LogPrefix}{thing.ThingID} keys=[{string.Join(",", kv.Keys.OrderBy(k => k, StringComparer.Ordinal))}] state-hash={Hash(Serialize(state)):x8} " +
+            Log.Message($"{LogPrefix}{thing.ThingID} keys=[{string.Join(",", kv.Keys.OrderBy(k => k, StringComparer.Ordinal))}] pre-hash={pre:x8} state-hash={Hash(Serialize(state)):x8} " +
                         $"tick={Find.TickManager?.TicksGame} bySelf={MP.IsExecutingSyncCommandIssuedBySelf}");
         }
 
@@ -560,7 +576,7 @@ namespace Multiplayer.Compat
             return false;
         }
 
-        // Compares the apparel with its last known state. A difference is the window's own edit: undo it here and send it.
+        // Compares the apparel with its last known state. A difference is the window's own edit: send it, then undo it here.
         private static void Check(Thing apparel)
         {
             if (checking || !tracked.TryGetValue(apparel.thingIDNumber, out var t))
@@ -585,26 +601,37 @@ namespace Multiplayer.Compat
                     return;
                 }
 
-                // take the edit back on this PC (the synced command sets it everywhere, this PC included), then remember what is there now
-                ApplyDelta(apparel, undo);
-                RefreshVisuals(apparel);
-                t.last = Capture(apparel);
-
-                // the same edit again while its command has not come back (a getter of the mod that writes every frame): undone, not resent
-                var text = Serialize(sent);
-                if (text == t.pending)
-                    return;
-
-                if (!CanSend(apparel))
+                // Send FIRST, then take the edit back on this PC in finally (the synced command sets it everywhere, this PC included).
+                // If the undo throws, the command is already queued, so every PC still ends with the same value. If SyncApply runs
+                // locally instead of being sent (Multiplayer.dontSync), it re-applies values that are already there and the undo below
+                // takes them back: nothing changes and nothing differs (its log line then reads bySelf=False, like a received command).
+                try
                 {
-                    if (!warnedUnsendable)
-                        Log.Warning($"{LogPrefix}{apparel.ThingID} is not held by anything Multiplayer can address: the customization was undone and not sent.");
-                    warnedUnsendable = true;
-                    return;
+                    // the same edit again while its command has not come back (render code of the mod that writes every frame):
+                    // undone, not resent. A pending delta older than PendingSeconds is sent again (the command may never have run).
+                    var text = Serialize(sent);
+                    if (text != t.pending || Time.realtimeSinceStartup - t.pendingAt > PendingSeconds)
+                    {
+                        if (CanSend(apparel))
+                        {
+                            t.pending = text;
+                            t.pendingAt = Time.realtimeSinceStartup;
+                            SyncApply(apparel, text);
+                        }
+                        else
+                        {
+                            if (!warnedUnsendable)
+                                Log.Warning($"{LogPrefix}{apparel.ThingID} is not held by anything Multiplayer can address: the customization was undone and not sent.");
+                            warnedUnsendable = true;
+                        }
+                    }
                 }
-
-                t.pending = text;
-                SyncApply(apparel, text);
+                finally
+                {
+                    ApplyDelta(apparel, undo);
+                    RefreshVisuals(apparel);
+                    t.last = Capture(apparel);
+                }
             }
             finally
             {
@@ -631,6 +658,8 @@ namespace Multiplayer.Compat
 
         // FillMainRect: the start only re-reads the state (an edit from a menu is caught in Chosen, below); the end compares, which catches
         // the colour swatches and buttons clicked in this very pass. Nothing ticks inside one OnGUI pass.
+        // Every tracked apparel is re-read, not only the one shown: the UpdateApparelGraphicsFor prefix checks all tracked apparel of the
+        // wearer, and an apparel shown before Back / Next could have been changed by the simulation since (the vanilla recolor job).
         private static void PreFill(object __instance)
         {
             if (!Live)
@@ -642,6 +671,26 @@ namespace Multiplayer.Compat
                     return;
                 inFill = true;
                 Rebaseline(apparel);
+                // Only apparel worn by the same wearer stay tracked (the graphics check and FinalizeFill use that set). Others are
+                // dropped, so a stripped item that another pawn now wears is never re-read here. One failing read drops that entry only.
+                var wearer = (apparel as Apparel)?.Wearer;
+                foreach (var t in tracked.Values.ToList())
+                {
+                    if (ReferenceEquals(t.apparel, apparel))
+                        continue;
+                    try
+                    {
+                        if (wearer != null && t.apparel is Apparel { Wearer: { } other } && other == wearer)
+                            Rebaseline(t.apparel);
+                        else
+                            tracked.Remove(t.apparel.thingIDNumber);
+                    }
+                    catch (Exception e)
+                    {
+                        tracked.Remove(t.apparel.thingIDNumber);
+                        Log.ErrorOnce($"{LogPrefix}re-reading a tracked apparel failed, it is no longer watched: {e}", 0x3a0d9c06);
+                    }
+                }
             }
             catch (Exception e)
             {
@@ -649,25 +698,34 @@ namespace Multiplayer.Compat
             }
         }
 
-        private static void PostFill(object __instance)
+        // A finalizer, not a postfix: a postfix does not run when FillMainRect throws, and the next PreFill would then take a write made
+        // before the exception as the new baseline (kept on this PC only, never sent).
+        private static void FinalizeFill(object __instance)
         {
-            if (!Live || !inFill)
+            if (!inFill)
                 return;
             try
             {
-                var apparel = DialogApparel(__instance);
-                if (apparel != null)
+                if (Live && DialogApparel(__instance) is { } apparel)
+                {
                     Check(apparel);
+                    // The portrait drawn in this pass can write the other worn apparel of the wearer (render code of the mod), and PreFill
+                    // re-read them as a baseline: check them too, or such a write would be kept on this PC only.
+                    var wearer = (apparel as Apparel)?.Wearer;
+                    if (wearer != null)
+                        foreach (var t in tracked.Values.ToList())
+                            if (!ReferenceEquals(t.apparel, apparel) && t.apparel is Apparel { Wearer: { } other } && other == wearer)
+                                Check(t.apparel);
+                }
             }
             catch (Exception e)
             {
                 Log.ErrorOnce($"{LogPrefix}watching the window failed: {e}", 0x3a0d9c02);
             }
-        }
-
-        private static void FinalizeFill()
-        {
-            inFill = false;
+            finally
+            {
+                inFill = false;
+            }
         }
 
         // The window's menus (Widgets.Dropdown) run their lambdas from FloatMenuOption.Chosen, which is synchronous. Re-read the tracked
@@ -688,28 +746,31 @@ namespace Multiplayer.Compat
             }
         }
 
-        private static void PostChosen()
+        // A finalizer for the same reason as FinalizeFill: a menu lambda can write (e.faction, e.Used) and then throw in
+        // ShoulderPadEntry.UpdateGraphic before it reaches UpdateApparelGraphicsFor.
+        private static void FinalizeChosen()
         {
-            if (!inChosen || !Live)
+            if (!inChosen)
                 return;
             try
             {
-                foreach (var t in tracked.Values.ToList())
-                    Check(t.apparel);
+                if (Live)
+                    foreach (var t in tracked.Values.ToList())
+                        Check(t.apparel);
             }
             catch (Exception e)
             {
                 Log.ErrorOnce($"{LogPrefix}checking after a menu choice failed: {e}", 0x3a0d9c05);
             }
+            finally
+            {
+                inChosen = false;
+            }
         }
 
-        private static void FinalizeChosen()
-        {
-            inChosen = false;
-        }
-
-        // Every writer of the window ends with UpdateApparelGraphicsFor(wearer), so the check runs right after the write, but only inside
-        // the window's FillMainRect or a menu choice (outside them the state may have been written by the simulation).
+        // Most writers of the window end with UpdateApparelGraphicsFor(wearer), so the check runs right after the write, but only inside
+        // the window's FillMainRect or a menu choice (outside them the state may have been written by the simulation). The writers that
+        // do not call it are caught by FinalizeFill / FinalizeChosen.
         private static void PreUpdateApparelGraphics(Pawn pawn)
         {
             if (pawn == null || tracked.Count == 0 || !(inFill || inChosen) || !Live)
