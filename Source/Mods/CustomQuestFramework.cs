@@ -64,11 +64,12 @@ public class CustomQuestFramework
 
     public CustomQuestFramework(ModContentPack mod)
     {
+        // First: PatchDialogWindow has no guard, and a throw there must not skip the gizmo syncs (each has its own TryRegister)
+        RegisterGizmos();
         PatchJobMenus();
         PatchDialogWindow();
         MP.RegisterSyncMethod(typeof(CustomQuestFramework), nameof(SyncedStartJob));
         MP.RegisterSyncMethod(typeof(CustomQuestFramework), nameof(SyncedChooseOption));
-        RegisterGizmos();
     }
 
     #region Jobs from float menus
@@ -383,7 +384,8 @@ public class CustomQuestFramework
             MpCompat.RegisterLambdaMethod(CqfNamespace + "CustomMapEntrance", nameof(Thing.GetGizmos), 3).SetDebugOnly());
         TryRegister("CustomMapEntrance SetMapDef", () =>
         {
-            var mapDefType = AccessTools.TypeByName(CqfNamespace + "CustomMapDataDef");
+            var mapDefType = AccessTools.TypeByName(CqfNamespace + "CustomMapDataDef")
+                ?? throw new Exception("type " + CqfNamespace + "CustomMapDataDef not found");
             var byName = Serializer.New<Def, string>(def => def?.defName,
                 name => name == null ? null : GenDefDatabase.GetDefSilentFail(mapDefType, name, false));
             var setMapDef = MpCompat.RegisterLambdaMethod(CqfNamespace + "CustomMapEntrance", nameof(Thing.GetGizmos), 2)[0];
