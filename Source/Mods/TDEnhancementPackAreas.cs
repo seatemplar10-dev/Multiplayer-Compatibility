@@ -33,10 +33,9 @@ namespace Multiplayer.Compat
     /// <para>
     /// Single player, and any call made while MP is not in the interface, run the original code. Left local on purpose: the Copy button
     /// (it only sets <c>copiedArea</c>) and the not-for-colonists/mechs/animals checkboxes (<c>MapComponent_AreaOrder</c> flags, read
-    /// by drawn lists only). Known gaps, not fixed here: the reorder arrows (<c>MapComponent_AreaOrder.Swap</c> also reorders
-    /// <c>AreaManager.areas</c>, which <c>Gravship.CopyAreas</c> iterates) and the vanilla Copy button of
-    /// <c>Dialog_ManageAreas.DoAreaRow</c> (its <c>TryMakeNewAllowed(out area)</c> is synced, so the local branch never receives the
-    /// new area and copies nothing).
+    /// by drawn lists only). Known gap, not fixed here: the reorder arrows (<c>MapComponent_AreaOrder.Swap</c> also reorders
+    /// <c>AreaManager.areas</c>, which <c>Gravship.CopyAreas</c> iterates). The vanilla Copy button of
+    /// <c>Dialog_ManageAreas.DoAreaRow</c> is fixed by VanillaAreaCopy.cs (FIXES row 373).
     /// </para>
     /// </remarks>
     [MpCompatFor("memegoddess.tdpack")]

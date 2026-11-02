@@ -48,6 +48,15 @@ namespace Multiplayer.Compat
             {
                 Log.Warning("[MPCompat] row 106: letter archive guard not installed: " + e.Message);
             }
+            // FIXES row 373: the vanilla Manage Areas Copy button is one synced action, not an empty new area (VanillaAreaCopy.cs)
+            try
+            {
+                VanillaAreaCopy.Install(harmony);
+            }
+            catch (Exception e)
+            {
+                Log.Warning("[MPCompat] row 373: Manage Areas copy fix not installed: " + e.Message);
+            }
         }
 
         static IEnumerable<ISyncMethod> RegisterLambdaMethod_Impl(Type parentType, string parentMethod, MethodType methodType, params int[] lambdaOrdinals)
