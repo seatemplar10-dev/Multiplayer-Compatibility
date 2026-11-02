@@ -196,6 +196,34 @@ namespace Multiplayer.Compat
 
             #endregion
 
+            #region Designator_RecolorVacBarrierRoof eyedropper (rows 386, 387)
+
+            {
+                // A colour pick only sets the colour of the clicking PC's own designator and shows a message, so it must never be sent.
+                // MP's designator prefixes (priority First + 1) did send it: the eyedropper designator has no parameterless constructor
+                // (row 387, MissingMethodException when the command is rebuilt on every PC) and the roof designator's eyedropMode is not
+                // sent (row 386, the rebuilt designator paints the cell instead of picking its colour). Our prefixes run before MP's
+                // (First + 2) and do the pick locally in the UI. Painting (eyedropMode off) falls through to MP as before.
+                var singleCell = new[] { typeof(IntVec3) };
+
+                PatchBeforeMpDesignator(
+                    AccessTools.DeclaredMethod(typeof(Designator_VacBarrierRoofEyedropper), nameof(Designator.DesignateSingleCell), singleCell),
+                    nameof(PreRoofEyedropperDesignateSingleCell));
+
+                PatchBeforeMpDesignator(
+                    AccessTools.DeclaredMethod(typeof(Designator_RecolorVacBarrierRoof), nameof(Designator.DesignateSingleCell), singleCell),
+                    nameof(PreRecolorRoofDesignateSingleCell));
+
+                // The roof designator has a paint draw style and does not override DesignateMultiCell, so a click or a drag reaches
+                // the base method (DesignatorManager calls it on mouse up). The eyedropper on its own has no draw style and goes
+                // straight to DesignateSingleCell, it never reaches DesignateMultiCell.
+                PatchBeforeMpDesignator(
+                    AccessTools.DeclaredMethod(typeof(Designator), nameof(Designator.DesignateMultiCell), new[] { typeof(IEnumerable<IntVec3>) }),
+                    nameof(PreDesignateMultiCellRoofEyedropMode));
+            }
+
+            #endregion
+
             #region VGE launch flow fix
 
             {
@@ -702,7 +730,8 @@ namespace Multiplayer.Compat
         /// <summary>
         /// The colour of the roof recolour designator travels with the designator command: it is read on every PC into the
         /// freshly constructed designator before DesignateSingleCell / DesignateMultiCell paint the roof cells with it.
-        /// The eyedropper designator (no parameterless constructor) is not covered.
+        /// The eyedropper designator (no parameterless constructor) is never sent: its pick stays local, see
+        /// PreRoofEyedropperDesignateSingleCell (rows 386, 387).
         /// </summary>
         private static void SyncRecolorVacBarrierRoofDesignator(SyncWorker sync, ref Designator_RecolorVacBarrierRoof designator)
         {
@@ -710,6 +739,79 @@ namespace Multiplayer.Compat
                 sync.Write(designator.color);
             else
                 designator.color = sync.Read<Color>();
+        }
+
+        /// <summary>
+        /// Patches a designator method with a prefix that runs before MP's own designator prefix (Priority.First + 1). A prefix
+        /// that returns false skips every later prefix and the original, so MP never sends the call. Priority.First alone is not enough.
+        /// </summary>
+        private static void PatchBeforeMpDesignator(MethodBase method, string prefixName)
+        {
+            if (method == null)
+            {
+                Log.Error($"[MPCompat] Vanilla Gravship Expanded rows 386, 387: method for {prefixName} not found, the vac barrier roof eyedropper stays unfixed");
+                return;
+            }
+
+            MpCompat.harmony.Patch(method, prefix: new HarmonyMethod(typeof(VanillaGravshipExpanded), prefixName) { priority = Priority.First + 2 });
+        }
+
+        /// <summary>
+        /// Row 387: the eyedropper's pick runs on the clicking PC only. This is VGE's own DesignateSingleCell body: every option
+        /// only sets the colour on that PC's roof designator (closure) and shows a message, nothing here touches the map.
+        /// Recheck it when VGE changes Designator_VacBarrierRoofEyedropper.DesignateSingleCell.
+        /// </summary>
+        private static bool PreRoofEyedropperDesignateSingleCell(Designator_VacBarrierRoofEyedropper __instance, IntVec3 cell)
+        {
+            if (!MP.InInterface)
+                return true;
+
+            var options = new List<FloatMenuOption>(__instance.FloatMenuOptionsAt(cell));
+            if (options.Count >= 2)
+                Find.WindowStack.Add(new FloatMenu(options));
+            else if (options.Count == 1)
+                options[0].action();
+            else if (!__instance.rejectMessage.NullOrEmpty())
+                Messages.Message(__instance.rejectMessage, MessageTypeDefOf.RejectInput, false);
+
+            return false;
+        }
+
+        /// <summary>
+        /// Row 386: with the eyedropper key held the roof designator forwards to its eyedropper, but MP sends the call as a paint
+        /// (eyedropMode is not sent). Forward it ourselves, to the local pick above.
+        /// </summary>
+        private static bool PreRecolorRoofDesignateSingleCell(Designator_RecolorVacBarrierRoof __instance, IntVec3 c)
+        {
+            if (!__instance.eyedropMode || !MP.InInterface)
+                return true;
+
+            __instance.eyedropper.DesignateSingleCell(c);
+            return false;
+        }
+
+        /// <summary>
+        /// Row 386: a click or drag of the roof designator reaches the base DesignateMultiCell. In eyedropper mode run vanilla's
+        /// loop here (accepted cells go to DesignateSingleCell, then Finalize) so every cell takes the local pick above.
+        /// This runs for every designator, so the instance check comes first. Vanilla's tutorial-mode hooks are left out.
+        /// </summary>
+        private static bool PreDesignateMultiCellRoofEyedropMode(Designator __instance, IEnumerable<IntVec3> cells)
+        {
+            if (!(__instance is Designator_RecolorVacBarrierRoof designator) || !designator.eyedropMode || !MP.InInterface)
+                return true;
+
+            var somethingSucceeded = false;
+            foreach (var cell in cells)
+            {
+                if (!designator.CanDesignateCell(cell).Accepted)
+                    continue;
+
+                designator.DesignateSingleCell(cell);
+                somethingSucceeded = true;
+            }
+
+            designator.Finalize(somethingSucceeded);
+            return false;
         }
 
         /// <summary>
