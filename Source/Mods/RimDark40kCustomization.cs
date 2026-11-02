@@ -100,6 +100,7 @@ namespace Multiplayer.Compat
         private static Type customizeAtStationType, workUtilityType;
         private static FieldInfo stationDialogField;
         private static readonly Dictionary<Type, MethodInfo> dialogCloseMethods = new();
+        private static readonly Dictionary<Type, MethodInfo> dialogClosedGetters = new();
         private static MethodInfo captureAllMethod, commitImmediatelyMethod, settleFromMapMethod, notifySkippedMethod;
         private static readonly List<MethodBase> acceptCallers = new();
         private static readonly Dictionary<MethodBase, int> redirectHits = new();
@@ -365,8 +366,8 @@ namespace Multiplayer.Compat
             foreach (var dialog in dialogTypes)
             {
                 // the flag the waiting toil reads (a private setter: only Close() writes it)
-                if (AccessTools.DeclaredProperty(dialog, "Closed") == null)
-                    throw new MissingMemberException(dialog.FullName, "Closed");
+                dialogClosedGetters[dialog] = AccessTools.DeclaredPropertyGetter(dialog, "Closed")
+                                              ?? throw new MissingMemberException(dialog.FullName, "Closed");
                 dialogCloseMethods[dialog] = AccessTools.DeclaredMethod(dialog, "Close", new[] { typeof(bool) })
                                              ?? throw new MissingMethodException(dialog.FullName, "Close(bool)");
             }
@@ -733,6 +734,9 @@ namespace Multiplayer.Compat
                 {
                     try
                     {
+                        // an Accept command earlier in the same queue already closed it: a second Close would run the tabs' OnClose and Reset twice
+                        if ((bool)dialogClosedGetters[type].Invoke(dialog, null))
+                            return;
                         dialogCloseMethods[type].Invoke(dialog, new object[] { doCloseSound });
                     }
                     catch (Exception e)
@@ -1414,6 +1418,9 @@ namespace Multiplayer.Compat
             shoulderColourSent.Clear();
             closing.Clear();
             orderingJob = null;
+            // the old window stack is gone after a load: drop its windows (memory only)
+            dialogChildren.Clear();
+            drawingDialogs.Clear();
         }
 
         // The synced command: replaces the draw data of one decoration with a copy built from the float array, on every machine.
