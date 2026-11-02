@@ -40,6 +40,7 @@ namespace Multiplayer.Compat
         private const string MpVehicleCaravanRejectMessage = "Vehicle caravans are not supported in multiplayer yet";
         private const string MpVehicleSplitRejectMessage = "Vehicle seats in a caravan split are not supported in multiplayer yet";
         private const string MpVehicleOtherWindowMessage = "This vehicle belongs to another caravan window: close and reopen this one";
+        private const string MpVehicleSeatsDroppedMessage = "{0}: {1} of {2} seat assignments were not kept (pawn gone, seated in another vehicle, or role full)";
         private const string VehicleSeatsSaveLabel = "mpCompatVehicleSeats";
 
         // Send modes of SyncedSendVehicleCaravan
@@ -311,6 +312,11 @@ namespace Multiplayer.Compat
                     return;
                 }
             }
+
+            // Dropped seats: only the player who confirmed is told (the list check is the same on every PC).
+            if (newSeats.Count < pawnIds.Count && MP.IsExecutingSyncCommandIssuedBySelf)
+                Messages.Message(string.Format(MpVehicleSeatsDroppedMessage, vehicle.LabelCap, pawnIds.Count - newSeats.Count, pawnIds.Count),
+                    MessageTypeDefOf.RejectInput, false);
 
             foreach (var seat in seats.GetAssignments(vehicle).ToList())
                 TransferableOf(session, seat.pawn)?.ForceTo(0);
