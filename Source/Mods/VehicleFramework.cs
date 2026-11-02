@@ -70,6 +70,13 @@ namespace Multiplayer.Compat
     /// only when the tab list is empty: VF builds its tab list as for a first open, then <c>CaravanFormation.formation</c> is set back to
     /// null (steps 7 and 8 need it null) and the Pawns tab is selected. UI only, nothing synced.
     /// </para>
+    /// <para>
+    /// FIXES row 358 (2 Nov 2026): the Referenced assembly's VehicleFramework (Source_Referenced\VehicleFrameworkCaravanForming.cs) makes
+    /// vehicle caravans work in Multiplayer's caravan window: seat Confirm, vehicle untick and VF's send steps are synced commands, and
+    /// VF's seat list is game state kept the same on every PC. When it installed (<see cref="VehicleFrameworkCaravanSync.Installed"/>):
+    /// step 9 keeps VF's formation for the window (no reset to null), so step 8's seat window opens; step 7 lets VF's send code run
+    /// when the formation is this window's. Not installed = steps 7, 8 and 9 as before (vehicle caravans refused).
+    /// </para>
     /// </remarks>
     [MpCompatFor("SmashPhil.VehicleFramework")]
     public class VehicleFramework
@@ -104,6 +111,8 @@ namespace Multiplayer.Compat
         private static MethodInfo caravanFormationCurrent;
         private static MethodInfo notifyTransferablesChanged;
         private static Type assignSeatsType;
+        // Row 358: Vehicles.World.FormationInfo.get_Dialog()
+        private static MethodInfo formationDialogGetter;
 
         public VehicleFramework(ModContentPack mod)
         {
@@ -264,12 +273,15 @@ namespace Multiplayer.Compat
         }
 
         // Finalizer (runs on an exception too): undo the formation VF just made for the proxy, select the Pawns tab.
+        // Row 358: with the Referenced assembly's synced vehicle caravans installed, the formation stays (its seat window and send code
+        // need it; it is this PC's UI only, and every command swaps in its own).
         private static void FinalCreateTabListPostOpen(bool __state)
         {
             if (!__state)
                 return;
 
-            caravanFormationField.SetValue(null, null);
+            if (!VehicleFrameworkCaravanSync.Installed)
+                caravanFormationField.SetValue(null, null);
             vfSelectedTabField.SetValue(null, 0);
         }
 
@@ -291,6 +303,9 @@ namespace Multiplayer.Compat
         {
             vehiclePawnType = FindType("Vehicles.VehiclePawn");
             var formDialogPatchType = FindType("Vehicles.Patch_FormCaravanDialog");
+            var formationInfoType = FindType("Vehicles.World.FormationInfo");
+            formationDialogGetter = AccessTools.DeclaredPropertyGetter(formationInfoType, "Dialog")
+                                    ?? throw new MissingMethodException(formationInfoType.FullName, "get_Dialog");
 
             // VF's own prefix on Dialog_FormCaravan.TrySend. It is static and its first parameter is called __instance (it is a patch
             // itself): in a prefix of ours the name __instance would mean "instance of a static method" = null, so the dialog is read by
@@ -408,6 +423,13 @@ namespace Multiplayer.Compat
         private static bool IsCaravanFormingProxy(Dialog_FormCaravan dialog)
             => dialog != null && dialog.GetType().FullName == CaravanFormingProxyTypeName;
 
+        // Row 358: the dialog of VF's current CaravanFormation.formation, null when there is none (or step 9 did not install).
+        private static Dialog_FormCaravan FormationDialog()
+        {
+            var formation = caravanFormationField?.GetValue(null);
+            return formation == null || formationDialogGetter == null ? null : formationDialogGetter.Invoke(formation, null) as Dialog_FormCaravan;
+        }
+
         // The same test as VF's VehiclesSelected: a transferable whose thing is a VehiclePawn with a count to send.
         private static bool AnyVehicleSelected(Dialog_FormCaravan dialog)
         {
@@ -429,6 +451,10 @@ namespace Multiplayer.Compat
         private static bool PreTryAndSendWithVehicles(Dialog_FormCaravan __0, ref bool __result)
         {
             if (!MP.IsInMultiplayer || !IsCaravanFormingProxy(__0))
+                return true;
+
+            // Row 358: VF's body runs when its formation is this window's and the Referenced assembly syncs its game-state steps.
+            if (VehicleFrameworkCaravanSync.Installed && FormationDialog() == __0)
                 return true;
 
             if (AnyVehicleSelected(__0))
@@ -459,6 +485,9 @@ namespace Multiplayer.Compat
         // Prefix on WindowStack.Add. VF opens Dialog_AssignSeats only from the vehicle card checkbox, with CaravanFormation.Current as the
         // window's parent; in MP that is null for Multiplayer's caravan window and the window's Confirm throws after writing unsynced counts.
         // The window is not added (nothing changed yet: its constructor only reads). UI only, no game state.
+        // Row 358: with the Referenced assembly's synced vehicle caravans installed, step 9 keeps the window's formation, so Current is
+        // null (= refused) only when that fix cannot run; the Referenced side also refuses a seat window whose parent is not this
+        // caravan window's formation.
         private static bool NoSeatWindowWithoutFormation(Window window)
         {
             if (!MP.IsInMultiplayer || window == null || window.GetType() != assignSeatsType)
@@ -505,5 +534,14 @@ namespace Multiplayer.Compat
 
         private static MethodInfo GetDeclaredMethod(Type type, string name, Type[] args = null)
             => AccessTools.DeclaredMethod(type, name, args) ?? throw new MissingMethodException(type.FullName, name);
+    }
+
+    /// <summary>
+    /// FIXES row 358: set to true by the Referenced assembly's VehicleFramework once all of its caravan forming patches and sync methods
+    /// installed (vehicle seats, untick and send synced in Multiplayer's caravan window). Read by steps 7 and 9 above.
+    /// </summary>
+    public static class VehicleFrameworkCaravanSync
+    {
+        public static bool Installed;
     }
 }
