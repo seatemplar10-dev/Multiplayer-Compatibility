@@ -3,6 +3,7 @@ using System.Reflection;
 using HarmonyLib;
 using Multiplayer.API;
 using RimWorld;
+using UnityEngine;
 using Verse;
 
 namespace Multiplayer.Compat
@@ -18,6 +19,11 @@ namespace Multiplayer.Compat
         // cosmetic, so keep it out of the simulation's Rand stream.
         // Unsynced writes: the "allow fishing" toggle (Building_FishPond.GetGizmos lambda 1) and the ITab fish choice
         // (both rows assign Building_FishPond.selectedFishDef).
+        // Per-PC mod settings in the simulation: fishDurationHours (job length), yieldMultiplier (stack count) and
+        // enableModFishCompatibility (fish list). Multiplayer's join check compares the config files, so the PCs start equal (unless a joiner clicks "Connect anyway"); a mid-session
+        // change in the settings window would split them. FishPondMod.DoSettingsWindowContents therefore shows a note instead of the
+        // controls while Multiplayer runs (same idiom as CleaningAreaRelaunched remarks (2)). That also hides enableAnimation, which is
+        // cosmetic. The window's close still calls WriteSettings: it rewrites the unchanged values, harmless.
         private static ISyncField selectedFishField;
         private static MethodInfo pondGetter;
 
@@ -33,6 +39,23 @@ namespace Multiplayer.Compat
             MpCompat.harmony.Patch(AccessTools.Method(tabType, "FillTab"),
                 prefix: new HarmonyMethod(typeof(HlsFishPond), nameof(PreFillTab)),
                 finalizer: new HarmonyMethod(typeof(HlsFishPond), nameof(FinalFillTab)));
+
+            var modType = AccessTools.TypeByName("LBY.FishPondMod");
+            var settingsWindow = modType == null ? null : AccessTools.DeclaredMethod(modType, "DoSettingsWindowContents", new[] { typeof(Rect) });
+            if (settingsWindow == null)
+                Log.Warning("MPCompat :: HLS Fish pond: FishPondMod.DoSettingsWindowContents not found, the settings are not locked in Multiplayer");
+            else
+                MpCompat.harmony.Patch(settingsWindow, prefix: new HarmonyMethod(typeof(HlsFishPond), nameof(PreDoSettingsWindowContents)));
+        }
+
+        // The mod's settings (job length, yield, fish list) feed the simulation and are per PC. Locked while Multiplayer runs.
+        private static bool PreDoSettingsWindowContents(Rect inRect)
+        {
+            if (!MP.IsInMultiplayer)
+                return true;
+
+            Widgets.Label(inRect, "Multiplayer: these settings feed the simulation. Change them in single player, then restart the session with the same config on every PC.");
+            return false;
         }
 
         private static void PreFillTab(ITab __instance)
