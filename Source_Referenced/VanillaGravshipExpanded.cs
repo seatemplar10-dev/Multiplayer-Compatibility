@@ -185,6 +185,17 @@ namespace Multiplayer.Compat
 
             #endregion
 
+            #region Designator_RecolorVacBarrierRoof color sync
+
+            {
+                // MP rebuilds a designator on every PC (the clicking one too) from its parameterless constructor and sends nothing but its
+                // type, so the colour picked in the UI (the private field "color") was lost and every PC painted the roof cells with
+                // VacBarrierRoofUtility.BaseColor. Same pattern as MP's own worker for Designator_Paint (implicit, constructed).
+                MP.RegisterSyncWorker<Designator_RecolorVacBarrierRoof>(SyncRecolorVacBarrierRoofDesignator, isImplicit: true, shouldConstruct: true);
+            }
+
+            #endregion
+
             #region VGE launch flow fix
 
             {
@@ -686,6 +697,19 @@ namespace Multiplayer.Compat
                 recolorable.barrierColor = new Color(r, g, b);
                 recolorable.Notify_ColorChanged();
             }
+        }
+
+        /// <summary>
+        /// The colour of the roof recolour designator travels with the designator command: it is read on every PC into the
+        /// freshly constructed designator before DesignateSingleCell / DesignateMultiCell paint the roof cells with it.
+        /// The eyedropper designator (no parameterless constructor) is not covered.
+        /// </summary>
+        private static void SyncRecolorVacBarrierRoofDesignator(SyncWorker sync, ref Designator_RecolorVacBarrierRoof designator)
+        {
+            if (sync.isWriting)
+                sync.Write(designator.color);
+            else
+                designator.color = sync.Read<Color>();
         }
 
         /// <summary>
