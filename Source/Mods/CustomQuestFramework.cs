@@ -67,9 +67,10 @@ public class CustomQuestFramework
         // First: PatchDialogWindow has no guard, and a throw there must not skip the gizmo syncs (each has its own TryRegister)
         RegisterGizmos();
         PatchJobMenus();
-        PatchDialogWindow();
+        // Before PatchDialogWindow: the sync methods need nothing from it, and a throw there must not leave the job start unsynced
         MP.RegisterSyncMethod(typeof(CustomQuestFramework), nameof(SyncedStartJob));
         MP.RegisterSyncMethod(typeof(CustomQuestFramework), nameof(SyncedChooseOption));
+        PatchDialogWindow();
     }
 
     #region Jobs from float menus
@@ -219,8 +220,15 @@ public class CustomQuestFramework
         dialogTextElementType = AccessTools.TypeByName("QuestEditor_Library.DialogElement_Text");
 
         MpCompat.harmony.Patch(windowGoToNodeMethod, postfix: new HarmonyMethod(typeof(CustomQuestFramework), nameof(PostGoToNode)));
-        MpCompat.harmony.Patch(AccessTools.DeclaredMethod(dialogWindowType, nameof(Window.Close)),
-            postfix: new HarmonyMethod(typeof(CustomQuestFramework), nameof(PostWindowClose)));
+        // CQF 4.9 replaced the window's own Close(bool) override with a PostClose() override. Patch whichever one it declares.
+        // The postfix only forgets the window's choice timer, so a window with neither is a warning, not a failure.
+        var closeMethod = AccessTools.DeclaredMethod(dialogWindowType, nameof(Window.Close))
+                          ?? AccessTools.DeclaredMethod(dialogWindowType, nameof(Window.PostClose));
+        if (closeMethod != null)
+            MpCompat.harmony.Patch(closeMethod, postfix: new HarmonyMethod(typeof(CustomQuestFramework), nameof(PostWindowClose)));
+        else
+            Log.Warning("MPCompat :: Custom Quest Framework: CQFDialogTreeWindow declares neither Close nor PostClose, " +
+                        "so the dialog's choice timer is not cleared when the window closes.");
     }
 
     private static void PostWindowClose(Window __instance) => choiceSentAt.Remove(__instance);

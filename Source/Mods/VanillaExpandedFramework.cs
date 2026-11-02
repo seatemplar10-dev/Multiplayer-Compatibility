@@ -1087,20 +1087,53 @@ namespace Multiplayer.Compat
 
             var type = AccessTools.TypeByName("VEF.Buildings.Dialog_ChooseGraphic");
             var thingToChangeField = AccessTools.DeclaredField(type, "thingToChange");
-            FieldInfo indexField = null;
 
-            foreach (var ci in instr)
+            // The local that holds the closure class with the "i" field changes between VEF builds (it was a hard-coded
+            // local 5, which is a string in the 1.6 build; the closure there is local 3). Read it from the first
+            // "ldloc; ldfld i" pair instead, which is the loop's own "i" read, and never emit a guessed local index.
+            var list = instr.ToList();
+            FieldInfo indexField = null;
+            CodeInstruction closureLoad = null;
+            var hasTargetCall = false;
+            for (var i = 0; i < list.Count && !hasTargetCall; i++)
             {
+                var ci = list[i];
                 if (indexField == null && (ci.opcode == OpCodes.Ldfld || ci.opcode == OpCodes.Stfld) && ci.operand is FieldInfo { Name: "i" } field)
                     indexField = field;
 
+                if (closureLoad == null && ci.opcode == OpCodes.Ldfld && ci.operand is FieldInfo { Name: "i" } && i > 0 && list[i - 1].IsLdloc())
+                    closureLoad = new CodeInstruction(list[i - 1].opcode, list[i - 1].operand);
+
                 if (ci.opcode == OpCodes.Call && ci.operand is MethodInfo method && method == targetMethod && indexField != null)
+                    hasTargetCall = true;
+            }
+
+            if (!hasTargetCall || closureLoad == null || thingToChangeField == null || replacementMethod == null)
+            {
+                Log.Error("MPCompat :: Could not patch Dialog_ChooseGraphic's selection button, the index loop or the ButtonInvisible call was not found" +
+                          $" (button call={hasTargetCall}, index field={indexField != null}, loop local={closureLoad != null}, thingToChange field={thingToChangeField != null}). Changing the graphic may desync.");
+                return list;
+            }
+
+            return Dialog_ChooseGraphic_ReplaceSelectionButtonInner(list, targetMethod, replacementMethod, thingToChangeField, indexField, closureLoad);
+        }
+
+        private static IEnumerable<CodeInstruction> Dialog_ChooseGraphic_ReplaceSelectionButtonInner(List<CodeInstruction> list, MethodInfo targetMethod,
+            MethodInfo replacementMethod, FieldInfo thingToChangeField, FieldInfo indexField, CodeInstruction closureLoad)
+        {
+            var indexSeen = false;
+            foreach (var ci in list)
+            {
+                if (!indexSeen && (ci.opcode == OpCodes.Ldfld || ci.opcode == OpCodes.Stfld) && ci.operand is FieldInfo { Name: "i" })
+                    indexSeen = true;
+
+                if (indexSeen && ci.opcode == OpCodes.Call && ci.operand is MethodInfo method && method == targetMethod)
                 {
                     ci.operand = replacementMethod;
 
                     yield return new CodeInstruction(OpCodes.Ldarg_0);
                     yield return new CodeInstruction(OpCodes.Ldfld, thingToChangeField); // Load in the "thingToChange" (Thing) field
-                    yield return new CodeInstruction(OpCodes.Ldloc_S, 5); // Load in the local of type "<>c__DisplayClass9_0"
+                    yield return new CodeInstruction(closureLoad.opcode, closureLoad.operand); // Load in the local of the loop's closure class
                     yield return new CodeInstruction(OpCodes.Ldfld, indexField); // Load in the "i" (int) from the nested type
                     yield return new CodeInstruction(OpCodes.Ldarg_0); // Load in the instance (Dialog_ChooseGraphic)
                 }
