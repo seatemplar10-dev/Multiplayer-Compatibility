@@ -182,6 +182,10 @@ namespace Multiplayer.Compat
             AccessTools.DeclaredMethod("VFECore.TerrainInstance:Update"),
             AccessTools.DeclaredMethod("VFECore.TerrainComp:CompUpdate"),
             AccessTools.DeclaredMethod("VFECore.DefExtensionActive:DoWork", [AccessTools.TypeByName("Verse.TerrainDef")]),
+            // VEF 1.6 moved these from VFECore to VEF.Maps (the old names stay for older VEF builds)
+            AccessTools.DeclaredMethod("VEF.Maps.TerrainInstance:Update"),
+            AccessTools.DeclaredMethod("VEF.Maps.TerrainComp:CompUpdate"),
+            AccessTools.DeclaredMethod("VEF.Maps.DefExtensionActive:DoWork", [AccessTools.TypeByName("Verse.TerrainDef")]),
         }.Where(x => x != null).ToHashSet();
 
         private static readonly HashSet<MethodInfo> NonTickingUpdateMethodCalls = new[]

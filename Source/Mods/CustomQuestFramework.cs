@@ -64,12 +64,14 @@ public class CustomQuestFramework
 
     public CustomQuestFramework(ModContentPack mod)
     {
-        // First: PatchDialogWindow has no guard, and a throw there must not skip the gizmo syncs (each has its own TryRegister)
+        // Before any patch: the sync methods need nothing else, and a throw in PatchJobMenus or PatchDialogWindow (no guard in either)
+        // must not leave a patched menu or window calling an unregistered sync method (it would run on the clicking PC only)
+        MP.RegisterSyncMethod(typeof(CustomQuestFramework), nameof(SyncedStartJob));
+        MP.RegisterSyncMethod(typeof(CustomQuestFramework), nameof(SyncedChooseOption));
+        // Then the gizmos: a throw in the two calls below must not skip them (each has its own TryRegister)
         RegisterGizmos();
         PatchJobMenus();
         PatchDialogWindow();
-        MP.RegisterSyncMethod(typeof(CustomQuestFramework), nameof(SyncedStartJob));
-        MP.RegisterSyncMethod(typeof(CustomQuestFramework), nameof(SyncedChooseOption));
     }
 
     #region Jobs from float menus
@@ -219,8 +221,16 @@ public class CustomQuestFramework
         dialogTextElementType = AccessTools.TypeByName("QuestEditor_Library.DialogElement_Text");
 
         MpCompat.harmony.Patch(windowGoToNodeMethod, postfix: new HarmonyMethod(typeof(CustomQuestFramework), nameof(PostGoToNode)));
-        MpCompat.harmony.Patch(AccessTools.DeclaredMethod(dialogWindowType, nameof(Window.Close)),
-            postfix: new HarmonyMethod(typeof(CustomQuestFramework), nameof(PostWindowClose)));
+        // CQF 4.9 replaced the window's own Close(bool) override with a PostClose() override. Patch whichever one it declares,
+        // PostClose first: WindowStack.TryRemove calls it on every way a window closes, Close only on some.
+        // The postfix only forgets the window's choice timer, so a window with neither is a warning, not a failure.
+        var closeMethod = AccessTools.DeclaredMethod(dialogWindowType, nameof(Window.PostClose))
+                          ?? AccessTools.DeclaredMethod(dialogWindowType, nameof(Window.Close));
+        if (closeMethod != null)
+            MpCompat.harmony.Patch(closeMethod, postfix: new HarmonyMethod(typeof(CustomQuestFramework), nameof(PostWindowClose)));
+        else
+            Log.Warning("MPCompat :: Custom Quest Framework: CQFDialogTreeWindow declares neither Close nor PostClose, " +
+                        "so the dialog's choice timer is not cleared when the window closes.");
     }
 
     private static void PostWindowClose(Window __instance) => choiceSentAt.Remove(__instance);

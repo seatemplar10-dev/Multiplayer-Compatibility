@@ -37,7 +37,9 @@ public class VanillaPersonaWeaponsExpanded
     {
         LongEventHandler.ExecuteWhenFinished(LatePatch);
 
-        compGraphicCustomizationType = AccessTools.TypeByName("GraphicCustomization.CompGraphicCustomization");
+        // VEF 1.6 moved the comp into the VEF.Graphics namespace; the old name is kept as a fallback for older VEF builds.
+        compGraphicCustomizationType = AccessTools.TypeByName("VEF.Graphics.CompGraphicCustomization")
+                                       ?? AccessTools.TypeByName("GraphicCustomization.CompGraphicCustomization");
 
         var type = AccessTools.TypeByName("VanillaPersonaWeaponsExpanded.ChoiceLetter_ChoosePersonaWeapon");
         // Reject offer and close letter
@@ -103,7 +105,7 @@ public class VanillaPersonaWeaponsExpanded
                 {
                     foreach (var c in twc.AllComps)
                     {
-                        if (compGraphicCustomizationType.IsInstanceOfType(c))
+                        if (compGraphicCustomizationType != null && compGraphicCustomizationType.IsInstanceOfType(c))
                             comp = VanillaExpandedFramework.graphicCustomizationCompField(dialog) = c;
                     }
                 }
