@@ -105,7 +105,7 @@ public class VanillaPersonaWeaponsExpanded
                 {
                     foreach (var c in twc.AllComps)
                     {
-                        if (compGraphicCustomizationType.IsInstanceOfType(c))
+                        if (compGraphicCustomizationType != null && compGraphicCustomizationType.IsInstanceOfType(c))
                             comp = VanillaExpandedFramework.graphicCustomizationCompField(dialog) = c;
                     }
                 }

@@ -160,7 +160,9 @@ namespace Multiplayer.Compat
                 gizmoMethod = "GetGizmos";
             }
 
-            var gizmoOrdinal = gizmoType == null ? -1 : FindVoidLambdaOrdinal(gizmoType, gizmoMethod, 1);
+            // RegisterLambdaDelegate needs the lambda in a display class of the gizmo type
+            var gizmoOrdinal = gizmoType == null ? -1 : FindVoidLambdaOrdinal(gizmoType, gizmoMethod, 1,
+                declaring => declaring != gizmoType && declaring.DeclaringType == gizmoType);
             if (gizmoOrdinal >= 0)
                 MpCompat.RegisterLambdaDelegate(gizmoType, gizmoMethod, gizmoOrdinal);
             else
@@ -170,37 +172,45 @@ namespace Multiplayer.Compat
         /// <summary>Finds the ordinal of the one lambda of <paramref name="method"/> that returns void and takes no arguments
         /// (a button or toggle action). Lambda ordinals move when a mod adds or removes a lambda earlier in the method, and a
         /// predicate or getter landing on a fixed ordinal would get synced instead of the action.</summary>
-        /// <param name="preferred">Ordinal tried first, so a build where it is still right keeps its old registration.</param>
-        /// <returns>The ordinal, or -1 when there is no such lambda or more than one candidate.</returns>
-        private static int FindVoidLambdaOrdinal(Type type, string method, int preferred)
+        /// <param name="preferred">Ordinal kept when more than one lambda fits, so a build where it is still right keeps its old registration.</param>
+        /// <param name="declaringTypeOk">The class the lambda must be compiled into, so the registration call that follows gets the shape it needs.</param>
+        /// <returns>The ordinal, or -1 when no lambda fits, or more than one fits and the preferred one is not among them.</returns>
+        private static int FindVoidLambdaOrdinal(Type type, string method, int preferred, Func<Type, bool> declaringTypeOk)
         {
             const int maxOrdinal = 12;
-
-            static MethodInfo TryGetLambda(Type type, string method, int ordinal)
-            {
-                try
-                {
-                    var lambda = MpMethodUtil.GetLambda(type, method, lambdaOrdinal: ordinal);
-                    return lambda.ReturnType == typeof(void) && lambda.GetParameters().Length == 0 ? lambda : null;
-                }
-                catch (Exception)
-                {
-                    // No lambda with this ordinal
-                    return null;
-                }
-            }
-
-            if (TryGetLambda(type, method, preferred) != null)
-                return preferred;
 
             var found = new List<int>();
             for (var ordinal = 0; ordinal <= maxOrdinal; ordinal++)
             {
-                if (ordinal != preferred && TryGetLambda(type, method, ordinal) != null)
+                MethodInfo lambda;
+                try
+                {
+                    lambda = MpMethodUtil.GetLambda(type, method, lambdaOrdinal: ordinal);
+                }
+                catch (Exception)
+                {
+                    // No lambda with this ordinal
+                    continue;
+                }
+
+                if (lambda.ReturnType == typeof(void) && lambda.GetParameters().Length == 0 && lambda.DeclaringType != null && declaringTypeOk(lambda.DeclaringType))
                     found.Add(ordinal);
             }
 
-            return found.Count == 1 ? found[0] : -1;
+            if (found.Count == 1)
+                return found[0];
+            if (found.Count == 0)
+                return -1;
+
+            var candidates = string.Join(", ", found);
+            if (found.Contains(preferred))
+            {
+                Log.Warning($"MPCompat :: {type}:{method} has more than one void lambda without arguments (ordinals {candidates}), keeping ordinal {preferred}");
+                return preferred;
+            }
+
+            Log.Error($"MPCompat :: {type}:{method} has more than one void lambda without arguments (ordinals {candidates}), none of them is ordinal {preferred}");
+            return -1;
         }
 
         private static void PatchKCSG()
@@ -965,7 +975,9 @@ namespace Multiplayer.Compat
             MP.RegisterSyncWorker<Window>(SyncContractInfoDialog, contractInfoDialogType);
             // The "cancel contract" confirmation action. In the VEF 1.6 build lambda 0 is a Where predicate cached in <>c
             // (Pawn -> bool) and the button action is lambda 1, so look the action up by signature, starting from the old ordinal.
-            var cancelContractOrdinal = FindVoidLambdaOrdinal(contractInfoDialogType, "DoWindowContents", 0);
+            // RegisterLambdaMethod needs an instance lambda on the dialog itself (its Window sync worker sends the dialog)
+            var cancelContractOrdinal = FindVoidLambdaOrdinal(contractInfoDialogType, "DoWindowContents", 0,
+                declaring => declaring == contractInfoDialogType);
             if (cancelContractOrdinal >= 0)
                 MpCompat.RegisterLambdaMethod(contractInfoDialogType, "DoWindowContents", cancelContractOrdinal);
             else
