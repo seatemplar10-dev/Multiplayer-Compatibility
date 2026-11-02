@@ -76,7 +76,7 @@ public class DefensivePositions
 
         // FIXES row 219: the mod's own layer still runs later (HugsLib StaticInitialize), throws on its version check before
         // it registers anything and logs "Failed to apply Multiplayer API compatibility layer: ... MP API version mismatch"
-        // as an ERROR at every start. This module replaces that layer, so skip it.
+        // as an ERROR at every start. This module registers the layer's per-pawn syncs in its place, so skip it.
         if (compatType != null)
         {
             try
@@ -136,7 +136,7 @@ public class DefensivePositions
         if (!loggedSkip)
         {
             loggedSkip = true;
-            Log.Message("MPCompat :: Defensive Positions' own Multiplayer layer skipped (its MP API check always fails, this module replaces it; FIXES row 219)");
+            Log.Message("MPCompat :: Defensive Positions' own Multiplayer layer skipped (its MP API check always fails, this module registers its per-pawn syncs instead; FIXES row 219)");
         }
 
         return false;
