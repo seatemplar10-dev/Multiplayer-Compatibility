@@ -2,6 +2,7 @@ using System;
 using System.Reflection;
 using HarmonyLib;
 using Multiplayer.API;
+using UnityEngine;
 using Verse;
 
 namespace Multiplayer.Compat
@@ -19,6 +20,12 @@ namespace Multiplayer.Compat
         // The mirror button passes method groups (not lambdas), so the six mirror / toggle methods are registered by name;
         // MirrorOffsets is also called from sim code (gravship placement), which still runs it directly.
         // Both PCs must still run the same Tucked Furniture mod settings (zero-path-cost offsets, keep path cost in use).
+        // Multiplayer's join check compares the config files, so the PCs start equal (unless a joiner clicks "Connect anyway"); a mid-session change in the settings window
+        // (also reachable from the dev-only OpenSettings gizmo, which opens the same Dialog_ModSettings) would split them. So
+        // TuckedFurnitureMod.DoSettingsWindowContents shows a note instead of the controls while Multiplayer runs (same idiom as
+        // CleaningAreaRelaunched remarks (2)). Locked: MaximumOffsets, ZeroPathCostOffsets, the untuck defaults (sittable / bed),
+        // KeepPathCostWhileUntuckedInUse, AllowNonMinifiableBuildings. The per-def untuck override list is written only by synced lambda 27.
+        // The window's close still calls WriteSettings: it rewrites the unchanged values, harmless.
         private static Type compType;
         private static FieldInfo copiedSettingsField;
         private static Type clipboardType;
@@ -47,6 +54,24 @@ namespace Multiplayer.Compat
 
             MP.RegisterSyncMethod(typeof(TuckedFurniture), nameof(SyncedPaste));
             MpCompat.harmony.Patch(pasteMethod, prefix: new HarmonyMethod(typeof(TuckedFurniture), nameof(PrePasteSettings)));
+
+            var modType = AccessTools.TypeByName("TuckedFurniture.TuckedFurnitureMod");
+            var settingsWindow = modType == null ? null : AccessTools.DeclaredMethod(modType, "DoSettingsWindowContents", new[] { typeof(Rect) });
+            if (settingsWindow == null)
+                Log.Warning("MPCompat :: Tucked Furniture: TuckedFurnitureMod.DoSettingsWindowContents not found, the settings are not locked in Multiplayer");
+            else
+                MpCompat.harmony.Patch(settingsWindow, prefix: new HarmonyMethod(typeof(TuckedFurniture), nameof(PreDoSettingsWindowContents)));
+        }
+
+        // The mod's settings (path-cost thresholds, max offsets, untuck defaults, non-minifiable) feed the simulation and are per PC.
+        // Locked while Multiplayer runs. Does not touch the synced "untuck when used" lambda, which writes the per-def overrides.
+        private static bool PreDoSettingsWindowContents(Rect inRect)
+        {
+            if (!MP.IsInMultiplayer)
+                return true;
+
+            Widgets.Label(inRect, "Multiplayer: these settings feed the simulation. Change them in single player, then restart the session with the same config on every PC.");
+            return false;
         }
 
         // Local click: read this PC's clipboard and send its values; the synced call then pastes on every PC.
