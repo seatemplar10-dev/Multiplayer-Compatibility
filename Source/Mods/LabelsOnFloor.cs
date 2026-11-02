@@ -32,8 +32,19 @@ namespace Multiplayer.Compat
     /// <para>
     /// Multiplayer syncs <c>Designator_Rename.DesignateSingleCell</c>, so the rename window opened on every PC, and an OK or Enter in any copy
     /// renamed the zone again. A prefix on <c>WindowStack.Add</c> now drops both rename windows while another player's command runs, so only the
-    /// issuing PC gets the window. The command still runs the rest of <c>DesignateSingleCell</c> on every PC (it creates the empty custom data
-    /// entry everywhere). Left local on purpose: the room rename window's data (<c>CustomRoomData</c>, read by the floor label drawing only).
+    /// issuing PC gets the window. The command still runs the rest of <c>DesignateSingleCell</c> on every PC (the mod's <c>GetZoneRenamer</c>
+    /// there creates the empty custom data entry in the mod's cached world component; that is the live component again after the first
+    /// <c>Draw</c> that follows a load, see the next paragraph, and may be an older one or null until then). Left local on purpose: the room
+    /// rename window's data (<c>CustomRoomData</c>, read by the floor label drawing only).
+    /// </para>
+    /// <para>
+    /// The mod builds its floor label state from its two world components once, at its first <c>Draw</c>, and builds it again only when
+    /// <c>LabelsOnFloorMod.LabelPlacementHandler</c> is null. Multiplayer replaces the world on the host and at every join point
+    /// (<c>MemoryUtility.ClearAllMapsAndWorld</c>), and a second load in one session does the same, so the floor labels kept reading the
+    /// components of the old world. A postfix on <c>Game.FinalizeInit</c> (installed in single player too) sets that property to null through
+    /// its private setter. The mod's own <c>Draw</c> then calls <c>InitializeWorldComponents</c> with the live components. That call makes a new
+    /// mesh handler, placement handler and label drawer and reuses the label holder: the old mesh handler is dropped once per load (its
+    /// <c>ClearCache</c> is not called).
     /// </para>
     /// </remarks>
     [MpCompatFor("falconne.LabelsOnFloor")]
@@ -62,6 +73,9 @@ namespace Multiplayer.Compat
         // The two rename windows, kept off the PCs that did not issue the rename command
         private static Type zoneDialogType;
         private static Type roomDialogType;
+        // LabelsOnFloorMod.Instance (static getter) and the private setter of .LabelPlacementHandler, for the reset after a load
+        private static MethodInfo resetInstanceGetter;
+        private static MethodInfo placementHandlerSetter;
 
         public LabelsOnFloor(ModContentPack mod)
         {
@@ -122,14 +136,18 @@ namespace Multiplayer.Compat
             }
 
             // 2. register, then patch; when the patch fails it is taken off again and the rename behaves as without the module
+            var patched = false;
             try
             {
                 MP.RegisterSyncMethod(typeof(LabelsOnFloor), nameof(SyncApplyZoneChanges)).CancelIfAnyArgNull();
+                // set before the call: a Patch that throws half way must be taken off too; a register that throws must not touch the method
+                patched = true;
                 MpCompat.harmony.Patch(doWindowContents, transpiler: new HarmonyMethod(typeof(LabelsOnFloor), nameof(TranspileDoWindowContents)));
             }
             catch (Exception e)
             {
-                MpCompat.harmony.Unpatch(doWindowContents, HarmonyPatchType.Transpiler, MpCompat.harmony.Id);
+                if (patched)
+                    MpCompat.harmony.Unpatch(doWindowContents, HarmonyPatchType.Transpiler, MpCompat.harmony.Id);
                 Log.Error($"{LogPrefix}patching or registering failed, the patch was removed again, the zone rename stays local: {e}");
                 throw new InvalidOperationException($"{LogPrefix}patch failed", e);
             }
@@ -143,6 +161,26 @@ namespace Multiplayer.Compat
             catch (Exception e)
             {
                 Log.Warning($"{LogPrefix}cannot keep the rename window to the issuing PC, every PC opens it: {e.Message}");
+            }
+
+            // The reset of the mod's cached world components is separate too: without it the rename is still synced, only the floor labels
+            // keep reading the components of a world from before a load. Single player and multiplayer alike.
+            try
+            {
+                var modType = AccessTools.TypeByName("LabelsOnFloor.LabelsOnFloorMod")
+                              ?? throw new TypeLoadException("type LabelsOnFloor.LabelsOnFloorMod not found");
+                resetInstanceGetter = AccessTools.DeclaredPropertyGetter(modType, "Instance")
+                                      ?? throw new MissingMethodException(modType.FullName, "get_Instance");
+                placementHandlerSetter = AccessTools.DeclaredPropertySetter(modType, "LabelPlacementHandler")
+                                         ?? throw new MissingMethodException(modType.FullName, "set_LabelPlacementHandler");
+                MpCompat.harmony.Patch(AccessTools.DeclaredMethod(typeof(Game), nameof(Game.FinalizeInit))
+                                       ?? throw new MissingMethodException(typeof(Game).FullName, nameof(Game.FinalizeInit)),
+                    postfix: new HarmonyMethod(typeof(LabelsOnFloor), nameof(PostGameFinalizeInit)));
+            }
+            catch (Exception e)
+            {
+                resetInstanceGetter = placementHandlerSetter = null;
+                Log.Warning($"{LogPrefix}cannot reset the floor label state after a game load, the floor labels can keep reading the world components of an earlier load: {e.Message}");
             }
 
             Log.Message($"{LogPrefix}installed: the zone rename OK button sets the zone label and its colour through a sync method.");
@@ -212,7 +250,10 @@ namespace Multiplayer.Compat
 
             zone.label = label;
 
-            // The mod's saved per zone data, the same writes as ApplyChanges; GetOrCreateCustomData finds the entry by zone ID
+            // The mod's saved per zone data: the label and colour fields ApplyChanges writes, set on the entry GetOrCreateCustomData finds by
+            // zone ID. The component comes from the live world here, not from the mod's cached copy that its dialog and floor labels read.
+            // The two are the same object after the first Draw that follows a load (the reset below); until that Draw the cached copy can be
+            // an older one, and ApplyChanges would have written into it.
             var manager = Find.World?.GetComponent(zoneLabelManagerType);
             var data = manager == null ? null : getOrCreateCustomData(manager, zone);
             if (data != null)
@@ -222,6 +263,32 @@ namespace Multiplayer.Compat
             }
 
             RefreshFloorLabels();
+        }
+
+        // ---- the mod's cached world components ----------------------------------------------------------------------------------------
+
+        // Game.FinalizeInit ends every game load and new game, in single player and multiplayer (hosting, join point, arbiter, joiner).
+        // LabelsOnFloorMod.Draw takes the two world components only while LabelPlacementHandler is null, so a null here makes its next Draw
+        // call InitializeWorldComponents with the live ones. The old mesh handler (and its cached meshes) is dropped once per load.
+        // NoInlining: a Harmony postfix target.
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private static void PostGameFinalizeInit()
+        {
+            if (resetInstanceGetter == null || placementHandlerSetter == null)
+                return;
+
+            try
+            {
+                var mod = resetInstanceGetter.Invoke(null, null);
+                // new object[] { null }: a plain null would be read as "no arguments"
+                if (mod != null)
+                    placementHandlerSetter.Invoke(mod, new object[] { null });
+            }
+            catch (Exception e)
+            {
+                // cosmetic only: never let it stop the game from loading
+                Log.Warning($"{LogPrefix}resetting the floor label state failed: {e.Message}");
+            }
         }
 
         // Unsaved drawing cache of the mod, not simulation state: the clicking PC marked it dirty at the end of ApplyChanges.
