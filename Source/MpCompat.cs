@@ -39,6 +39,15 @@ namespace Multiplayer.Compat
             {
                 Log.Warning("[MPCompat] row 262: training tracker load guard not installed: " + e.Message);
             }
+            // FIXES row 106: the letter archive cull and the ransom incident no longer read the per-PC letter stack (LetterArchiveDeterminism.cs)
+            try
+            {
+                LetterArchiveDeterminism.Install(harmony);
+            }
+            catch (Exception e)
+            {
+                Log.Warning("[MPCompat] row 106: letter archive guard not installed: " + e.Message);
+            }
         }
 
         static IEnumerable<ISyncMethod> RegisterLambdaMethod_Impl(Type parentType, string parentMethod, MethodType methodType, params int[] lambdaOrdinals)
