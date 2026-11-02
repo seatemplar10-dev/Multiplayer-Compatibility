@@ -7,11 +7,20 @@ using System.Reflection.Emit;
 using HarmonyLib;
 using Multiplayer.API;
 using RimWorld;
+using RimWorld.Planet;
 using Verse;
 
 namespace Multiplayer.Compat
 {
     /// <summary>Vanilla Achievements Expanded by Oskar Potocki, Smash Phil</summary>
+    /// <remarks>
+    /// FIXES row 394 (mod sweep 2 Nov 2026): <c>Reward_RandomEvent.TryExecuteEvent</c> takes its incident target from
+    /// <c>WorldRendererUtility.WorldRendered ? Find.WorldSelector.SingleSelectedObject as IIncidentTarget : null</c>, else
+    /// <c>Find.CurrentMap</c>. It runs inside the synced <see cref="SyncedCalls"/>, but world view and world selection are per PC, so a PC
+    /// on the world map with a caravan or map selected at the purchase picked another target than the others (an incident on a different
+    /// map or caravan = different Rand use and state). A transpiler makes the world-view test false in multiplayer, so the target is
+    /// always <c>Find.CurrentMap</c>, which is the command's pinned map on every PC. Single player keeps the mod's behaviour.
+    /// </remarks>
     /// <see href="https://github.com/Vanilla-Expanded/VanillaAchievementsExpanded"/>
     /// <see href="https://steamcommunity.com/sharedfiles/filedetails/?id=2288125657"/>
     [MpCompatFor("vanillaexpanded.achievements")]
@@ -48,6 +57,43 @@ namespace Multiplayer.Compat
 
             // Sync our method
             MP.RegisterSyncMethod(typeof(VanillaAchievements), nameof(SyncedCalls));
+
+            // Row 394. Its own try/catch: a changed reward class must not take the purchase sync above down with it.
+            try
+            {
+                var randomEventMethod = AccessTools.DeclaredMethod(AccessTools.TypeByName("AchievementsExpanded.Reward_RandomEvent"), "TryExecuteEvent")
+                    ?? throw new Exception("method Reward_RandomEvent.TryExecuteEvent not found");
+                MpCompat.harmony.Patch(randomEventMethod, transpiler: new HarmonyMethod(typeof(VanillaAchievements), nameof(RandomEventTranspiler)));
+            }
+            catch (Exception e)
+            {
+                Log.Error($"MPCompat :: Vanilla Achievements Expanded: the random event reward keeps a per-PC target: {e.Message}");
+            }
+        }
+
+        // The mod's world view check, but never true in multiplayer (see the remarks): the target is then always Find.CurrentMap.
+        private static bool WorldRenderedExceptInMp() => !MP.IsInMultiplayer && WorldRendererUtility.WorldRendered;
+
+        private static IEnumerable<CodeInstruction> RandomEventTranspiler(IEnumerable<CodeInstruction> instr)
+        {
+            var worldRendered = AccessTools.PropertyGetter(typeof(WorldRendererUtility), nameof(WorldRendererUtility.WorldRendered));
+            var replacement = AccessTools.Method(typeof(VanillaAchievements), nameof(WorldRenderedExceptInMp));
+            var replaced = 0;
+
+            foreach (var ci in instr)
+            {
+                if (ci.Calls(worldRendered))
+                {
+                    ci.opcode = OpCodes.Call;
+                    ci.operand = replacement;
+                    replaced++;
+                }
+
+                yield return ci;
+            }
+
+            if (replaced != 1)
+                Log.Warning($"MPCompat :: Vanilla Achievements Expanded: expected 1 WorldRendered check in Reward_RandomEvent.TryExecuteEvent, replaced {replaced}");
         }
 
         private static bool usedReward = false;
