@@ -34,6 +34,13 @@ namespace Multiplayer.Compat
     /// 3. PawnxTool.PassToWorld is refused (a world pawn on one PC only), and CE's capsule window is refused (its
     ///    Start calls the page's nextAct directly, past DoNext; its Load rewrites the scenario on one PC).
     /// 4. When the page closes, every open CE window closes first, while CE still sees a starting screen.
+    /// Row 193b (other CE edits of page pawns): 5. CE windows' own DoWindowContents and CE float menu choices run
+    ///    under ProgramState.Entry while CE's selected pawn is a page pawn or none, like MP's own page UI, so synced
+    ///    setters on page pawns run on this PC instead of sending a command no other PC can resolve.
+    /// 6. On the page: CE's pawn list is the colonist list (the page pawns), a real pawn left selected is dropped,
+    ///    no relation is added inside our Entry scope, and CE's faction window and ideo button are refused.
+    /// 7. CE's Delete of a page pawn keeps its list part and skips Pawn.Destroy and
+    ///    WorldPawns.RemoveAndDiscardPawnViaGC, which would change the game on this PC only.
     /// MP safety: a loaded pawn is per-PC input that stays local, in the pre-game page data, until the page's Next
     /// sends it to every PC inside the synced FactionCreator.SendPawn command (the pawn is written as bytes).
     /// </remarks>
@@ -47,6 +54,11 @@ namespace Multiplayer.Compat
         private static AccessTools.FieldRef<bool> gamePlusField;
         private static bool gamePlusSetByUs;
         private static int entryDepth;
+
+        // Row 193b: CE's selected pawn (CEditor.API.Pawn), its list name, and the page pawn CE is deleting.
+        private static System.Reflection.MethodInfo apiGetter, selectedPawnGetter, selectedPawnSetter, listNameSetter;
+        private static System.Reflection.FieldInfo colonistsLabel;
+        private static Pawn deletingPagePawn;
 
         public CharacterEditor(ModContentPack mod)
         {
@@ -96,6 +108,67 @@ namespace Multiplayer.Compat
             MpCompat.harmony.Patch(slotFaction, prefix: new HarmonyMethod(self, nameof(PreSlotFaction)));
             MpCompat.harmony.Patch(passToWorld, prefix: new HarmonyMethod(self, nameof(PrePassToWorld)));
             MpCompat.harmony.Patch(capsuleContents, prefix: new HarmonyMethod(self, nameof(PreCapsuleContents)));
+            PatchPagePawnEdits(editorType, self);
+        }
+
+        // Row 193b: every CE edit of a page pawn runs like the page's own UI (ProgramState.Entry), not only the load.
+        private static void PatchPagePawnEdits(Type editorType, Type self)
+        {
+            apiGetter = AccessTools.PropertyGetter(editorType, "API");
+            selectedPawnGetter = AccessTools.PropertyGetter(editorType, "Pawn");
+            selectedPawnSetter = AccessTools.PropertySetter(editorType, "Pawn");
+            listNameSetter = AccessTools.PropertySetter(editorType, "ListName");
+            colonistsLabel = AccessTools.DeclaredField("CharacterEditor.Label:COLONISTS");
+            var pawnListType = AccessTools.Inner(AccessTools.Inner(editorType, "EditorUI"), "BlockPawnList");
+            var changeList = pawnListType == null ? null : AccessTools.DeclaredMethod(pawnListType, "ChangeList");
+            var delete = AccessTools.DeclaredMethod("CharacterEditor.PawnxTool:Delete");
+            if (apiGetter == null || selectedPawnGetter == null || listNameSetter == null || colonistsLabel == null || changeList == null || delete == null)
+            {
+                Log.Error($"{LogPrefix}a Character Editor member was not found: FIXES row 193b (page pawn edits) not applied");
+                return;
+            }
+
+            var restore = new HarmonyMethod(self, nameof(RestoreProgramState));
+            // Only CE's own DoWindowContents (review 193b: not Window.InnerWindowOnGUI, whose click / accept / cancel
+            // handling also closes and notifies windows of other mods).
+            var ceWindowContents = ceAssembly.GetTypes()
+                .Where(t => typeof(Window).IsAssignableFrom(t) && !t.IsAbstract && !t.ContainsGenericParameters)
+                .Select(t => AccessTools.Method(t, nameof(Window.DoWindowContents), new[] { typeof(UnityEngine.Rect) }))
+                .Where(m => m != null && m.DeclaringType != null && m.DeclaringType.Assembly == ceAssembly)
+                .Distinct().ToList();
+            foreach (var method in ceWindowContents)
+            {
+                try
+                {
+                    MpCompat.harmony.Patch(method, prefix: new HarmonyMethod(self, nameof(PreCeWindowContents)), finalizer: restore);
+                }
+                catch (Exception e)
+                {
+                    Log.Warning($"{LogPrefix}could not wrap {method.DeclaringType}.DoWindowContents (FIXES row 193b): {e.Message}");
+                }
+            }
+            // Refused on the page: CE's faction window (its accept banishes a pawn of Faction.OfPlayer, under Entry the
+            // page's temporary faction, and can queue that faction's removal), and CE's ideo button (opens vanilla
+            // Dialog_ConfigureIdeo in dev edit mode on real ideos, which nothing syncs).
+            MpCompat.harmony.Patch(AccessTools.DeclaredMethod("CharacterEditor.DialogChangeFaction:DoWindowContents"),
+                prefix: new HarmonyMethod(self, nameof(PreRefusedWindowContents)));
+            var changeIdeo = ceAssembly.GetTypes().Select(t => AccessTools.DeclaredMethod(t, "AChangeIdeo")).FirstOrDefault(m => m != null);
+            if (changeIdeo != null)
+                MpCompat.harmony.Patch(changeIdeo, prefix: new HarmonyMethod(self, nameof(PreRefusedAction)));
+            else
+                Log.Warning($"{LogPrefix}AChangeIdeo not found: CE's ideo button stays open on the Settle page (FIXES row 193b)");
+            MpCompat.harmony.Patch(AccessTools.DeclaredMethod(typeof(FloatMenuOption), nameof(FloatMenuOption.Chosen)),
+                prefix: new HarmonyMethod(self, nameof(PreCeFloatMenuChosen)), finalizer: restore);
+            MpCompat.harmony.Patch(changeList, prefix: new HarmonyMethod(self, nameof(PreChangeList)));
+            MpCompat.harmony.Patch(AccessTools.DeclaredMethod(typeof(Pawn_RelationsTracker), nameof(Pawn_RelationsTracker.AddDirectRelation)),
+                prefix: new HarmonyMethod(self, nameof(PreAddDirectRelation)));
+            // Both RemoveDirectRelation overloads end in TryRemoveDirectRelation.
+            MpCompat.harmony.Patch(AccessTools.DeclaredMethod(typeof(Pawn_RelationsTracker), nameof(Pawn_RelationsTracker.TryRemoveDirectRelation)),
+                prefix: new HarmonyMethod(self, nameof(PreTryRemoveDirectRelation)));
+            MpCompat.harmony.Patch(delete, prefix: new HarmonyMethod(self, nameof(PreCeDelete)), finalizer: new HarmonyMethod(self, nameof(EndCeDelete)));
+            MpCompat.harmony.Patch(AccessTools.DeclaredMethod(typeof(Pawn), nameof(Pawn.Destroy)), prefix: new HarmonyMethod(self, nameof(PrePawnDestroy)));
+            MpCompat.harmony.Patch(AccessTools.DeclaredMethod(typeof(RimWorld.Planet.WorldPawns), nameof(RimWorld.Planet.WorldPawns.RemoveAndDiscardPawnViaGC)),
+                prefix: new HarmonyMethod(self, nameof(PreDiscardViaGC)));
         }
 
         private static bool PageOpen => MP.IsInMultiplayer && Find.WindowStack != null && Find.WindowStack.IsOpen(multifactionPageType);
@@ -104,8 +177,17 @@ namespace Multiplayer.Compat
         {
             if (!MP.IsInMultiplayer || __instance.GetType() != multifactionPageType)
                 return;
+            // Row 193b: CE keeps its last list (e.g. wild animals from in-game use); on the page only the colonist list,
+            // which in starting-screen mode is the page's own pawns. CE's editor reloads its list when it differs.
+            bool first = !gamePlusSetByUs;
+            if (first && listNameSetter != null)
+                listNameSetter.Invoke(null, new object[] { colonistsLabel.GetValue(null) });
             gamePlusField() = true;
             gamePlusSetByUs = true;
+            // Review 193b: an editor left open on a real pawn would edit it in starting-screen mode. Drop the selection;
+            // CE's list reload then selects the first page pawn.
+            if (first && selectedPawnSetter != null && !SelectedIsPageLocalOrNone())
+                selectedPawnSetter.Invoke(apiGetter.Invoke(null, null), new object[] { null });
         }
 
         private static void ClearGamePlus()
@@ -135,7 +217,9 @@ namespace Multiplayer.Compat
         }
 
         // __state: the ProgramState to restore, or -1 when this call did not switch.
-        private static void PreEnterEntryState(ref int __state)
+        private static void PreEnterEntryState(ref int __state) => TryEnterEntryState(ref __state);
+
+        private static void TryEnterEntryState(ref int __state)
         {
             __state = -1;
             if (Current.ProgramState != ProgramState.Playing || MP.IsExecutingSyncCommand || !PageOpen)
@@ -188,5 +272,106 @@ namespace Multiplayer.Compat
                 MessageTypeDefOf.RejectInput, false);
             return false;
         }
+
+        // Row 193b: CE's own windows and CE float menu choices, while the page is open and CE's selected pawn is a page
+        // pawn (or none), get the ProgramState.Entry the page's own DoWindowContents gets. Synced setters (work
+        // priorities, policies, SyncFields watched in the UI) then run on this PC only, on a pawn that exists on this
+        // PC only, instead of sending a command whose target no other PC can find. A real pawn selected: old path.
+        private static void PreCeWindowContents(ref int __state)
+        {
+            __state = -1;
+            if (gamePlusSetByUs && SelectedIsPageLocalOrNone())
+                TryEnterEntryState(ref __state);
+        }
+
+        private static bool PreRefusedWindowContents(Window __instance)
+        {
+            if (!gamePlusSetByUs)
+                return true;
+            __instance.Close(false);
+            RejectOnPage("this Character Editor window is not available on the multifaction Settle page (Multiplayer).");
+            return false;
+        }
+
+        private static bool PreRefusedAction()
+        {
+            if (!gamePlusSetByUs)
+                return true;
+            RejectOnPage("this Character Editor action is not available on the multifaction Settle page (Multiplayer).");
+            return false;
+        }
+
+        // At most one message a second: CE can hit a refused call several times in one click.
+        private static long lastRejectTicks = -1000;
+
+        private static void RejectOnPage(string text)
+        {
+            if (Environment.TickCount64 - lastRejectTicks < 1000)
+                return;
+            lastRejectTicks = Environment.TickCount64;
+            Messages.Message("Character Editor: " + text, MessageTypeDefOf.RejectInput, false);
+        }
+
+        private static void PreCeFloatMenuChosen(FloatMenuOption __instance, ref int __state)
+        {
+            __state = -1;
+            if (gamePlusSetByUs && __instance.action?.Method.DeclaringType?.Assembly == ceAssembly && SelectedIsPageLocalOrNone())
+                TryEnterEntryState(ref __state);
+        }
+
+        private static bool SelectedIsPageLocalOrNone()
+        {
+            var api = apiGetter.Invoke(null, null);
+            var pawn = api == null ? null : selectedPawnGetter.Invoke(api, null) as Pawn;
+            return pawn == null || IsPageLocal(pawn);
+        }
+
+        private static bool IsPageLocal(Pawn p) =>
+            p != null && !p.Spawned && Find.GameInitData?.startingAndOptionalPawns?.Contains(p) == true && Find.WorldPawns?.Contains(p) != true;
+
+        private static bool PreChangeList(string listname)
+        {
+            if (!gamePlusSetByUs || string.IsNullOrEmpty(listname) || listname == (string)colonistsLabel.GetValue(null))
+                return true;
+            Messages.Message("Character Editor: on the multifaction Settle page only the colonist list (the page's pawns) is available (Multiplayer).",
+                MessageTypeDefOf.RejectInput, false);
+            return false;
+        }
+
+        // Row 193b: inside our Entry scope no relation is added. A link to a real pawn writes that pawn's relation lists
+        // on this PC only; a link between two page pawns does not survive SendPawn (each pawn is sent alone, the other
+        // one's local id resolves on no PC) - MP turns pawn relations off for page pawns for the same reason.
+        private static bool PreAddDirectRelation()
+        {
+            if (entryDepth <= 0)
+                return true;
+            RejectOnPage("pawn relations cannot be set on the multifaction Settle page (Multiplayer).");
+            return false;
+        }
+
+        private static bool PreTryRemoveDirectRelation(Pawn ___pawn, Pawn otherPawn, ref bool __result)
+        {
+            if (entryDepth <= 0 || (IsPageLocal(___pawn) && IsPageLocal(otherPawn)))
+                return true;
+            __result = false;
+            return false;
+        }
+
+        // Row 193b: CE's Delete on a page pawn. CE's list part runs (editor list, then the page list). The game part is
+        // skipped: Pawn.Destroy (WorldPawns, Anomaly, Master links, gear) and WorldPawns.RemoveAndDiscardPawnViaGC (drops
+        // references to it game-wide) would run on this PC only. A page pawn is in no game list, so the editor and page
+        // lists letting go of it is enough.
+        private static void PreCeDelete(Pawn p, ref Pawn __state)
+        {
+            __state = deletingPagePawn;
+            if (PageOpen && IsPageLocal(p))
+                deletingPagePawn = p;
+        }
+
+        private static void EndCeDelete(Pawn __state) => deletingPagePawn = __state;
+
+        private static bool PrePawnDestroy(Pawn __instance) => deletingPagePawn == null || __instance != deletingPagePawn;
+
+        private static bool PreDiscardViaGC(Pawn p) => deletingPagePawn == null || p != deletingPagePawn;
     }
 }
