@@ -45,6 +45,53 @@ namespace Multiplayer.Compat
             if (mod.PackageId == "Sandy.RPGStyleInventory.avilmask.Revamped".ToLower()) {
                 MpCompat.RegisterLambdaDelegate(tabType, "PopupMenu", 0, 1);
             }
+
+            RegisterCombatExtendedMenu();
+        }
+
+        /// <summary>
+        /// Revamped + Combat Extended: the "Drop and haul" entry of the gear tab menu (and "Forget hold") ran on the clicking PC only.
+        /// </summary>
+        /// <remarks>
+        /// Thread t21. Revamped ships <c>CEPatches.dll</c>; with CE active its <c>RPG_CEPatches.PopupMenuPrefix</c> replaces the tab's
+        /// <c>PopupMenu</c> with its own <c>DropDownThingMenu</c> (CE's menu copied into the tab), so the lambdas registered above are
+        /// not the ones the player clicks. Its "Drop" entry calls the tab's <c>InterfaceDrop</c>, which is synced here. Its
+        /// <c>CE_DropThingHaul</c> entry ("Drop and haul") calls <c>RPG_CEPatches.InterfaceDropHaul(pawn, thing, selPawn)</c> directly,
+        /// and nothing syncs that. Its three branches: a worn apparel or held weapon starts <c>RemoveApparel</c> (with
+        /// <c>haulDroppedApparel</c>) / <c>DropEquipment</c> through <c>Pawn_JobTracker.TryTakeOrderedJob</c> (MP syncs that call, so
+        /// those two branches reached every PC anyway); an inventory item goes through <c>innerContainer.TryDrop</c> on the clicking PC
+        /// only, which spawns the item on one PC. Before either branch it also calls CE's <c>HoldTrackerForget</c>, which edits the
+        /// saved <c>LoadoutManager</c> hold records on one PC only. CE's own gear tab syncs this action
+        /// (<c>ITab_Inventory.SyncedInterfaceDropHaul</c>, registered by CE's ModPatches/Multiplayer part); the copy in Revamped's
+        /// patch does not.
+        /// Fix: sync <c>InterfaceDropHaul</c> itself (all three arguments are explicit, so no context is needed; a corpse's gear tab
+        /// has no <c>SelPawn</c> and cancels instead of throwing) and CE's <c>HoldTrackerForget(Pawn, Thing)</c>, which the menu's
+        /// "Forget hold" entry also calls on the clicking PC only. Both are called from simulation code as well
+        /// (<c>HoldTrackerForget</c> from CE's drop-unused-inventory job giver); MP only intercepts a call made from interface code,
+        /// so those calls are unchanged. <c>InterfaceDropHaul</c> is 271 bytes of IL, so the JIT will not inline it into the menu
+        /// lambda and skip the patch. Not covered here: the other entries of the same menu that write simulation state in the
+        /// clicking PC's interface code (forced apparel toggles, "put away", "equip").
+        /// </remarks>
+        private static void RegisterCombatExtendedMenu()
+        {
+            // Nested private class of Revamped's CEPatches.dll (absent from older RPG Style Inventory builds). Without CE the assembly
+            // is still loaded but never patches the menu (RPG_CEPatch's static constructor needs both mods), so nothing to sync then.
+            var cePatches = AccessTools.TypeByName("CEPatches.RPG_CEPatch+RPG_CEPatches");
+            var holdTracker = AccessTools.TypeByName("CombatExtended.Utility_HoldTracker");
+            if (cePatches == null || holdTracker == null)
+                return;
+
+            var dropHaul = AccessTools.DeclaredMethod(cePatches, "InterfaceDropHaul");
+            if (dropHaul == null)
+                Log.Warning("[MPCompat - RPG Style Inventory] CEPatches.RPG_CEPatches.InterfaceDropHaul not found, 'Drop and haul' stays unsynced");
+            else
+                MP.RegisterSyncMethod(dropHaul).CancelIfAnyArgNull();
+
+            var forget = AccessTools.DeclaredMethod(holdTracker, "HoldTrackerForget", [typeof(Pawn), typeof(Thing)]);
+            if (forget == null)
+                Log.Warning("[MPCompat - RPG Style Inventory] CombatExtended.Utility_HoldTracker.HoldTrackerForget not found, 'Forget hold' stays unsynced");
+            else
+                MP.RegisterSyncMethod(forget).CancelIfAnyArgNull();
         }
 
         private static void SyncITab(SyncWorker sync, ref ITab_Pawn_Gear gearITab)
