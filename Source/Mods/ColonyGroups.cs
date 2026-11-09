@@ -1570,6 +1570,14 @@ namespace Multiplayer.Compat
         private static Type hashSetType;
         private static MethodInfo hashSetAdd;
 
+        // foreach over an IDictionary gives DictionaryEntry. Cast<DictionaryEntry>() would go through IEnumerable, where a generic
+        // Dictionary yields KeyValuePair, and throw InvalidCastException.
+        private static IEnumerable<DictionaryEntry> Entries(IDictionary dict)
+        {
+            foreach (DictionaryEntry entry in dict)
+                yield return entry;
+        }
+
         private static IEnumerable<object> GroupsCanonical()
         {
             if (PawnGroupList is { } pawnGroups)
@@ -1582,11 +1590,11 @@ namespace Multiplayer.Compat
             }
 
             if (ColonyDict is { } colonies)
-                foreach (var entry in colonies.Cast<DictionaryEntry>().Where(e => e.Key is Map && e.Value != null).OrderBy(e => ((Map) e.Key).uniqueID))
+                foreach (var entry in Entries(colonies).Where(e => e.Key is Map && e.Value != null).OrderBy(e => ((Map) e.Key).uniqueID))
                     yield return entry.Value;
 
             if (CaravanDict is { } caravans)
-                foreach (var entry in caravans.Cast<DictionaryEntry>().Where(e => e.Key is Caravan && e.Value != null).OrderBy(e => ((Caravan) e.Key).ID))
+                foreach (var entry in Entries(caravans).Where(e => e.Key is Caravan && e.Value != null).OrderBy(e => ((Caravan) e.Key).ID))
                     yield return entry.Value;
         }
 
