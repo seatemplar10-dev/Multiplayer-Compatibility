@@ -402,6 +402,12 @@ namespace Multiplayer.Compat
                 var group = entry.isStatic ? __args[0] : __instance;
                 if (!TryEncode(group, out var groupRef))
                 {
+                    // A group in no list is a group under construction: the CaravanGroup, ColonyGroup and PawnGroup constructors call Add before the
+                    // group is stored (FIXES row 408). Nobody can click such a group and Add only fills the new object. Dropping the call left an
+                    // empty group that the colonist bar removed and rebuilt on every recache until the stack overflowed.
+                    if (__originalMethod.Name == "Add")
+                        return true;
+
                     Dropped($"group call {__originalMethod.Name}: the group is not in the group lists");
                     return false;
                 }
