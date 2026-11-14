@@ -70,6 +70,7 @@ public class CustomQuestFramework
         MP.RegisterSyncMethod(typeof(CustomQuestFramework), nameof(SyncedChooseOption));
         // Then the gizmos: a throw in the two calls below must not skip them (each has its own TryRegister)
         RegisterGizmos();
+        TryRegister("QuestBookInstance.CheckObjectives", RegisterQuestBook);
         PatchJobMenus();
         PatchDialogWindow();
     }
@@ -408,6 +409,41 @@ public class CustomQuestFramework
         TryRegister("Patch_AddCaravanAction caravan action", () =>
             MpCompat.RegisterLambdaDelegate(CqfNamespace + "Patch_AddCaravanAction", "PostFix",
                 ["item", "CS$<>8__locals1/__instance", "CS$<>8__locals1/comp"], 2));
+    }
+
+    // FIXES row 49 (CQF 3.1 decompile, 14 Nov 2026). The quest book's "check objectives" button
+    // (Dialog_QuestBookStepInfo.DoWindowContents) calls QuestBookInstance.CheckObjectives(stepId) from interface code.
+    // It checks the building, research and resource objectives, completes the step and drops its rewards
+    // (CQFRewardDelivery.TryDrop, drop pods) on the clicking PC only. Fix: that method is synced. The instance goes by its
+    // saved instanceId ("QuestBook_<quest id>" or "QuestBook_Auto_<def>"), found again with GameComponent_QuestBook.FindById;
+    // if a PC does not find it, MP skips the call (null target) on every PC alike.
+    // The 60000-tick check (GameComponent_QuestBook.GameComponentTick) calls the same method from a tick: MP runs it inline.
+    // The clicking PC gets false back (MP returns the default), so its button shows "check unavailable" at once; the
+    // step letter and the rewards then come on every PC when the command runs.
+    private static void RegisterQuestBook()
+    {
+        var instanceType = AccessTools.TypeByName(CqfNamespace + "QuestBookInstance")
+            ?? throw new Exception("type " + CqfNamespace + "QuestBookInstance not found");
+        var componentType = AccessTools.TypeByName(CqfNamespace + "GameComponent_QuestBook")
+            ?? throw new Exception("type " + CqfNamespace + "GameComponent_QuestBook not found");
+        var idField = AccessTools.DeclaredField(instanceType, "instanceId")
+            ?? throw new Exception("field QuestBookInstance.instanceId not found");
+        var componentField = AccessTools.DeclaredField(componentType, "Instance")
+            ?? throw new Exception("field GameComponent_QuestBook.Instance not found");
+        var findById = AccessTools.DeclaredMethod(componentType, "FindById", [typeof(string)])
+            ?? throw new Exception("method GameComponent_QuestBook.FindById(string) not found");
+        var checkObjectives = AccessTools.DeclaredMethod(instanceType, "CheckObjectives", [typeof(string)])
+            ?? throw new Exception("method QuestBookInstance.CheckObjectives(string) not found");
+
+        var byId = Serializer.New<object, string>(
+            instance => instance == null ? null : (string)idField.GetValue(instance),
+            id =>
+            {
+                var component = componentField.GetValue(null);
+                return id == null || component == null ? null : findById.Invoke(component, [id]);
+            });
+
+        MP.RegisterSyncMethod(checkObjectives).TransformTarget(byId, true);
     }
 
     // One failed lookup (a CQF update that renumbers a lambda) must not stop the registrations around it
