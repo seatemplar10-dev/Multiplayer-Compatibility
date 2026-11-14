@@ -31,6 +31,7 @@ namespace Multiplayer.Compat
         private static FieldInfo linkTargetsTwoField;
         private static FieldInfo linkTargetChannelField;
         private static FieldInfo linkTargetCategoryIndexField;
+        private static MethodInfo updateColorsMethod;
 
         public AlienRace(ModContentPack mod)
         {
@@ -76,6 +77,19 @@ namespace Multiplayer.Compat
                 prefix: new HarmonyMethod(typeof(AlienRace), nameof(OnAcceptPrefix)),
                 postfix: new HarmonyMethod(typeof(AlienRace), nameof(OnAcceptPostfix)));
 
+            // FIXES row 111 (HAR 1.6 decompile, 14 Nov 2026). AlienComp.UpdateColors fills the favorite, ideo and mech colour channels
+            // (saved in colorChannels, and Faction.mechColor through AllegianceColor). It is only called from the render tree setup,
+            // so a PC that never draws the pawn (the headless arbiter) saves them empty. UpdateColors uses no Rand and only
+            // reads the pawn's ideo, faction and favourite colour, and it does nothing until the pawn is spawned or its tree is
+            // resolved. So every PC calls it once when the pawn spawns (faction is set by then). Push/pop with a seed from the
+            // pawn's thingIDNumber anyway, so no draw can ever reach the synced Rand stream. Only in a multiplayer game.
+            updateColorsMethod = AccessTools.DeclaredMethod(alienCompType, "UpdateColors");
+            if (updateColorsMethod == null)
+                Log.Error("[MPCompat] Humanoid Alien Races: AlienComp.UpdateColors not found, favorite/ideo/mech colours stay per PC");
+            else
+                MpCompat.harmony.Patch(AccessTools.DeclaredMethod(typeof(Pawn), nameof(Pawn.SpawnSetup)),
+                    postfix: new HarmonyMethod(typeof(AlienRace), nameof(SpawnSetupPostfix)));
+
             MP.RegisterSyncWorker<AlienCompData>(SyncAlienCompData);
             MP.RegisterSyncMethod(typeof(AlienRace), nameof(SyncAlienData));
 
@@ -98,6 +112,19 @@ namespace Multiplayer.Compat
                 else
                     MP.RegisterSyncMethod(setter);
             }
+        }
+
+        static void SpawnSetupPostfix(Pawn __instance)
+        {
+            if (!MP.IsInMultiplayer || __instance?.AllComps == null || !__instance.Spawned) return;
+
+            var comp = __instance.AllComps.FirstOrDefault(c => c.GetType() == alienCompType);
+            if (comp == null) return;
+
+            Rand.PushState(Gen.HashCombineInt(__instance.thingIDNumber, 1114112));
+            try { updateColorsMethod.Invoke(comp, null); }
+            catch (Exception e) { Log.Warning($"[MPCompat] Humanoid Alien Races: UpdateColors failed for {__instance}: {e.InnerException ?? e}"); }
+            finally { Rand.PopState(); }
         }
 
         static void StylingStationCtorPrefix(Pawn pawn)
