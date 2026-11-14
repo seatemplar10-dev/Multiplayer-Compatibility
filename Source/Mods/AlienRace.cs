@@ -39,6 +39,8 @@ namespace Multiplayer.Compat
 
         private static void LatePatch()
         {
+            PatchOutfitStand();
+
             alienCompType = AccessTools.TypeByName("AlienRace.AlienPartGenerator+AlienComp");
             if (alienCompType == null) return;
 
@@ -77,6 +79,25 @@ namespace Multiplayer.Compat
             MP.RegisterSyncWorker<AlienCompData>(SyncAlienCompData);
             MP.RegisterSyncMethod(typeof(AlienRace), nameof(SyncAlienData));
 
+        }
+
+        // FIXES row 59: the outfit stand gizmos (race, body type, head type) set these properties from a float menu on the
+        // clicking PC only. The setters draw Rand (gender, fallback body/head), rewrite the stand's storage filter and drop
+        // held items. Syncing the setters runs them inside the synced command on every PC, with MP's seeded Rand.
+        // Calls from spawn (ticking) and from loading are not in the interface, so they still run directly.
+        private static void PatchOutfitStand()
+        {
+            var type = AccessTools.TypeByName("AlienRace.Comp_OutfitStandHAR");
+            if (type == null) return;
+
+            foreach (var name in new[] { "Race", "BodyType", "HeadType" })
+            {
+                var setter = AccessTools.DeclaredPropertySetter(type, name);
+                if (setter == null)
+                    Log.Error($"[MPCompat] Humanoid Alien Races: Comp_OutfitStandHAR.{name} setter not found, the outfit stand gizmo stays unsynced");
+                else
+                    MP.RegisterSyncMethod(setter);
+            }
         }
 
         static void StylingStationCtorPrefix(Pawn pawn)
