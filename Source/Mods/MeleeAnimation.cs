@@ -33,6 +33,8 @@ namespace Multiplayer.Compat
     /// 6. Mod settings change simulation (chances, MTBs, gore, scan interval). Fix: settings window locked in MP.
     /// 7. Render-time statics (IsRendering, ForcedHasHeadValue) are read by the simulation and stay set when a draw
     ///    throws. Fix: reset after every frame draw (finally) and at every map tick in MP.
+    /// 8. The dev animation debugger's rehearsal mode (real clock, one PC) is read by animation end events.
+    ///    Fix: the starter never counts as open in MP (FIXES row 61).
     /// </remarks>
     [MpCompatFor("co.uk.epicguru.meleeanimation")]
     public class MeleeAnimation
@@ -136,6 +138,7 @@ namespace Multiplayer.Compat
                 ("float menu actions", PatchFloatMenu),
                 ("duel spot", PatchDuelSpot),
                 ("settings lock", PatchSettings),
+                ("debugger rehearsal mode", PatchRehearsalMode),
             };
             var failed = 0;
             foreach (var (what, run) in sections)
@@ -975,6 +978,30 @@ namespace Multiplayer.Compat
 
             Widgets.Label(inRect, "Melee Animation settings change the simulation (chances, timings, gore) and are not synced. " +
                                   "They are locked during a Multiplayer session: change them in single player, identically on every client.");
+            return false;
+        }
+
+        #endregion
+
+        #region 8. Debugger rehearsal mode
+
+        // FIXES row 61. Dialog_AnimationDebugger.IsInRehearsalMode = startRehearsal && IsStarterOpen, and IsStarterOpen is
+        // true while the dev debugger's starter tab drew within 0.25 s of Time.realtimeSinceStartup on THIS PC. The simulation
+        // reads it (AnimRenderer.OnEnd skips SpawnDroppedHeads, gore and execution-outcome events), so a PC with the debugger
+        // open ends animations differently. In MP the starter never counts as open. The getter is patched, not
+        // IsInRehearsalMode: that one is small enough for the JIT to inline into its callers.
+        private static void PatchRehearsalMode()
+        {
+            var getter = AccessTools.DeclaredPropertyGetter(FindType("AM.UI.Dialog_AnimationDebugger"), "IsStarterOpen")
+                         ?? throw new MissingMethodException("AM.UI.Dialog_AnimationDebugger", "get_IsStarterOpen");
+            MpCompat.harmony.Patch(getter, prefix: Hm(nameof(PreIsStarterOpen)));
+        }
+
+        private static bool PreIsStarterOpen(ref bool __result)
+        {
+            if (!MP.IsInMultiplayer)
+                return true;
+            __result = false;
             return false;
         }
 
