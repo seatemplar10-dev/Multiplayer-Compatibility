@@ -28,6 +28,17 @@ namespace Multiplayer.Compat
 
         public EccentricProjectilesReloadResidue(ModContentPack mod)
         {
+            // Row 61 party clock first and in its own try block, so a failed row 244 lookup below cannot skip it.
+            try
+            {
+                MpCompat.harmony.Patch(AccessTools.DeclaredMethod("EccentricDefenseGrid.UIAssets:PartyModeColor"),
+                    transpiler: new HarmonyMethod(typeof(EccentricProjectilesReloadResidue), nameof(ReplacePartyClock)));
+            }
+            catch (Exception e)
+            {
+                Log.Error($"MPCompat :: Eccentric Defense Grid: party mode clock patch failed (FIXES row 61): {e}");
+            }
+
             counterFields = new[]
             {
                 AccessTools.DeclaredField("EccentricProjectiles.ModExtension_ProjectileEffects:originIncrementers")
@@ -38,9 +49,6 @@ namespace Multiplayer.Compat
             // Game.LoadGame: Multiplayer's reloads and a joiner's load both go through it (as in ResearchReinvented.cs, row 173)
             MpCompat.harmony.Patch(AccessTools.DeclaredMethod(typeof(Game), nameof(Game.LoadGame)),
                 prefix: new HarmonyMethod(typeof(EccentricProjectilesReloadResidue), nameof(PreLoadGame)));
-
-            MpCompat.harmony.Patch(AccessTools.DeclaredMethod("EccentricDefenseGrid.UIAssets:PartyModeColor"),
-                transpiler: new HarmonyMethod(typeof(EccentricProjectilesReloadResidue), nameof(ReplacePartyClock)));
         }
 
         private static void PreLoadGame()
