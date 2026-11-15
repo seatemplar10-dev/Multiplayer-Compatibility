@@ -24,7 +24,6 @@ namespace Multiplayer.Compat
     internal class EccentricProjectilesReloadResidue
     {
         private static readonly DateTime GameClockEpoch = new(2000, 1, 1);
-        private static FieldInfo[] counterFields;
 
         public EccentricProjectilesReloadResidue(ModContentPack mod)
         {
@@ -38,23 +37,8 @@ namespace Multiplayer.Compat
             {
                 Log.Error($"MPCompat :: Eccentric Defense Grid: party mode clock patch failed (FIXES row 61): {e}");
             }
-
-            counterFields = new[]
-            {
-                AccessTools.DeclaredField("EccentricProjectiles.ModExtension_ProjectileEffects:originIncrementers")
-                ?? throw new System.MissingFieldException("EccentricProjectiles.ModExtension_ProjectileEffects", "originIncrementers"),
-                AccessTools.DeclaredField("EccentricProjectiles.ModExtension_WeaponAttachments:originIncrementers")
-                ?? throw new System.MissingFieldException("EccentricProjectiles.ModExtension_WeaponAttachments", "originIncrementers"),
-            };
-            // Game.LoadGame: Multiplayer's reloads and a joiner's load both go through it (as in ResearchReinvented.cs, row 173)
-            MpCompat.harmony.Patch(AccessTools.DeclaredMethod(typeof(Game), nameof(Game.LoadGame)),
-                prefix: new HarmonyMethod(typeof(EccentricProjectilesReloadResidue), nameof(PreLoadGame)));
-        }
-
-        private static void PreLoadGame()
-        {
-            foreach (var field in counterFields)
-                (field.GetValue(null) as IDictionary)?.Clear();
+            // LAB CONTROL ctl244 (16 Nov 2026): the row 244 counter clear on Game.LoadGame (911f7b3) is removed here on purpose.
+            // This build is for the load-pair calibration only and must never ship.
         }
 
         private static IEnumerable<CodeInstruction> ReplacePartyClock(IEnumerable<CodeInstruction> instr, MethodBase baseMethod)
