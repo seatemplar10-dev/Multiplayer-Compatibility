@@ -67,11 +67,6 @@ namespace Multiplayer.Compat
     /// the manager's live state back afterwards (a finalizer, so a failed save does too). The file is written as before, and a load (join point,
     /// joiner) still gets the pruned state on every PC.
     ///
-    /// E. FIXES row 253 (27 Oct 2026): after every join point reload Multiplayer calls <c>ChangeRealPlayerFaction</c> with THIS PC's own
-    /// faction (MP.InInterface is false there: <c>reloading</c>, long event). A tracker lookup inside it made a real tracker and took a number
-    /// on one PC only (c7soak_1: host nextTrackerId 6924 vs 6923 right after the MP 101,091 autosave). Inside that call UI rules apply:
-    /// a placeholder. The next tick's lookup makes the real tracker on every PC. Lab flag <c>-mplabpsilog</c> logs every id handed out.
-    ///
     /// Per-PC reads inside the synced bodies: none (they use only the objects found above, Defs and DefDatabase lists, no selection, no
     /// <c>Find.CurrentMap</c>, no settings, no Rand).
     /// NOT covered: the rest of <c>PawnPsiCard</c> / <c>ITab_Pawn_Psi</c> (energy and focus nodes, training queue, ability slots) edits the tracker
@@ -122,8 +117,8 @@ namespace Multiplayer.Compat
         private static Game uiTrackersGame;
         private static bool loggedWatchError, loggedPlaceholderError, loggedPatchError;
 
-        // FIXES row 253 (point E): depth of Multiplayer's ChangeRealPlayerFaction, which runs on one PC only
-        private static int localFactionChange, localFactionPlaceholders;
+        // LAB CONTROL ctl253: depth of Multiplayer's ChangeRealPlayerFaction, kept only for the -mplabpsilog line (row 253 guard removed)
+        private static int localFactionChange;
 
         // Lab only: -mplabpsilog logs every tracker id the mod hands out, so two PCs' logs can be paired line by line
         private static readonly bool LabPsiLog = GenCommandLine.CommandLineArgPassed("mplabpsilog");
@@ -237,8 +232,7 @@ namespace Multiplayer.Compat
                     prefix: new HarmonyMethod(typeof(PsiTech), nameof(PreManagerExposeData)),
                     finalizer: new HarmonyMethod(typeof(PsiTech), nameof(FinalManagerExposeData))));
 
-            // FIXES row 253 (point E): Multiplayer's ChangeRealPlayerFaction sets THIS PC's faction (after every join point reload, on the
-            // Settle issuer). A tracker made inside it took a number from the saved counter on one PC only (c7soak_1, MP 101,091 autosave).
+            // LAB CONTROL ctl253: depth counter only, read by the -mplabpsilog line; the row 253 guard that used it is removed.
             Try("local faction change", () =>
                 MpCompat.harmony.Patch(AccessTools.DeclaredMethod("Multiplayer.Client.MultiplayerGame:ChangeRealPlayerFaction", [typeof(RimWorld.Faction), typeof(bool)]),
                     prefix: new HarmonyMethod(typeof(PsiTech), nameof(PreLocalFactionChange)),
@@ -708,7 +702,7 @@ namespace Multiplayer.Compat
             if (pawn == null || !MP.IsInMultiplayer)
                 return true;
 
-            if (!MP.InInterface && localFactionChange == 0 && pawn.thingIDNumber >= 0)
+            if (!MP.InInterface && pawn.thingIDNumber >= 0)
             {
                 // The real tracker is (or is about to be) made by the original on every PC; drop the placeholder of this pawn.
                 if (uiTrackers.Count != 0)
@@ -736,9 +730,6 @@ namespace Multiplayer.Compat
                     trackerInitializeCaches.Invoke(placeholder, null);
                     trackerNotifyEssenceDirty.Invoke(placeholder, null);
                 }
-
-                if (localFactionChange > 0 && !MP.InInterface && localFactionPlaceholders++ < 20)
-                    Log.Message($"{LogPrefix}FIXES row 253: placeholder for {pawn.ThingID} inside ChangeRealPlayerFaction (ticksGame {Find.TickManager?.TicksGame})");
                 __result = placeholder;
                 return false;
             }
