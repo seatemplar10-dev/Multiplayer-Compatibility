@@ -7,9 +7,10 @@ using Verse;
 // No flag = no rows, every Row() call is false (one bool/count test). The flag counts only when the lab harness type
 // SeaMPLab.MPLab is loaded; Sea's and James's game have no harness dll, so there the flag is ignored.
 // Gate timing: the harness assembly is loaded in LoadedModManager.LoadModContent, before CreateModClasses constructs the
-// mods (decompile Verse/LoadedModManager.cs:49-61), so it is loaded when any compat constructor or patch runs. The gate is
-// still read lazily at the first Row()/Touch() call (not in the static constructor), so even a Row() call that came earlier
-// than the harness load could not latch a false "no harness".
+// mods (decompile Verse/LoadedModManager.cs:49-61), so it is normally loaded when any compat constructor or patch runs. The gate
+// is read lazily at the first Row()/Touch() call (not in the static constructor) and the result is latched for good: a Row()
+// call that came before the harness load WOULD latch a false "no harness". The load order above is what prevents that.
+// The first read runs under a lock and gateRead is set last, so no thread sees rows before the harness check has cleared them.
 internal static class LabOff
 {
     public const string Arg = "mplaboff";
@@ -17,7 +18,8 @@ internal static class LabOff
     // The rows THIS dll can switch.
     static readonly int[] Owned = { 178, 361 };
     static readonly HashSet<int> rows = new HashSet<int>();    // requested AND owned
-    static bool gateRead;
+    static volatile bool gateRead;
+    static readonly object gateLock = new object();
 
     static LabOff()
     {
@@ -30,7 +32,16 @@ internal static class LabOff
     // Reads the harness gate once (first call) and logs one line per owned requested row.
     static void ReadGate()
     {
-        gateRead = true;
+        lock (gateLock)
+        {
+            if (gateRead) return;
+            ReadGateLocked();
+            gateRead = true;
+        }
+    }
+
+    static void ReadGateLocked()
+    {
         if (rows.Count == 0) return;
         if (AccessTools.TypeByName("SeaMPLab.MPLab") == null) { rows.Clear(); return; }
         var sorted = new List<int>(rows);

@@ -49,7 +49,7 @@ namespace Multiplayer.Compat
 
         public RealRuinsPerPcFiles(ModContentPack mod)
         {
-            if (LabOff.Row(304)) return;
+            if (LabOff.Row(304)) { RedirectFactionSelectorRng(mod); return; } // row 304 off keeps row 60 on
             var assemblies = mod.assemblies.loadedAssemblies
                 .Where(a => a.GetType(ns + "SnapshotStoreManager", false) != null)
                 .ToList();

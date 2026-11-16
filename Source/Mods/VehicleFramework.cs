@@ -266,11 +266,12 @@ namespace Multiplayer.Compat
         // and not saved).
         private static void PostAllSendablePawns(List<Pawn> __result, bool allowCapturableDownedPawns)
         {
-            if (!MP.IsInMultiplayer || __result == null || LabOff.Row(361))
+            if (!MP.IsInMultiplayer || __result == null)
                 return;
 
             try
             {
+                var rowOff = LabOff.Row(361); // row 361 off: keep every aboard pawn (no faction test), row 360 sort stays
                 var args = new object[1];
                 HashSet<Pawn> aboard = null;
                 List<Pawn> keep = null;
@@ -285,7 +286,7 @@ namespace Multiplayer.Compat
                     aboard ??= [];
                     keep ??= [];
                     aboard.Add(pawn);
-                    if (vehicle.Faction == Faction.OfPlayer && (pawn.Faction == Faction.OfPlayer || pawn.IsPrisonerOfColony ||
+                    if (rowOff || vehicle.Faction == Faction.OfPlayer && (pawn.Faction == Faction.OfPlayer || pawn.IsPrisonerOfColony ||
                         (allowCapturableDownedPawns && pawn.Downed && !pawn.mindState.WillJoinColonyIfRescued && CaravanUtility.ShouldAutoCapture(pawn, Faction.OfPlayer))))
                         keep.Add(pawn);
                 }
