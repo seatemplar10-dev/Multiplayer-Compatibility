@@ -21,9 +21,33 @@ internal static class LabOff
     static volatile bool gateRead;
     static readonly object gateLock = new object();
 
+    // Accepts "-mplaboff=117,152" (one token) and "-mplaboff 117 152" (cmd.exe splits at '=' and ','; tokens up to the next '-' one).
+    static string ReadRaw()
+    {
+        var ints = new List<int>();
+        string[] a = Environment.GetCommandLineArgs();
+        string key = "-" + Arg;
+        for (int i = 0; i < a.Length; i++)
+        {
+            string t = a[i];
+            if (t == null) continue;
+            if (t.StartsWith(key + "=", StringComparison.OrdinalIgnoreCase)) AddParts(t.Substring(key.Length + 1), ints);
+            else if (string.Equals(t, key, StringComparison.OrdinalIgnoreCase))
+                for (int j = i + 1; j < a.Length && a[j] != null && !a[j].StartsWith("-"); j++) AddParts(a[j], ints);
+        }
+        return ints.Count == 0 ? null : string.Join(",", ints.ConvertAll(x => x.ToString()).ToArray());
+    }
+
+    static void AddParts(string s, List<int> ints)
+    {
+        foreach (var p in s.Split(','))
+            if (int.TryParse(p.Trim(), out int v)) ints.Add(v);
+    }
+
     static LabOff()
     {
-        if (!GenCommandLine.TryGetCommandLineArg(Arg, out Raw) || string.IsNullOrEmpty(Raw)) { Raw = null; return; }
+        Raw = ReadRaw();
+        if (Raw == null) return;
         foreach (var p in Raw.Split(','))
             if (int.TryParse(p.Trim(), out int r) && Array.IndexOf(Owned, r) >= 0)
                 rows.Add(r);
