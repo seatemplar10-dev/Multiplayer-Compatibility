@@ -145,6 +145,7 @@ namespace Multiplayer.Compat
         // The window gate goes in last and only when every registration worked.
         public RimDark40kCustomization(ModContentPack mod)
         {
+            if (LabOff.Row(174)) return;
             Try("find Core40k types", FindTypes);
             if (failures == 0)
                 Try("look up the comp mutators", PlanCompMutators);

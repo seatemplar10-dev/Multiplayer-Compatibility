@@ -127,7 +127,10 @@ namespace Multiplayer.Compat
                 // written as the command's map id): it is a map command for THAT map, run with the presser's faction, and on every PC
                 // Find.CurrentMap is that map for the call (AsyncTimeComp.ExecuteCmd), shift and control state still sent as before.
                 MP.RegisterSyncMethod(AccessTools.Method(type, "AllowAllTheThings")).SetPostInvoke(ClearTemporaryState);
-                MP.RegisterSyncWorker<object>(ShiftControlMapSyncWorker, type, shouldConstruct: true);
+                if (LabOff.Row(196))
+                    MP.RegisterSyncWorker<object>(ShiftControlStateOnlySyncWorker, type, shouldConstruct: true);
+                else
+                    MP.RegisterSyncWorker<object>(ShiftControlMapSyncWorker, type, shouldConstruct: true);
 
                 // Remove syncing from select similar designator (breaks the designator otherwise)
                 selectSimilarType = AccessTools.TypeByName("AllowTool.Designator_SelectSimilar");
@@ -222,8 +225,9 @@ namespace Multiplayer.Compat
             // Strip mine
             // FIXES row 196 (same cause): DesignateCells(IEnumerable<IntVec3>) reads Find.CurrentMap for the existing mine designations and
             // toggles the designations on it, but sent only cells (no map) = a world command pinned to the first colony's map.
-            MP.RegisterSyncMethod(AccessTools.Method("AllowTool.Designator_StripMine:DesignateCells"))
-                .SetContext(SyncContext.CurrentMap);
+            var stripMineSync = MP.RegisterSyncMethod(AccessTools.Method("AllowTool.Designator_StripMine:DesignateCells"));
+            if (!LabOff.Row(196))
+                stripMineSync.SetContext(SyncContext.CurrentMap);
         }
 
         #endregion

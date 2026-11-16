@@ -91,6 +91,7 @@ namespace Multiplayer.Compat
 
         public CharacterEditor(ModContentPack mod)
         {
+            if (LabOff.Row(193)) return;
             multifactionPageType = AccessTools.TypeByName("Multiplayer.Client.Factions.Page_ConfigureStartingPawns_Multifaction");
             if (multifactionPageType == null)
             {

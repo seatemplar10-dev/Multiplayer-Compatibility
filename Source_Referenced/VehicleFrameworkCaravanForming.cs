@@ -290,7 +290,7 @@ namespace Multiplayer.Compat
                     continue;
                 // Row 361: every seat pawn needs a transferable in this session, aboard or not (a pawn aboard this vehicle that the
                 // faction filter dropped from the list, e.g. another faction's, has none and must not fill a seat).
-                if (TransferableOf(session, pawn) == null)
+                if (!LabOff.Row(361) && TransferableOf(session, pawn) == null)
                     continue;
                 if (!aboard.Contains(pawn))
                 {

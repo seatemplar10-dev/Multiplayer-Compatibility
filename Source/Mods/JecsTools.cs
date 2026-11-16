@@ -146,7 +146,7 @@ namespace Multiplayer.Compat
 
         private static bool AbilityDataReadOnlyInInterface(object __instance, ref object __result)
         {
-            if (!MP.IsInMultiplayer || !MP.InInterface)
+            if (!MP.IsInMultiplayer || !MP.InInterface || LabOff.Row(163))
                 return true;
             __result = compAbilityUserAbilityDataField(__instance) ?? Activator.CreateInstance(abilityDataType, __instance);
             return false;

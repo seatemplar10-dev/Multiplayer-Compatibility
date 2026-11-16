@@ -66,6 +66,7 @@ namespace Multiplayer.Compat
 
         public CombatExtendedFireArc(ModContentPack mod)
         {
+            if (LabOff.Row(40)) return;
             Init();
             MP.RegisterSyncMethod(typeof(CombatExtendedFireArc), nameof(SyncedSetFireArc)).CancelIfAnyArgNull();
             Patch(MpCompat.harmony);

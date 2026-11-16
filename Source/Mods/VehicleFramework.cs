@@ -266,7 +266,7 @@ namespace Multiplayer.Compat
         // and not saved).
         private static void PostAllSendablePawns(List<Pawn> __result, bool allowCapturableDownedPawns)
         {
-            if (!MP.IsInMultiplayer || __result == null)
+            if (!MP.IsInMultiplayer || __result == null || LabOff.Row(361))
                 return;
 
             try
@@ -399,7 +399,7 @@ namespace Multiplayer.Compat
 
         private static bool NoThreadInMp(ref bool __result)
         {
-            if (!MP.IsInMultiplayer)
+            if (!MP.IsInMultiplayer || LabOff.Row(46))
                 return true;
             __result = false;
             return false;
@@ -407,7 +407,7 @@ namespace Multiplayer.Compat
 
         private static bool RunInlineInMp(Action action, CancellationToken token, ref Task __result)
         {
-            if (!MP.IsInMultiplayer)
+            if (!MP.IsInMultiplayer || LabOff.Row(46))
                 return true;
             if (!token.IsCancellationRequested)
             {
@@ -422,7 +422,7 @@ namespace Multiplayer.Compat
         // Same loop as VF's GetAllRegions (valid regions in cell-index order, each once), on the main thread.
         private static bool SequentialGetAllRegions(object __instance, object regions)
         {
-            if (!MP.IsInMultiplayer)
+            if (!MP.IsInMultiplayer || LabOff.Row(46))
                 return true;
             var updater = regionUpdaterField(__instance);
             if (updater == null || !(bool)updaterEnabled(updater))
@@ -444,7 +444,7 @@ namespace Multiplayer.Compat
 
         private static bool SequentialGenerateRegions(object __instance)
         {
-            if (!MP.IsInMultiplayer)
+            if (!MP.IsInMultiplayer || LabOff.Row(46))
                 return true;
             generateRegions(__instance);
             return false;

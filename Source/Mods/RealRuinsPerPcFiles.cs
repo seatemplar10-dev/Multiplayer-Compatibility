@@ -49,6 +49,7 @@ namespace Multiplayer.Compat
 
         public RealRuinsPerPcFiles(ModContentPack mod)
         {
+            if (LabOff.Row(304)) return;
             var assemblies = mod.assemblies.loadedAssemblies
                 .Where(a => a.GetType(ns + "SnapshotStoreManager", false) != null)
                 .ToList();

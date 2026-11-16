@@ -39,7 +39,7 @@ namespace Multiplayer.Compat
         {
             foreach (var gizmo in __result)
             {
-                if (MP.IsInMultiplayer && gizmo is Command_Toggle toggle && toggle.toggleAction?.Target is { } closure)
+                if (MP.IsInMultiplayer && !LabOff.Row(168) && gizmo is Command_Toggle toggle && toggle.toggleAction?.Target is { } closure)
                 {
                     var verbField = AccessTools.Field(closure.GetType(), "disableableVerb");
                     if (verbField?.GetValue(closure) is Verb verb)

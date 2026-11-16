@@ -131,14 +131,14 @@ public class VanillaAspirationsExpanded
     [MpCompatPrefix("VAspirE.SatisfactionPatches", "CheckGeneral")]
     [MpCompatPrefix("VAspirE.SatisfactionPatches", "CheckGeneralDaily")]
     [MpCompatPrefix("VAspirE.SatisfactionPatches", "CheckArgP")]
-    private static bool CheckOnlyInSimulation() => !MP.IsInMultiplayer || !MP.InInterface;
+    private static bool CheckOnlyInSimulation() => !MP.IsInMultiplayer || !MP.InInterface || LabOff.Row(110);
 
     // 1.7 lab (FIXES row 161): the same rule at the two points every route into an aspiration passes through, so that a hook
     // that is not in the list above (or a new one in a later VAspirE) cannot change the need level, completedTicks or send the
     // message from interface code. Interface code never completes an aspiration, whatever called it.
     [MpCompatPrefix("VAspirE.Need_Fulfillment", "CheckCompletion")]
     [MpCompatPrefix("VAspirE.Need_Fulfillment", "Complete")]
-    private static bool CompleteOnlyInSimulation() => !MP.IsInMultiplayer || !MP.InInterface;
+    private static bool CompleteOnlyInSimulation() => !MP.IsInMultiplayer || !MP.InInterface || LabOff.Row(161);
 
     #endregion
 
@@ -163,7 +163,7 @@ public class VanillaAspirationsExpanded
     [MpCompatPrefix("VAspirE.Need_Fulfillment", "ShowOnNeedList", MethodType.Getter)]
     private static bool ShowOnNeedListFromThePawn(Pawn ___pawn, ref bool __result)
     {
-        if (!MP.IsInMultiplayer)
+        if (!MP.IsInMultiplayer || LabOff.Row(161))
             return true;
 
         var result = InFulfillmentPopulation(___pawn);

@@ -16,6 +16,7 @@ namespace Multiplayer.Compat
         public MpCompat(ModContentPack content) : base(content)
         {
             DebugActions.content = content;
+            LabOff.Touch();
 
             if (!MP.enabled) {
                 Log.Warning("MPCompat :: Multiplayer is disabled.");
@@ -51,7 +52,7 @@ namespace Multiplayer.Compat
             // FIXES row 373: the vanilla Manage Areas Copy button is one synced action, not an empty new area (VanillaAreaCopy.cs)
             try
             {
-                VanillaAreaCopy.Install(harmony);
+                if (!LabOff.Row(373)) VanillaAreaCopy.Install(harmony);
             }
             catch (Exception e)
             {

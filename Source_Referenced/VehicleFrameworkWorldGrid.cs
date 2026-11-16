@@ -51,6 +51,7 @@ namespace Multiplayer.Compat
 
         public VehicleFrameworkWorldGrid(ModContentPack mod)
         {
+            LabOff.Touch();
             var type = typeof(WorldVehiclePathGrid);
             // Every VF member the job uses, with its signature: a VF update that changes one fails here, at load,
             // before anything is patched.
@@ -75,7 +76,7 @@ namespace Multiplayer.Compat
             => method ?? throw new MissingMethodException(type.FullName, name);
 
         private static bool PreRecalculateAllPathCosts(WorldVehiclePathGrid __instance)
-            => !MP.IsInMultiplayer || !TryStartDailyJob(__instance);
+            => !MP.IsInMultiplayer || LabOff.Row(178) || !TryStartDailyJob(__instance);
 
         private static void PreWorldComponentTick(WorldVehiclePathGrid __instance)
         {

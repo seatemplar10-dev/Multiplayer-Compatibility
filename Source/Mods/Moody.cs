@@ -27,7 +27,7 @@ namespace Multiplayer.Compat
 
         private static void PreCurInstantLevel(Need_Mood __instance, out (bool restore, int tick, float value) __state)
         {
-            __state = MP.IsInMultiplayer && MP.InInterface
+            __state = MP.IsInMultiplayer && MP.InInterface && !LabOff.Row(76)
                 ? (true, lastTick(__instance), lastValue(__instance))
                 : (false, 0, 0f);
         }

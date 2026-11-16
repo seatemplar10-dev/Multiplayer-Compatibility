@@ -38,7 +38,7 @@ namespace Multiplayer.Compat
 
         private static bool ReadOnlyInInterface(Pawn pawn, ref object __result)
         {
-            if (!MP.IsInMultiplayer || !MP.InInterface || pawn == null)
+            if (!MP.IsInMultiplayer || !MP.InInterface || pawn == null || LabOff.Row(164))
                 return true;
             if (assignedLoadoutsGetter.Invoke(null, null) is System.Collections.IDictionary assigned && assigned.Contains(pawn))
                 return true;
