@@ -43,6 +43,11 @@ namespace Multiplayer.Compat
             type = compHandlerSettingsType = AccessTools.TypeByName("AnimalTab.CompHandlerSettings");
             modeField = MP.RegisterSyncField(type, "_mode");
             levelField = MP.RegisterSyncField(type, "_level");
+            // FIXES row 412(a): Alert_HandlerInvalid runs on each PC outside the tick and calls IsValid, which resets the mode
+            // through Notify_HandlerGone (Mode = Any, then SetDefaults) when the handler is destroyed. Unsynced, that changed
+            // _mode/_handler/_level on the PCs whose alert fired first. Synced, the alert path sends a command and every PC
+            // applies it on the same tick; the tick path (Pawn.Kill -> Notify_HandlerDied) still runs it directly.
+            MP.RegisterSyncMethod(type, "Notify_HandlerGone");
         }
 
         private static void PreDoHeader(PawnTable table)

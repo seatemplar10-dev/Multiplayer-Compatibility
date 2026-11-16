@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
+using System.Reflection.Emit;
 using HarmonyLib;
 using Multiplayer.API;
 using RimWorld;
@@ -69,7 +70,61 @@ namespace Multiplayer.Compat
             Gate(assemblies, "GenStep_ScatterRealRuins", "Generate", nameof(PreScatterRealRuins));
             Gate(assemblies, "GenStep_ScatterPOIRuins", "Generate", nameof(PreSkipGenStep));
             Gate(assemblies, "QuestNode_FindBlueprint", "TestRunInt", nameof(PreQuestTestRun));
+
+            RedirectFactionSelectorRng(mod);
         }
+
+        /// <summary>
+        /// FIXES row 60. <c>FactionSelector.GetRandomFaction</c> (global namespace, 1.6 assembly) picks the raid faction for
+        /// <c>RuinedBaseComp.TriggerRaid</c>, called from the world object CompTick, with <c>rng.NextDouble()</c> on a static
+        /// unseeded <see cref="System.Random"/>: a different faction on every PC. In MP the field read now yields
+        /// <see cref="PatchingUtilities.RandRedirector"/>, so the draw comes from the synced Verse.Rand. Single player keeps its rng.
+        /// </summary>
+        private static void RedirectFactionSelectorRng(ModContentPack mod)
+        {
+            var patched = 0;
+            foreach (var asm in mod.assemblies.loadedAssemblies)
+            {
+                var type = asm.GetType("FactionSelector", false);
+                var method = type == null ? null : AccessTools.DeclaredMethod(type, "GetRandomFaction");
+                if (method == null) continue;
+
+                try
+                {
+                    MpCompat.harmony.Patch(method, transpiler: new HarmonyMethod(typeof(RealRuinsPerPcFiles), nameof(FactionSelectorRngTranspiler)));
+                    patched++;
+                }
+                catch (Exception e)
+                {
+                    Log.Error($"MPCompat :: Real Ruins: could not patch FactionSelector.GetRandomFaction in {asm.GetName().Name}: {e}");
+                }
+            }
+
+            if (patched == 0)
+                Log.Warning("MPCompat :: Real Ruins: FactionSelector.GetRandomFaction not found, its System.Random stays unsynced");
+        }
+
+        private static IEnumerable<CodeInstruction> FactionSelectorRngTranspiler(IEnumerable<CodeInstruction> instr, MethodBase original)
+        {
+            var replaced = 0;
+            foreach (var ci in instr)
+            {
+                yield return ci;
+
+                if (ci.opcode == OpCodes.Ldsfld && ci.operand is FieldInfo field &&
+                    field.FieldType == typeof(System.Random) && field.DeclaringType == original.DeclaringType)
+                {
+                    yield return new CodeInstruction(OpCodes.Call, AccessTools.Method(typeof(RealRuinsPerPcFiles), nameof(SyncedRngInMp)));
+                    replaced++;
+                }
+            }
+
+            if (replaced != 1)
+                Log.Error($"MPCompat :: Real Ruins: expected 1 System.Random field read in {original.FullDescription()}, patched {replaced}");
+        }
+
+        private static System.Random SyncedRngInMp(System.Random original)
+            => MP.IsInMultiplayer ? PatchingUtilities.RandRedirector.Instance : original;
 
         private static int Gate(List<Assembly> assemblies, string typeName, string methodName, string prefixName)
         {
