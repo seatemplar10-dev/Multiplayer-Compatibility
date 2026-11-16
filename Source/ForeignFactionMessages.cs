@@ -53,6 +53,7 @@ namespace Multiplayer.Compat
         private static readonly List<Message> keptVisible = new List<Message>();
         private const int MaxLiveMessages = 12; // Messages.MaxLiveMessages
         private static List<Message> liveMessages; // vanilla never replaces this list (readonly in use: only Clear)
+        private static readonly FieldInfo mpGameField = AccessTools.Field("Multiplayer.Client.Multiplayer:game"); // row 413
 
         internal static void Patch(Harmony harmony)
         {
@@ -119,6 +120,11 @@ namespace Multiplayer.Compat
             // A command that another player issued (it runs on every PC with the issuer's faction as Faction.OfPlayer).
             if (MP.IsExecutingSyncCommand && !MP.IsExecutingSyncCommandIssuedBySelf)
                 return true;
+
+            // Row 413: MP.RealPlayerFaction reads Multiplayer.game, which is null while this PC loads or reloads. No faction read
+            // then: the same answer as single player. The row 401 catch only kept the throw from stopping the session.
+            if (mpGameField != null && mpGameField.GetValue(null) == null)
+                return false;
 
             var mine = MP.RealPlayerFaction;
             var context = Faction.OfPlayerSilentFail;
