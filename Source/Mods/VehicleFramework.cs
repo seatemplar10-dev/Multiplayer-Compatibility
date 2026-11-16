@@ -122,30 +122,8 @@ namespace Multiplayer.Compat
             var updaterType = FindType("Vehicles.VehicleRegionAndRoomUpdater");
             var taskManagerType = FindType("SmashTools.TaskManager");
 
-            // 1. No dedicated thread work in MP.
-            var threadAvailable = AccessTools.DeclaredPropertyGetter(pathingSystemType, "ThreadAvailable")
-                                  ?? throw new MissingMethodException(pathingSystemType.FullName, "get_ThreadAvailable");
-            MpCompat.harmony.Patch(threadAvailable, prefix: new HarmonyMethod(typeof(VehicleFramework), nameof(NoThreadInMp)));
-
-            // 2. Tasks run inline in MP.
-            var run = AccessTools.DeclaredMethod(taskManagerType, "Run", [typeof(Action), typeof(CancellationToken)])
-                      ?? throw new MissingMethodException(taskManagerType.FullName, "Run(Action, CancellationToken)");
-            MpCompat.harmony.Patch(run, prefix: new HarmonyMethod(typeof(VehicleFramework), nameof(RunInlineInMp)));
-
-            // 3. Region list in a fixed order.
-            regionUpdaterField = AccessTools.FieldRefAccess<object>(regionGridType, "regionUpdater");
-            mappingField = AccessTools.FieldRefAccess<object>(regionGridType, "mapping");
-            getRegionAt = MethodInvoker.GetHandler(GetDeclaredMethod(regionGridType, "GetRegionAt", [typeof(int)]));
-            updaterEnabled = MethodInvoker.GetHandler(AccessTools.DeclaredPropertyGetter(updaterType, "Enabled")
-                                                      ?? throw new MissingMethodException(updaterType.FullName, "get_Enabled"));
-            regionValidField = AccessTools.FieldRefAccess<bool>(regionType, "valid");
-            MpCompat.harmony.Patch(GetDeclaredMethod(regionGridType, "GetAllRegions"),
-                prefix: new HarmonyMethod(typeof(VehicleFramework), nameof(SequentialGetAllRegions)));
-
-            // 4. Grids of all vehicle defs built one after the other.
-            generateRegions = MethodInvoker.GetHandler(GetDeclaredMethod(pathingSystemType, "GenerateRegions", Type.EmptyTypes));
-            MpCompat.harmony.Patch(GetDeclaredMethod(pathingSystemType, "GenerateRegionsParallel", Type.EmptyTypes),
-                prefix: new HarmonyMethod(typeof(VehicleFramework), nameof(SequentialGenerateRegions)));
+            // LAB CONTROL row 46: steps 1-4 (ThreadAvailable false in MP, TaskManager.Run inline, sequential
+            // GetAllRegions / GenerateRegionsParallel) are REMOVED in this branch. Never ship.
 
             // 5. Stop VF's targeters before MP clears the old game (every MP reload path goes through ClearAllMapsAndWorld),
             //    as vanilla's load does through Game.Dispose (Vehicles.Targeters: GameEvent.OnGameDisposing += ClearAllTargeters).
@@ -395,59 +373,6 @@ namespace Multiplayer.Compat
                 prefix: new HarmonyMethod(typeof(VehicleFramework), nameof(PreWorldRoutePannerReroute)));
 
             Log.Message($"{LogPrefix}caravan window guard installed (Send / Change route in Multiplayer's caravan window no longer read VF's null CaravanFormation.formation)");
-        }
-
-        private static bool NoThreadInMp(ref bool __result)
-        {
-            if (!MP.IsInMultiplayer)
-                return true;
-            __result = false;
-            return false;
-        }
-
-        private static bool RunInlineInMp(Action action, CancellationToken token, ref Task __result)
-        {
-            if (!MP.IsInMultiplayer)
-                return true;
-            if (!token.IsCancellationRequested)
-            {
-                // TaskManager.Run's own wrapper logs and swallows exceptions; keep that behaviour.
-                try { action(); }
-                catch (Exception e) { Log.Error($"{LogPrefix}exception in an inline vehicle task: {e}"); }
-            }
-            __result = Task.CompletedTask;
-            return false;
-        }
-
-        // Same loop as VF's GetAllRegions (valid regions in cell-index order, each once), on the main thread.
-        private static bool SequentialGetAllRegions(object __instance, object regions)
-        {
-            if (!MP.IsInMultiplayer)
-                return true;
-            var updater = regionUpdaterField(__instance);
-            if (updater == null || !(bool)updaterEnabled(updater))
-                return false;
-            var list = (IList)regions;
-            var map = ((MapComponent)mappingField(__instance)).map;
-            var seen = new HashSet<object>();
-            var args = new object[1];
-            var cells = map.cellIndices.NumGridCells;
-            for (var i = 0; i < cells; i++)
-            {
-                args[0] = i;
-                var region = getRegionAt(__instance, args);
-                if (region != null && regionValidField(region) && seen.Add(region))
-                    list.Add(region);
-            }
-            return false;
-        }
-
-        private static bool SequentialGenerateRegions(object __instance)
-        {
-            if (!MP.IsInMultiplayer)
-                return true;
-            generateRegions(__instance);
-            return false;
         }
 
         // UI-only: the targeters hold no saved state and stopping one sends no command. Runs on every PC at the same point
