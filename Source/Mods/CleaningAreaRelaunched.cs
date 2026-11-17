@@ -88,7 +88,9 @@ public class CleaningAreaRelaunched
         // (1) The only call that picks the cleaned area. The lambda that calls it is a closure method in the mod's dll (compiled
         // with optimizations off), SetCleanArea itself is a big method, and Multiplayer marks every sync method no-inlining.
         var utilType = AccessTools.TypeByName("CleaningAreaRelaunched.CleaningAreaRelaunched_Util");
-        MP.RegisterSyncMethod(utilType, "SetCleanArea").CancelIfAnyArgNull();
+        // lab switch row 389 (package G, 17 Nov): off = old behaviour (INSTALL-ONLY: no sync registration)
+        if (!LabOff.Row(389))
+            MP.RegisterSyncMethod(utilType, "SetCleanArea").CancelIfAnyArgNull();
 
         // One try per patch: a failed lookup in one of them must not skip the others.
         try

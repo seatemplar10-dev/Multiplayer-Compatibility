@@ -353,6 +353,8 @@ namespace Multiplayer.Compat
             if (!MP.IsInMultiplayer || !__3 || __2 == null || __2.Count > 0 || !IsCaravanFormingProxy(__0))
                 return;
 
+            // lab switch row 273 (package G, 17 Nov): off = old behaviour
+            if (LabOff.Row(273)) return;
             __3 = false;
             __state = true;
         }

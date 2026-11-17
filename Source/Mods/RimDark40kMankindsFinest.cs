@@ -83,7 +83,8 @@ namespace Multiplayer.Compat
         // Prefix on the Genes40k postfix. The patched method is static and its first parameter is called __instance (it is a postfix itself):
         // in a prefix of ours the name __instance would mean "instance of a static method" = null, so both factions are read by position.
         private static bool SkipPlayerVersusPlayerMimic(Faction __0, Faction __1)
-            => !(__0 != null && __1 != null && __0.IsPlayer && __1.IsPlayer);
+            // lab switch row 206 (package G, 17 Nov): off = old behaviour
+            => LabOff.Row(206) || !(__0 != null && __1 != null && __0.IsPlayer && __1.IsPlayer);
 
         private static void PatchSystemRand(string typeName, string methodName)
             => RimDark40kRng.PatchSite(LogPrefix, RimDark40kRng.FindMethod(LogPrefix, typeName, methodName), false);

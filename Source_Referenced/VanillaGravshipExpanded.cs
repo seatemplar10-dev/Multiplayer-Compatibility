@@ -741,6 +741,8 @@ namespace Multiplayer.Compat
         /// </summary>
         private static void SyncRecolorVacBarrierRoofDesignator(SyncWorker sync, ref Designator_RecolorVacBarrierRoof designator)
         {
+            // lab switch row 372 (package G, 17 Nov): off = old behaviour
+            if (LabOff.Row(372)) return;
             if (sync.isWriting)
                 sync.Write(designator.color);
             else
