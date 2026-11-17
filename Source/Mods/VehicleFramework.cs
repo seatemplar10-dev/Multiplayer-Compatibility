@@ -264,10 +264,10 @@ namespace Multiplayer.Compat
         // in MP Faction.OfPlayer is the issuer's faction while the session is built, so the list is the same on every PC.
         // Row 360: the rest goes after the others in thingIDNumber order, not in claimants order (that list is reordered on every move
         // and not saved).
-        private static void PostAllSendablePawns(List<Pawn> __result, bool allowCapturableDownedPawns)
+        private static List<Pawn> PostAllSendablePawns(List<Pawn> __result, bool allowCapturableDownedPawns)
         {
             if (!MP.IsInMultiplayer || __result == null)
-                return;
+                return __result;
 
             try
             {
@@ -292,7 +292,7 @@ namespace Multiplayer.Compat
                 }
 
                 if (aboard == null)
-                    return;
+                    return __result;
 
                 // lab switch row 360 (wave 2, 17 Nov): off = old behaviour
                 if (!LabOff.Row(360)) keep.Sort((a, b) => a.thingIDNumber.CompareTo(b.thingIDNumber));
@@ -302,10 +302,12 @@ namespace Multiplayer.Compat
             catch (Exception e)
             {
                 if (sendablePawnsLogged)
-                    return;
+                    return __result;
                 sendablePawnsLogged = true;
                 Log.Error($"{LogPrefix}could not filter the pawns aboard vehicles in the caravan list (FIXES rows 361/360), list left as Vehicle Framework made it: {e}");
             }
+
+            return __result;
         }
 
         // Step 10: the mass passes through unchanged for a null pawn (a corpse), as VF does for a pawn not in a vehicle.
