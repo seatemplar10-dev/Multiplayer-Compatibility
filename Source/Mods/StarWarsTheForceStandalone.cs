@@ -26,6 +26,8 @@ namespace Multiplayer.Compat
     {
         public StarWarsTheForceStandalone(ModContentPack mod)
         {
+            // lab switch row 48 (wave 3, 17 Nov): off = old behaviour
+            if (LabOff.Row(48)) return;
             const string ns = "TheForce_Standalone.HediffComps.";
             var thingHolderType = AccessTools.TypeByName(ns + "HediffComp_ThingHolder");
             var projectileHolderType = AccessTools.TypeByName(ns + "HediffComp_ProjectileHolder");

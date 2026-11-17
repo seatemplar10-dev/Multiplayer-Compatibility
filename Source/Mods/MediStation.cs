@@ -28,6 +28,8 @@ namespace Multiplayer.Compat
 
         public MediStation(ModContentPack mod)
         {
+            // lab switch row 296 (wave 3, 17 Nov): off = old behaviour
+            if (LabOff.Row(296)) return;
             MP.RegisterSyncMethod(AccessTools.TypeByName("MediStation.CompMediStationFuel"), "EjectMedicine");
             MpCompat.RegisterLambdaMethod("MediStation.CompMediStationSharing", "CompGetGizmosExtra", 1);
 

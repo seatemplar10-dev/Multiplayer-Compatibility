@@ -33,6 +33,8 @@ namespace Multiplayer.Compat
 
         public TuckedFurniture(ModContentPack mod)
         {
+            // lab switch row 295 (wave 3, 17 Nov): off = old behaviour
+            if (LabOff.Row(295)) return;
             compType = AccessTools.TypeByName("TuckedFurniture.CompTuckedFurniture");
             var adjusterType = AccessTools.TypeByName("TuckedFurniture.FurnitureAdjuster");
             clipboardType = AccessTools.Inner(adjusterType, "FurnitureAdjustmentClipboard");

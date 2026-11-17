@@ -58,6 +58,8 @@ namespace Multiplayer.Compat
             // FIXES row 268: ExposeData scribes allowedNutritionSettings with Array.Empty<object>(), so after a load its owner is null.
             // Multiplayer syncs 'Paste settings' (StorageSettings.CopyFrom) by the owner, and a null owner is dropped on every client.
             // Same repair Multiplayer does for CompBiosculpterPod (Patches.cs StoragesKeepsTheirOwners).
+            // lab switch row 268 (wave 3, 17 Nov): off = old behaviour
+            if (!LabOff.Row(268))
             Try(268, "Nutrition settings owner", () =>
             {
                 nutritionSettingsField = AccessTools.FieldRefAccess<StorageSettings>(type, "allowedNutritionSettings");

@@ -66,11 +66,22 @@ public class CustomQuestFramework
     {
         // Before any patch: the sync methods need nothing else, and a throw in PatchJobMenus or PatchDialogWindow (no guard in either)
         // must not leave a patched menu or window calling an unregistered sync method (it would run on the clicking PC only)
-        MP.RegisterSyncMethod(typeof(CustomQuestFramework), nameof(SyncedStartJob));
-        MP.RegisterSyncMethod(typeof(CustomQuestFramework), nameof(SyncedChooseOption));
+        // lab switch row 278 (wave 3, 17 Nov): off = old behaviour (no job/dialog sync, no menu or window patch)
+        if (!LabOff.Row(278))
+        {
+            MP.RegisterSyncMethod(typeof(CustomQuestFramework), nameof(SyncedStartJob));
+            MP.RegisterSyncMethod(typeof(CustomQuestFramework), nameof(SyncedChooseOption));
+        }
         // Then the gizmos: a throw in the two calls below must not skip them (each has its own TryRegister)
-        RegisterGizmos();
-        TryRegister("QuestBookInstance.CheckObjectives", RegisterQuestBook);
+        // lab switch row 279 (wave 3, 17 Nov): off = old behaviour
+        if (!LabOff.Row(279))
+            RegisterGizmos();
+        // lab switch row 49 (wave 3, 17 Nov): off = old behaviour
+        if (!LabOff.Row(49))
+            TryRegister("QuestBookInstance.CheckObjectives", RegisterQuestBook);
+        // lab switch row 278 (wave 3, 17 Nov): off = old behaviour
+        if (LabOff.Row(278))
+            return;
         PatchJobMenus();
         PatchDialogWindow();
     }

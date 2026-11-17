@@ -50,6 +50,8 @@ namespace Multiplayer.Compat
                                 ?? throw new System.MissingFieldException("VanillaCookingExpandedVariety.GameComponent_FoodVariety", "pawns_and_diet");
             var expose = AccessTools.DeclaredMethod("VanillaCookingExpandedVariety.GameComponent_FoodVariety:ExposeData")
                          ?? throw new System.MissingMethodException("VanillaCookingExpandedVariety.GameComponent_FoodVariety", "ExposeData");
+            // lab switch row 240 (wave 3, 17 Nov): off = old behaviour
+            if (!LabOff.Row(240))
             MpCompat.harmony.Patch(expose, prefix: new HarmonyMethod(typeof(VanillaFoodVarietyExpanded), nameof(PreExposeData)));
 
             needListField = AccessTools.DeclaredField("VanillaCookingExpandedVariety.GameComponent_FoodVariety:colonists_with_foodvariety_need")

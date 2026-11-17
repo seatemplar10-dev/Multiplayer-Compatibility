@@ -55,6 +55,8 @@ internal class MiliraHairStyleConfig
 
     public MiliraHairStyleConfig(ModContentPack mod)
     {
+        // lab switch row 309 (wave 3, 17 Nov): off = old behaviour
+        if (LabOff.Row(309)) return;
         // 1. look everything up first; patch nothing unless all of it is there
         MethodInfo doWindowContents, drawScrollHairSwitch;
         try

@@ -161,7 +161,8 @@ namespace Multiplayer.Compat
             }
 
             // RegisterLambdaDelegate needs the lambda in a display class of the gizmo type
-            var gizmoOrdinal = gizmoType == null ? -1 : FindVoidLambdaOrdinal(gizmoType, gizmoMethod, 1,
+            // lab switch row 381 (wave 3, 17 Nov): off = old behaviour (fixed ordinal 1, the isActive getter in VEF 1.6)
+            var gizmoOrdinal = gizmoType == null ? -1 : LabOff.Row(381) ? 1 : FindVoidLambdaOrdinal(gizmoType, gizmoMethod, 1,
                 declaring => declaring != gizmoType && declaring.DeclaringType == gizmoType);
             if (gizmoOrdinal >= 0)
                 MpCompat.RegisterLambdaDelegate(gizmoType, gizmoMethod, gizmoOrdinal);
@@ -1214,6 +1215,10 @@ namespace Multiplayer.Compat
 
                     result.Add(new CodeInstruction(OpCodes.Ldarg_0));
                     result.Add(new CodeInstruction(OpCodes.Ldfld, thingToChangeField)); // Load in the "thingToChange" (Thing) field
+                    // lab switch row 375 (wave 3, 17 Nov): off = old behaviour (hard-coded local 5)
+                    if (LabOff.Row(375))
+                        result.Add(new CodeInstruction(OpCodes.Ldloc_S, 5));
+                    else
                     result.Add(new CodeInstruction(displayClassLocalLoad.opcode, displayClassLocalLoad.operand)); // Load in the display class local (the one found above feeding "i")
                     result.Add(new CodeInstruction(OpCodes.Ldfld, indexField)); // Load in the "i" (int) from the nested type
                     result.Add(new CodeInstruction(OpCodes.Ldarg_0)); // Load in the instance (Dialog_ChooseGraphic)

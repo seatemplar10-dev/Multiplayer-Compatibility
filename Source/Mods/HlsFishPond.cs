@@ -29,6 +29,8 @@ namespace Multiplayer.Compat
 
         public HlsFishPond(ModContentPack mod)
         {
+            // lab switch row 297 (wave 3, 17 Nov): off = old behaviour
+            if (LabOff.Row(297)) return;
             PatchingUtilities.PatchPushPopRand("LBY.Comp_FishPondAnimator:EnsureFramesLoaded");
 
             MpCompat.RegisterLambdaMethod("LBY.Building_FishPond", "GetGizmos", 1);

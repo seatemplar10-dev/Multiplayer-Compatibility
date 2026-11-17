@@ -92,6 +92,8 @@ namespace Multiplayer.Compat
                     return;
                 }
 
+                // lab switch row 277 (wave 3, 17 Nov): off = old behaviour
+                if (LabOff.Row(277)) return;
                 MP.RegisterSyncMethod(typeof(NiceBillTab), nameof(SyncedReorderBill));
                 MpCompat.harmony.Patch(handleDrop, transpiler: new HarmonyMethod(typeof(NiceBillTab), nameof(HandleBillDropTranspiler)));
             }

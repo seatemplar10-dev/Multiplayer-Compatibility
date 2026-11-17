@@ -29,6 +29,8 @@ public class SnapOut
 
     public SnapOut(ModContentPack mod)
     {
+        // lab switch row 272 (wave 3, 17 Nov): off = old behaviour
+        if (LabOff.Row(272)) return;
         var wander = AccessTools.DeclaredMethod(typeof(RCellFinder), nameof(RCellFinder.RandomWanderDestFor),
             [typeof(Pawn), typeof(IntVec3), typeof(float), typeof(Func<Pawn, IntVec3, IntVec3, bool>), typeof(Danger), typeof(bool)]);
         if (wander != null)

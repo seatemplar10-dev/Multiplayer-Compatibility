@@ -63,6 +63,8 @@ namespace Multiplayer.Compat
 
         public VehicleFrameworkPainter(ModContentPack mod)
         {
+            // lab switch row 309 (wave 3, 17 Nov): off = old behaviour
+            if (LabOff.Row(309)) return;
             try
             {
                 vehiclePawnType = FindType("Vehicles.VehiclePawn");

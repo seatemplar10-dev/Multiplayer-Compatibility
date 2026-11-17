@@ -199,7 +199,9 @@ namespace Multiplayer.Compat
             // 8. Vehicle cards in Multiplayer's caravan window: seat window and untick read the null CaravanFormation.Current.
             try
             {
-                PatchVehicleCards();
+                // lab switch row 285 (wave 3, 17 Nov): off = old behaviour
+                if (!LabOff.Row(285))
+                    PatchVehicleCards();
             }
             catch (Exception e)
             {
@@ -220,6 +222,8 @@ namespace Multiplayer.Compat
             // corpse branch: PawnMassUsageInVehicle(float, Pawn) then throws every frame in the reform window. Null pawn = mass unchanged.
             try
             {
+                // lab switch row 271 (wave 3, 17 Nov): off = old behaviour
+                if (!LabOff.Row(271))
                 MpCompat.harmony.Patch(GetDeclaredMethod(FindType("Vehicles.Patch_CaravanHandling"), "PawnMassUsageInVehicle", [typeof(float), typeof(Pawn)]),
                     prefix: new HarmonyMethod(typeof(VehicleFramework), nameof(PrePawnMassUsageInVehicle)));
             }

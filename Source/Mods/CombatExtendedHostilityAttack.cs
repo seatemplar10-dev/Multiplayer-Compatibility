@@ -28,6 +28,8 @@ namespace Multiplayer.Compat
     {
         public CombatExtendedHostilityAttack(ModContentPack mod)
         {
+            // lab switch row 302 (wave 3, 17 Nov): off = old behaviour
+            if (LabOff.Row(302)) return;
             var method = AccessTools.DeclaredMethod(typeof(JobGiver_ConfigurableHostilityResponse), "TryGetAttackNearbyEnemyJob")
                          ?? throw new MissingMethodException(nameof(JobGiver_ConfigurableHostilityResponse), "TryGetAttackNearbyEnemyJob");
             MpCompat.harmony.Patch(method,

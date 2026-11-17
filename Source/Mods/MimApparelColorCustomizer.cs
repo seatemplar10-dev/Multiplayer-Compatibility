@@ -53,6 +53,8 @@ namespace Multiplayer.Compat
 
         public MimApparelColorCustomizer(ModContentPack mod)
         {
+            // lab switch row 309 (wave 3, 17 Nov): off = old behaviour
+            if (LabOff.Row(309)) return;
             var dialogType = AccessTools.TypeByName("MIM40kFactions.Dialog_ApparelColorCustomizer");
             var applyColors = dialogType == null ? null : AccessTools.DeclaredMethod(dialogType, "ApplyColors", Type.EmptyTypes);
             var tryApply = dialogType == null ? null : AccessTools.DeclaredMethod(dialogType, "TryApplyToSelected", [typeof(Color), typeof(bool)]);

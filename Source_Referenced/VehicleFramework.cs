@@ -161,12 +161,18 @@ namespace Multiplayer.Compat
                 // Gizmo_Slider.GizmoOnGUI assigns Target on every GUI frame (Gizmo_Slider.cs:129 "Target = targetValuePct;"),
                 // so a synced setter sent one command per frame while a vehicle was selected. A buffered sync field watched
                 // around the gizmo sends only on change, after the drag, as MP does for vanilla Gizmo_SetFuelLevel.
+                // lab switch row 322 (wave 3, 17 Nov): off = old behaviour (synced setter, one command per GUI frame)
+                if (LabOff.Row(322))
+                    MP.RegisterSyncMethod(typeof(CompFueledTravel), nameof(CompFueledTravel.TargetFuelPercent));
+                else
+                {
                 targetFuelPercentField = MP.RegisterSyncField(typeof(CompFueledTravel), nameof(CompFueledTravel.TargetFuelPercent))
                     .SetBufferChanges();
                 MpCompat.harmony.Patch(
                     AccessTools.DeclaredMethod(typeof(Gizmo_RefuelableFuelTravel), nameof(Gizmo_RefuelableFuelTravel.GizmoOnGUI)),
                     prefix: new HarmonyMethod(typeof(VehicleFramework), nameof(PreFuelGizmoOnGUI)),
                     finalizer: new HarmonyMethod(typeof(VehicleFramework), nameof(PostFuelGizmoOnGUI)));
+                }
                 // Refuel from inventory, used from Gizmo_RefuelableFuelTravel
                 MP.RegisterSyncMethod(typeof(CompFueledTravel), nameof(CompFueledTravel.Refuel), [typeof(List<Thing>)]);
                 MP.RegisterSyncMethod(typeof(CompFueledTravel), nameof(CompFueledTravel.Refuel), [typeof(float)]);
@@ -211,7 +217,7 @@ namespace Multiplayer.Compat
                 // <>c__DisplayClass51_0 holds b__0 = the crew-handler filter "handler => handler.role.TurretIds.Contains(
                 // turret.key)", which GetGizmos calls for every turret on every frame, and b__1 = the "Full Refill" action
                 // (DevModeReloadTurret). Syncing b__0 sent a command per call and attached a stack trace to each.
-                MpCompat.RegisterLambdaDelegate(typeof(CompVehicleTurrets), nameof(CompVehicleTurrets.CompGetGizmosExtra), 1).SetDebugOnly();
+                MpCompat.RegisterLambdaDelegate(typeof(CompVehicleTurrets), nameof(CompVehicleTurrets.CompGetGizmosExtra), LabOff.Row(322) ? 0 : 1).SetDebugOnly(); // lab switch row 322 (wave 3, 17 Nov): off = old behaviour (ordinal 0)
 
 
                 // Turret syncing in separate region

@@ -15,6 +15,8 @@ namespace Multiplayer.Compat
         // (Ork_Boy33070 rot 3 on the host only). In MP the offset applies while drawing only, never in the simulation.
         public YayoAnimation(ModContentPack mod)
         {
+            // lab switch row 251 (wave 3, 17 Nov): off = old behaviour
+            if (LabOff.Row(251)) return;
             var offset = AccessTools.DeclaredMethod("YayoAnimation.HarmonyPatches.OffsetAttachableThing:Postfix");
             if (offset == null)
                 Log.Warning("[MPCompat - Yayo's Animation] OffsetAttachableThing.Postfix not found: a burning pawn's facing may differ between PCs (FIXES row 251)");

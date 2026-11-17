@@ -64,6 +64,8 @@ namespace Multiplayer.Compat
 
         public Z40kPaintSidebar(ModContentPack mod)
         {
+            // lab switch row 309 (wave 3, 17 Nov): off = old behaviour
+            if (LabOff.Row(309)) return;
             MethodBase drawSharedButtons = null, applyColor = null, startPlacement = null, setColor = null, place = null;
             Try("look up the Z40K members", () =>
             {
