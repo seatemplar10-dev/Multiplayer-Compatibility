@@ -138,7 +138,8 @@ public class VanillaAspirationsExpanded
     // message from interface code. Interface code never completes an aspiration, whatever called it.
     [MpCompatPrefix("VAspirE.Need_Fulfillment", "CheckCompletion")]
     [MpCompatPrefix("VAspirE.Need_Fulfillment", "Complete")]
-    private static bool CompleteOnlyInSimulation() => !MP.IsInMultiplayer || !MP.InInterface || LabOff.Row(161);
+    // lab switch 110 opens this gate too (row 110 control, audit t3d3-freeze-row110-ctl-1117.md)
+    private static bool CompleteOnlyInSimulation() => !MP.IsInMultiplayer || !MP.InInterface || LabOff.Row(161) || LabOff.Row(110);
 
     #endregion
 
