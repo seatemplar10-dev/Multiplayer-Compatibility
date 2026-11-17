@@ -80,9 +80,26 @@ internal static class LabOff
         if (!gateRead) ReadGate();
     }
 
+        // Trigger line: ONE log line the first time a row's switch is read in this process (same text in every fork).
+        static readonly bool[] hitDone = new bool[1000];
+        static void Hit(int row, bool off)
+        {
+            try
+            {
+                if (row < 0 || row >= hitDone.Length || hitDone[row]) return;
+                hitDone[row] = true;
+                var tick = -1;
+                try { tick = Find.TickManager?.TicksGame ?? -1; } catch (Exception) { tick = -1; }
+                Log.Message("[LabOff] HIT row " + row + " state=" + (off ? "off" : "on") + " tick=" + tick);
+            }
+            catch (Exception) { }
+        }
+
     public static bool Row(int row)
     {
         if (!gateRead) ReadGate();
-        return rows.Count != 0 && rows.Contains(row);
+        var r = rows.Count != 0 && rows.Contains(row);
+        Hit(row, r);
+        return r;
     }
 }
