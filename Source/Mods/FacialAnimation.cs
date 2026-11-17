@@ -33,6 +33,8 @@ namespace Multiplayer.Compat
                 Log.Error("[MPCompat] Facial Animation: IFacialAnimationController not found, face rolls stay per PC");
                 return;
             }
+            // lab switch row 111 (wave 2, 17 Nov): off = old behaviour
+            if (LabOff.Row(111)) return;
             MpCompat.harmony.Patch(
                 AccessTools.DeclaredMethod(typeof(PawnGenerator), nameof(PawnGenerator.GeneratePawn), new[] { typeof(PawnGenerationRequest) }),
                 postfix: new HarmonyMethod(typeof(FacialAnimation), nameof(GeneratePawnPostfix)));

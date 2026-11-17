@@ -294,7 +294,8 @@ namespace Multiplayer.Compat
                 if (aboard == null)
                     return;
 
-                keep.Sort((a, b) => a.thingIDNumber.CompareTo(b.thingIDNumber));
+                // lab switch row 360 (wave 2, 17 Nov): off = old behaviour
+                if (!LabOff.Row(360)) keep.Sort((a, b) => a.thingIDNumber.CompareTo(b.thingIDNumber));
                 __result.RemoveAll(aboard.Contains);
                 __result.AddRange(keep);
             }

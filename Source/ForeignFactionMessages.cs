@@ -93,6 +93,9 @@ namespace Multiplayer.Compat
         /// <summary>True while the code that runs belongs to another player: their command, or a tick / command in their faction.</summary>
         internal static bool IsForeignContext()
         {
+            // lab switch row 401 (wave 2, 17 Nov): off = old behaviour
+            if (LabOff.Row(401)) return IsForeignContextCore();
+
             // Row 401: a message shown while a PC loads (a joiner's "player connected" on the arbiter, run from a packet handler) has no
             // World yet, so Faction.OfPlayerSilentFail threw and MP dropped the arbiter as a PacketReadException. Only a running game has a
             // faction context. Current.Game?.World, not Find.World: Find.World dereferences Current.Game and throws when it is null.

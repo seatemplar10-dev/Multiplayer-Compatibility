@@ -84,7 +84,8 @@ namespace Multiplayer.Compat
         {
             blankPawnField.SetValue(null, null);
             // FIXES row 245: read the field each time, it is not readonly
-            (coherenceSpotsField.GetValue(null) as System.Collections.IDictionary)?.Clear();
+            // lab switch row 245 (wave 2, 17 Nov): off = old behaviour
+            if (!LabOff.Row(245)) (coherenceSpotsField.GetValue(null) as System.Collections.IDictionary)?.Clear();
         }
 
         private static void BeginBlank(out bool __state)

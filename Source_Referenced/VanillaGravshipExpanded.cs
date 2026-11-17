@@ -206,20 +206,26 @@ namespace Multiplayer.Compat
                 // (First + 2) and do the pick locally in the UI. Painting (eyedropMode off) falls through to MP as before.
                 var singleCell = new[] { typeof(IntVec3) };
 
-                PatchBeforeMpDesignator(
-                    AccessTools.DeclaredMethod(typeof(Designator_VacBarrierRoofEyedropper), nameof(Designator.DesignateSingleCell), singleCell),
-                    nameof(PreRoofEyedropperDesignateSingleCell));
+                // lab switch row 387 (wave 2, 17 Nov): off = old behaviour
+                if (!LabOff.Row(387))
+                    PatchBeforeMpDesignator(
+                        AccessTools.DeclaredMethod(typeof(Designator_VacBarrierRoofEyedropper), nameof(Designator.DesignateSingleCell), singleCell),
+                        nameof(PreRoofEyedropperDesignateSingleCell));
 
-                PatchBeforeMpDesignator(
-                    AccessTools.DeclaredMethod(typeof(Designator_RecolorVacBarrierRoof), nameof(Designator.DesignateSingleCell), singleCell),
-                    nameof(PreRecolorRoofDesignateSingleCell));
+                // lab switch row 386 (wave 2, 17 Nov): off = old behaviour
+                if (!LabOff.Row(386))
+                    PatchBeforeMpDesignator(
+                        AccessTools.DeclaredMethod(typeof(Designator_RecolorVacBarrierRoof), nameof(Designator.DesignateSingleCell), singleCell),
+                        nameof(PreRecolorRoofDesignateSingleCell));
 
                 // The roof designator has a paint draw style and does not override DesignateMultiCell, so a click or a drag reaches
                 // the base method (DesignatorManager calls it on mouse up). The eyedropper on its own has no draw style and goes
                 // straight to DesignateSingleCell, it never reaches DesignateMultiCell.
-                PatchBeforeMpDesignator(
-                    AccessTools.DeclaredMethod(typeof(Designator), nameof(Designator.DesignateMultiCell), new[] { typeof(IEnumerable<IntVec3>) }),
-                    nameof(PreDesignateMultiCellRoofEyedropMode));
+                // lab switch row 386 (wave 2, 17 Nov): off = old behaviour
+                if (!LabOff.Row(386))
+                    PatchBeforeMpDesignator(
+                        AccessTools.DeclaredMethod(typeof(Designator), nameof(Designator.DesignateMultiCell), new[] { typeof(IEnumerable<IntVec3>) }),
+                        nameof(PreDesignateMultiCellRoofEyedropMode));
             }
 
             #endregion

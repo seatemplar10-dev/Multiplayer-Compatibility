@@ -347,7 +347,8 @@ namespace Multiplayer.Compat
             // then a NullReferenceException that fails the whole load). Off the main thread, register right after the load
             // event on the main thread instead: queued here, before Multiplayer's post-load cache tick (LoadPatch queues it
             // after LoadGame returns), so the animators are in place before any tick on every client.
-            if (UnityData.IsInMainThread)
+            // lab switch row 93 (wave 2, 17 Nov): off = old behaviour
+            if (UnityData.IsInMainThread || LabOff.Row(93))
                 addFromPostLoad();
             else
                 LongEventHandler.ExecuteWhenFinished(() => addFromPostLoad());

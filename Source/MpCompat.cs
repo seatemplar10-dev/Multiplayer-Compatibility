@@ -26,15 +26,18 @@ namespace Multiplayer.Compat
             MpCompatLoader.Load(content);
             harmony.PatchAll();
             // FIXES row 305: a message from another player's tick or command is not drawn or played here (ForeignFactionMessages.cs)
-            ForeignFactionMessages.Patch(harmony);
+            // lab switch row 305 (wave 2, 17 Nov): off = old behaviour
+            if (!LabOff.Row(305)) ForeignFactionMessages.Patch(harmony);
             // FIXES row 180: the dev-mode-only ConfigErrors side effects on every PC (DeterministicConfigErrors.cs)
             LongEventHandler.ExecuteWhenFinished(DeterministicConfigErrors.Run);
             // FIXES row 262 root cause: races that get a training tracker but have no trainability (RaceTrainabilityFix.cs)
-            LongEventHandler.ExecuteWhenFinished(RaceTrainabilityFix.Run);
+            // lab switch row 262 (wave 2, 17 Nov): off = old behaviour
+            if (!LabOff.Row(262)) LongEventHandler.ExecuteWhenFinished(RaceTrainabilityFix.Run);
             // FIXES row 262: NullReferenceException in Pawn_TrainingTracker.CanAssignToTrain during every reload (TrainingTrackerLoadGuard.cs)
             try
             {
-                TrainingTrackerLoadGuard.Install(harmony);
+                // lab switch row 262 (wave 2, 17 Nov): off = old behaviour
+                if (!LabOff.Row(262)) TrainingTrackerLoadGuard.Install(harmony);
             }
             catch (Exception e)
             {
@@ -43,7 +46,8 @@ namespace Multiplayer.Compat
             // FIXES row 106: the letter archive cull and the ransom incident no longer read the per-PC letter stack (LetterArchiveDeterminism.cs)
             try
             {
-                LetterArchiveDeterminism.Install(harmony);
+                // lab switch row 106 (wave 2, 17 Nov): off = old behaviour
+                if (!LabOff.Row(106)) LetterArchiveDeterminism.Install(harmony);
             }
             catch (Exception e)
             {

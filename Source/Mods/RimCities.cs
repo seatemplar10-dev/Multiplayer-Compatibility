@@ -28,6 +28,12 @@ namespace Multiplayer.Compat
 
         public RimCities(ModContentPack mod)
         {
+            // lab switch row 301 (wave 2, 17 Nov): off = old behaviour
+            if (LabOff.Row(301)) return;
+
+            // lab switch row 301 (wave 2, 17 Nov): off = old behaviour
+            if (LabOff.Row(301)) return;
+
             var workerType = AccessTools.TypeByName("Cities.IncidentWorker_Quest");
             var questType = AccessTools.TypeByName("Cities.Quest");
             var assaultType = AccessTools.TypeByName("Cities.Quest_Assault");

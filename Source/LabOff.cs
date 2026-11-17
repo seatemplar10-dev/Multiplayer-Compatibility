@@ -16,7 +16,7 @@ internal static class LabOff
     public const string Arg = "mplaboff";
     public static readonly string Raw;                         // "117,152" or null
     // The rows THIS dll can switch.
-    static readonly int[] Owned = { 40, 46, 76, 110, 161, 163, 164, 168, 174, 193, 196, 304, 361, 373 };
+    static readonly int[] Owned = { 18, 40, 46, 76, 77, 93, 95, 106, 110, 111, 161, 163, 164, 168, 174, 193, 196, 209, 245, 256, 262, 301, 304, 305, 360, 361, 373, 395, 401 };
     static readonly HashSet<int> rows = new HashSet<int>();    // requested AND owned
     static volatile bool gateRead;
     static readonly object gateLock = new object();

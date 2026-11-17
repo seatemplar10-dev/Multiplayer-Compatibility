@@ -86,7 +86,7 @@ namespace Multiplayer.Compat
             updateColorsMethod = AccessTools.DeclaredMethod(alienCompType, "UpdateColors");
             if (updateColorsMethod == null)
                 Log.Error("[MPCompat] Humanoid Alien Races: AlienComp.UpdateColors not found, favorite/ideo/mech colours stay per PC");
-            else
+            else if (!LabOff.Row(111)) // lab switch row 111 (wave 2, 17 Nov): off = old behaviour
                 MpCompat.harmony.Patch(AccessTools.DeclaredMethod(typeof(Pawn), nameof(Pawn.SpawnSetup)),
                     postfix: new HarmonyMethod(typeof(AlienRace), nameof(SpawnSetupPostfix)));
 

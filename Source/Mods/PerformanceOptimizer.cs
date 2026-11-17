@@ -300,7 +300,8 @@ namespace Multiplayer.Compat
         private static void PreSaveGameData(out bool __state)
         {
             __state = isAutoSaving;
-            if (!(bool)reloadingField.GetValue(null))
+            // lab switch row 18 (wave 2, 17 Nov): off = old behaviour
+            if (!LabOff.Row(18) && !(bool)reloadingField.GetValue(null))
                 isAutoSaving = true;
         }
 

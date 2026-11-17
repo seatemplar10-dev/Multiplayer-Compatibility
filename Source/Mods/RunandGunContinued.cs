@@ -77,8 +77,10 @@ namespace Multiplayer.Compat
             // (XML Extensions' mod-settings menu calls it too, when the player switches mod or closes the menu).
             // The postfix filters on the RunAndGun mod type, so other mods are untouched.
             RunandGunContinued.runAndGunModType = runAndGunModType;
-            MpCompat.harmony.Patch(AccessTools.DeclaredMethod(typeof(Verse.Mod), nameof(Verse.Mod.WriteSettings)),
-                postfix: new HarmonyMethod(typeof(RunandGunContinued), nameof(WriteSettingsPostfix)));
+            // lab switch row 395 (wave 2, 17 Nov): off = old behaviour
+            if (!LabOff.Row(395))
+                MpCompat.harmony.Patch(AccessTools.DeclaredMethod(typeof(Verse.Mod), nameof(Verse.Mod.WriteSettings)),
+                    postfix: new HarmonyMethod(typeof(RunandGunContinued), nameof(WriteSettingsPostfix)));
             MP.RegisterSyncMethod(typeof(RunandGunContinued), nameof(SyncedSetSettings)).CancelIfAnyArgNull();
 
             PatchSessionSettingsSwap();
@@ -419,8 +421,16 @@ namespace Multiplayer.Compat
                 return;
             }
 
+            // lab switch row 395 (wave 2, 17 Nov): off = old behaviour
+            // off: the host reads its local settings at every load (join points too), the others keep the saved ones.
+            if (LabOff.Row(395))
+            {
+                if (MP.IsHosting)
+                    CaptureFromLocalSettings();
+                captured = true;
+            }
             // In MP a saved component keeps its saved values on every PC, host included. No recapture.
-            if (!captured)
+            else if (!captured)
             {
                 // Component new to this MP save (e.g. mod added mid-game): keep the defaults on every PC and let a player push.
                 captured = true;

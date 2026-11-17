@@ -18,7 +18,8 @@ public class MiliraRace
     // every call, so each Milian starts from the def as loaded.
     public MiliraRace(ModContentPack mod)
     {
-        PatchFlyer();
+        // lab switch row 256 (wave 2, 17 Nov): off = old behaviour
+        if (!LabOff.Row(256)) PatchFlyer();
         var postfix = AccessTools.DeclaredMethod("Milira.Milira_MilianPawnGenerator_Patch:Postfix");
         if (postfix == null)
         {

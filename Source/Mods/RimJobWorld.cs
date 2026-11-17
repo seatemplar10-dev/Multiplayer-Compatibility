@@ -95,9 +95,11 @@ namespace Multiplayer.Compat
 
             PatchingUtilities.PatchSystemRand(method, false);
 
-            PatchPermissionFlags();
+            // lab switch row 95 (wave 2, 17 Nov): off = old behaviour
+            if (!LabOff.Row(95)) PatchPermissionFlags();
 
-            SetupSexInteractionResolved();
+            // lab switch row 209 (wave 2, 17 Nov): off = old behaviour
+            if (!LabOff.Row(209)) SetupSexInteractionResolved();
         }
 
         private static void PatchPermissionFlags()

@@ -19,6 +19,9 @@ namespace Multiplayer.Compat
 
         public BloodAnimations(ModContentPack mod)
         {
+            // lab switch row 77 (wave 2, 17 Nov): off = old behaviour
+            if (LabOff.Row(77)) return;
+
             PatchingUtilities.PatchPushPopRand(new[]
             {
                 "BloodAnimations.FleckMaker:CreateFleckBlood140",
