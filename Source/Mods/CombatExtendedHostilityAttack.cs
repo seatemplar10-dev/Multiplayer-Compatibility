@@ -28,8 +28,7 @@ namespace Multiplayer.Compat
     {
         public CombatExtendedHostilityAttack(ModContentPack mod)
         {
-            // lab switch row 302 (wave 3, 17 Nov): off = old behaviour
-            if (LabOff.Row(302)) return;
+            // lab switch row 302 (wave H, 17 Nov): SITE gate in Postfix; off = old behaviour
             var method = AccessTools.DeclaredMethod(typeof(JobGiver_ConfigurableHostilityResponse), "TryGetAttackNearbyEnemyJob")
                          ?? throw new MissingMethodException(nameof(JobGiver_ConfigurableHostilityResponse), "TryGetAttackNearbyEnemyJob");
             MpCompat.harmony.Patch(method,
@@ -43,6 +42,8 @@ namespace Multiplayer.Compat
             var target = __result.targetA;
             if (!target.IsValid || pawn == null || !pawn.Spawned)
                 return;
+            // lab switch row 302 (wave H, 17 Nov): off = old behaviour (job kept, pawn stands still)
+            if (LabOff.Row(302)) return;
             // Same call and arguments as JobDriver_AttackStatic's tick check.
             var verb = pawn.TryGetAttackVerb(target.Thing, !pawn.IsColonist);
             if (verb == null || !verb.CanHitTargetFrom(pawn.Position, target))

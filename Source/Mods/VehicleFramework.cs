@@ -199,9 +199,9 @@ namespace Multiplayer.Compat
             // 8. Vehicle cards in Multiplayer's caravan window: seat window and untick read the null CaravanFormation.Current.
             try
             {
-                // lab switch row 285 (wave 3, 17 Nov): off = old behaviour
-                if (!LabOff.Row(285))
-                    PatchVehicleCards();
+                // lab switch row 285 (wave H, 17 Nov): SITE gate in NoSeatWindowWithoutFormation (WindowStack.Add prefix); the
+                // DrawCard transpiler is gated at install inside PatchVehicleCards. off = old behaviour
+                PatchVehicleCards();
             }
             catch (Exception e)
             {
@@ -222,8 +222,7 @@ namespace Multiplayer.Compat
             // corpse branch: PawnMassUsageInVehicle(float, Pawn) then throws every frame in the reform window. Null pawn = mass unchanged.
             try
             {
-                // lab switch row 271 (wave 3, 17 Nov): off = old behaviour
-                if (!LabOff.Row(271))
+                // lab switch row 271 (wave H, 17 Nov): SITE gate in PrePawnMassUsageInVehicle; off = old behaviour
                 MpCompat.harmony.Patch(GetDeclaredMethod(FindType("Vehicles.Patch_CaravanHandling"), "PawnMassUsageInVehicle", [typeof(float), typeof(Pawn)]),
                     prefix: new HarmonyMethod(typeof(VehicleFramework), nameof(PrePawnMassUsageInVehicle)));
             }
@@ -319,6 +318,8 @@ namespace Multiplayer.Compat
         {
             if (pawn != null)
                 return true;
+            // lab switch row 271 (wave H, 17 Nov): off = old behaviour (null pawn reaches VF's original: NRE)
+            if (LabOff.Row(271)) return true;
             __result = massUsage;
             return false;
         }
@@ -382,8 +383,10 @@ namespace Multiplayer.Compat
 
             MpCompat.harmony.Patch(AccessTools.DeclaredMethod(typeof(WindowStack), nameof(WindowStack.Add)),
                 prefix: new HarmonyMethod(typeof(VehicleFramework), nameof(NoSeatWindowWithoutFormation)));
-            MpCompat.harmony.Patch(GetDeclaredMethod(FindType("Vehicles.World.TransferableVehicleWidget"), "DrawCard"),
-                transpiler: new HarmonyMethod(typeof(VehicleFramework), nameof(NullSafeCurrentNotify)));
+            // lab switch row 285 (wave H, 17 Nov): off = old behaviour (INSTALL gate: a transpiler)
+            if (!LabOff.Row(285))
+                MpCompat.harmony.Patch(GetDeclaredMethod(FindType("Vehicles.World.TransferableVehicleWidget"), "DrawCard"),
+                    transpiler: new HarmonyMethod(typeof(VehicleFramework), nameof(NullSafeCurrentNotify)));
         }
 
         private static void PatchCaravanDialog()
@@ -585,6 +588,8 @@ namespace Multiplayer.Compat
                 return true;
             if (caravanFormationCurrent.Invoke(null, null) != null)
                 return true;
+            // lab switch row 285 (wave H, 17 Nov): off = old behaviour (seat window opens with a null formation)
+            if (LabOff.Row(285)) return true;
 
             Messages.Message("Vehicle caravans are not supported in multiplayer yet", MessageTypeDefOf.RejectInput, false);
             return false;
