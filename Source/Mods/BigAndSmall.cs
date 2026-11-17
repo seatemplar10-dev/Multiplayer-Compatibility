@@ -72,6 +72,12 @@ namespace Multiplayer.Compat
     ///    first refresh ran 29 ticks apart, so its saved apparent age differed in the last float bit (t4, t5).
     ///    Fix: in MP, a prefix on our Multiplayer build's FactionSidebar.RestoreGameStateAfterPages (pages sent or
     ///    closed, issuer only, before any command of the Settle runs) drops every page pawn from those places.
+    /// 11. FIXES row 420 (17 Nov 2026): the Settle starting-pawn page holds a page pawn (negative id, e.g. a Character Editor
+    ///    pawn with many xenogenes) on the joiner only. B&amp;S's BSCache.ScheduleUpdate(1) queues a DelayedUpdate for it, which
+    ///    runs inside BigAndSmallCache.GameComponentTick (world tick), adds hediffs (new ids) and draws world Rand on that
+    ///    PC only: "Wrong random state for the world". Row 248's cleanup only wins if Next is clicked before that tick.
+    ///    Fix: in MP, BSCache.DelayedUpdate is skipped for a page pawn, and so is the forced GetCache(forceRefresh) of the
+    ///    full-update schedule while GameComponentTick runs. One log line per pawn. LabOff row 420 = old behaviour.
     /// Everything is MP only: outside a session nothing is written to saves and nothing changes.
     /// Not handled here: unsynced UI actions (drafted-pawn toggles, gene picker dialog, resource
     /// sliders, recolor window), and stale pre-reload Pawns that other mods' statics hand to Big and Small.
@@ -120,7 +126,65 @@ namespace Multiplayer.Compat
             PatchInterfaceReadOnly();
             PatchGeneSaveHook();
             PatchSettlePages();
+            // lab switch row 420 (17 Nov): off = old behaviour
+            if (!LabOff.Row(420))
+                PatchPagePawnTick();
         }
+
+        #region Page pawn in tick (point 11, row 420)
+
+        [ThreadStatic] private static bool inBsTick;
+        private static readonly HashSet<int> pagePawnSkipLogged = new HashSet<int>();
+        private static int pagePawnSkipCount;
+
+        private static void PatchPagePawnTick()
+        {
+            var cacheType = FindType("BigAndSmall.BigAndSmallCache");
+            var bsCacheType = FindType("BigAndSmall.BSCache");
+            var scalerType = FindType("BigAndSmall.HumanoidPawnScaler");
+            var getCache = AccessTools.DeclaredMethod(scalerType, "GetCache",
+                               new[] { typeof(Pawn), typeof(bool), typeof(bool), typeof(int), typeof(bool) })
+                           ?? throw new MissingMethodException(scalerType.FullName, "GetCache(Pawn, bool, bool, int, bool)");
+            MpCompat.harmony.Patch(GetDeclaredMethod(bsCacheType, "DelayedUpdate"),
+                prefix: new HarmonyMethod(typeof(BigAndSmall), nameof(PreDelayedUpdate)));
+            MpCompat.harmony.Patch(GetDeclaredMethod(cacheType, nameof(GameComponent.GameComponentTick)),
+                prefix: new HarmonyMethod(typeof(BigAndSmall), nameof(PreBsTick)),
+                finalizer: new HarmonyMethod(typeof(BigAndSmall), nameof(FinalBsTick)));
+            MpCompat.harmony.Patch(getCache, prefix: new HarmonyMethod(typeof(BigAndSmall), nameof(PreGetCacheInTick)));
+        }
+
+        private static void PreBsTick() => inBsTick = true;
+
+        private static void FinalBsTick() => inBsTick = false;
+
+        private static void LogPageSkip(Pawn pawn)
+        {
+            pagePawnSkipCount++;
+            if (pagePawnSkipLogged.Add(pawn.thingIDNumber))
+                Log.Message($"{LogPrefix}FIXES row 420: skipped page pawn update {pawn} (count {pagePawnSkipCount})");
+        }
+
+        private static bool PreDelayedUpdate(object __instance)
+        {
+            if (!MP.IsInMultiplayer)
+                return true;
+            var pawn = bsCachePawnField.GetValue(__instance) as Pawn;
+            if (!IsPagePawn(pawn))
+                return true;
+            LogPageSkip(pawn);
+            return false;
+        }
+
+        private static bool PreGetCacheInTick(Pawn pawn, bool forceRefresh, ref object __result)
+        {
+            if (!inBsTick || !forceRefresh || !MP.IsInMultiplayer || !IsPagePawn(pawn))
+                return true;
+            LogPageSkip(pawn);
+            __result = ((IDictionary)pawnCacheGetter())[pawn] ?? bsCacheCtor.Invoke(new object[] { pawn });
+            return false;
+        }
+
+        #endregion
 
         #region Tick counter, globalRandNum, stale statics
 
