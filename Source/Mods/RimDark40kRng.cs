@@ -74,6 +74,8 @@ namespace Multiplayer.Compat
         /// </summary>
         internal static void PatchSite(string logPrefix, MethodBase method, bool pushPop)
         {
+            // lab switch row 16 (package G, 17 Nov): off = old behaviour
+            if (LabOff.Row(16)) return;
             var counts = siteCounts.TryGetValue(logPrefix, out var c) ? c : default;
             if (UsesSystemRandom(method))
             {
@@ -110,6 +112,8 @@ namespace Multiplayer.Compat
         /// <summary>Installs <see cref="RedirectWeightedSelectionRandom"/> on a caller of <c>new WeightedSelection&lt;T&gt;()</c>, but only for builds whose WeightedSelection still has a System.Random.</summary>
         internal static void PatchWeightedSelectionCaller(string logPrefix, MethodBase method)
         {
+            // lab switch row 16 (package G, 17 Nov): off = old behaviour
+            if (LabOff.Row(16)) return;
             if (WeightedSelectionUsesSystemRandom(logPrefix))
                 MpCompat.harmony.Patch(method, transpiler: new HarmonyMethod(typeof(RimDark40kRng), nameof(RedirectWeightedSelectionRandom)));
         }

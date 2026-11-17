@@ -93,6 +93,8 @@ namespace Multiplayer.Compat
             var method = AccessTools.DeclaredMethod(type, "GenerateBabies")
                 ?? throw new MissingMethodException(type.FullName, "GenerateBabies");
 
+            // lab switch row 16 (package G, 17 Nov): off = old behaviour
+            if (LabOff.Row(16)) return;
             PatchingUtilities.PatchSystemRand(method, false);
 
             // lab switch row 95 (wave 2, 17 Nov): off = old behaviour

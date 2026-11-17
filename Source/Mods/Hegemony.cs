@@ -59,6 +59,8 @@ namespace Multiplayer.Compat
 
         public Hegemony(ModContentPack mod)
         {
+            // lab switch row 299 (package G, 17 Nov): off = old behaviour (Stage 1 module not installed)
+            if (LabOff.Row(299)) return;
             // F1: frame-driven work queues run from the world tick, with a fixed step count and no wall clock.
             updateTypes = UpdateDrivenComponents.Select(AccessTools.TypeByName).ToArray();
             foreach (var type in updateTypes)

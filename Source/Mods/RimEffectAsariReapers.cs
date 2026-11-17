@@ -28,6 +28,8 @@ namespace Multiplayer.Compat
             var method = AccessTools.DeclaredMethod(type, "Postfix")
                 ?? throw new MissingMethodException(type.FullName, "Postfix");
 
+            // lab switch row 16 (package G, 17 Nov): off = old behaviour
+            if (LabOff.Row(16)) return;
             PatchingUtilities.PatchSystemRand(method, false);
         }
     }

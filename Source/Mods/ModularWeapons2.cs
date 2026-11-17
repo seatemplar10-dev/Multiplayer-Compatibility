@@ -17,6 +17,8 @@ public class ModularWeapons2
     {
         var type = AccessTools.TypeByName("ModularWeapons2.CompModularWeapon")
                    ?? throw new System.TypeLoadException("[MPCompat - ModularWeapons 2] type ModularWeapons2.CompModularWeapon not found");
+        // lab switch row 56 (package G, 17 Nov): off = old behaviour
+        if (LabOff.Row(56)) return;
         PatchingUtilities.PatchUnityRand(MpMethodUtil.GetLambda(type, "RandomizePartsForPawn", lambdaOrdinal: 1), false);
     }
 }

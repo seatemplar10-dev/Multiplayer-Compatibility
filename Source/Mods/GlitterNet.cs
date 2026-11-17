@@ -46,7 +46,9 @@ namespace Multiplayer.Compat
                 ?? throw new TypeLoadException($"{LogPrefix}type GlitterNet.Events.GlitterNetSystemWakeEnforcer not found");
             var tick = AccessTools.DeclaredMethod(enforcerType, "GameComponentTick")
                 ?? throw new MissingMethodException(enforcerType.FullName, "GameComponentTick");
-            MpCompat.harmony.Patch(tick, transpiler: new HarmonyMethod(typeof(GlitterNet), nameof(NoIdentityHash)));
+            // lab switch row 50 (package G, 17 Nov): off = old behaviour
+            if (!LabOff.Row(50))
+                MpCompat.harmony.Patch(tick, transpiler: new HarmonyMethod(typeof(GlitterNet), nameof(NoIdentityHash)));
         }
 
         private static readonly System.Reflection.MethodInfo ObjectGetHashCode =
@@ -80,6 +82,8 @@ namespace Multiplayer.Compat
         // Same shape as the original loop (for i = Length - 1; i > 1; i--: swap(i, Next(i))), with a fixed generator.
         private static bool PreShuffle(int[] __0, ref int[] __result)
         {
+            // lab switch row 16 (package G, 17 Nov): off = old behaviour (original unseeded shuffle)
+            if (LabOff.Row(16)) return true;
             var array = __0;
             unchecked
             {

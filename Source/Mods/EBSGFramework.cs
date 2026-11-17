@@ -33,6 +33,8 @@ namespace Multiplayer.Compat
                 ("GainRandomGeneSet", () =>
                 {
                     var method = RimDark40kRng.FindMethod(LogPrefix, "EBSGFramework.EBSGUtilities", "GainRandomGeneSet");
+                    // lab switch row 16 (package G, 17 Nov): off = old behaviour
+                    if (LabOff.Row(16)) return;
                     PatchingUtilities.PatchSystemRand(method, false);
                 }),
                 ("AI cast ability rnd field", () =>
@@ -43,6 +45,8 @@ namespace Multiplayer.Compat
                     if (!field.IsStatic || field.IsInitOnly || field.FieldType != typeof(Random))
                         throw new MissingFieldException($"{LogPrefix}{type.FullName}.rnd is {field}, expected a writable static System.Random");
 
+                    // lab switch row 16 (package G, 17 Nov): off = old behaviour
+                    if (LabOff.Row(16)) return;
                     field.SetValue(null, PatchingUtilities.RandRedirector.Instance);
                 }));
         }

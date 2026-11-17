@@ -18,7 +18,9 @@ namespace Multiplayer.Compat
             // makes a new FaceAnimation (Rand.Range in Reset) per animation def, enumerated once per JobDef.
             // ~29k Rand calls on a client that draws the pawn, none on one that does not (headless arbiter).
             // Face animation timing is cosmetic, so keep it out of the simulation's Rand stream.
-            PatchingUtilities.PatchPushPopRand("FacialAnimation.FacialAnimationControllerComp:InitializeIfNeed");
+            // lab switch row 38 (package G, 17 Nov): off = old behaviour
+            if (!LabOff.Row(38))
+                PatchingUtilities.PatchPushPopRand("FacialAnimation.FacialAnimationControllerComp:InitializeIfNeed");
 
             // FIXES row 111 (FA 1.6 decompile, 14 Nov 2026). Each face controller comp (head, brow, eyeball, lid, mouth, skin)
             // rolls its face type and colour in InitializeIfNeed, which only the render tree calls (DrawFaceGraphicsComp.CreateSlaveNode).

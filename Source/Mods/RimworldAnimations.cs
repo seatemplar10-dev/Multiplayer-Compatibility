@@ -14,6 +14,10 @@ namespace Multiplayer.Compat
     public class RimworldAnimations
     {
         public RimworldAnimations(ModContentPack mod)
-            => PatchingUtilities.PatchPushPopRand("Rimworld_Animations.CompExtendedAnimator:CheckAndPlaySounds");
+        {
+            // lab switch row 30 (package G, 17 Nov): off = old behaviour
+            if (LabOff.Row(30)) return;
+            PatchingUtilities.PatchPushPopRand("Rimworld_Animations.CompExtendedAnimator:CheckAndPlaySounds");
+        }
     }
 }

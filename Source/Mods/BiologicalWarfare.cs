@@ -25,7 +25,9 @@ public class BiologicalWarfare
 
     public BiologicalWarfare(ModContentPack mod)
     {
-        PatchingUtilities.PatchUnityRand("USH_BW.HediffCompParasiteReproduction:RandomOrganicPart", false);
+        // lab switch row 53 (package G, 17 Nov): off = old behaviour
+        if (!LabOff.Row(53))
+            PatchingUtilities.PatchUnityRand("USH_BW.HediffCompParasiteReproduction:RandomOrganicPart", false);
 
         var utils = AccessTools.TypeByName("USH_BW.BiologicalUtils")
                     ?? throw new System.TypeLoadException($"{LogPrefix}type USH_BW.BiologicalUtils not found");
@@ -59,6 +61,13 @@ public class BiologicalWarfare
     // Same steps as BiologicalUtils.Shuffle: Random.Next(min, max) and Rand.Range(int, int) both exclude max.
     private static void RandShuffle<T>(List<T> list, int shuffleSteps)
     {
+        // lab switch row 53 (package G, 17 Nov): off = old behaviour
+        if (LabOff.Row(53))
+        {
+            modShuffle.MakeGenericMethod(typeof(T)).Invoke(null, new object[] { list, shuffleSteps });
+            return;
+        }
+
         for (var i = 0; i < shuffleSteps; i++)
         {
             var num = Rand.Range(0, list.Count - 1);

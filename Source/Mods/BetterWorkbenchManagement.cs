@@ -69,7 +69,8 @@ public class BetterWorkbenchManagement
 
     private static bool PrePasteIntoTable(object __instance, Building_WorkTable workTable, bool link)
     {
-        if (!MP.IsInMultiplayer || !MP.InInterface)
+        // lab switch row 275 (package G, 17 Nov): off = old behaviour
+        if (LabOff.Row(275) || !MP.IsInMultiplayer || !MP.InInterface)
             return true;
 
         var sources = SyncableCopiedBills(__instance);
@@ -80,7 +81,8 @@ public class BetterWorkbenchManagement
 
     private static bool PrePasteIntoBill(object __instance, Bill_Production targetBill)
     {
-        if (!MP.IsInMultiplayer || !MP.InInterface)
+        // lab switch row 275 (package G, 17 Nov): off = old behaviour
+        if (LabOff.Row(275) || !MP.IsInMultiplayer || !MP.InInterface)
             return true;
 
         var source = SyncableCopiedBills(__instance).FirstOrDefault();

@@ -30,8 +30,12 @@ namespace Multiplayer.Compat
     {
         public CombatExtendedRng(ModContentPack mod)
         {
-            PatchingUtilities.PatchUnityRand("CombatExtended.Verb_ShootMortarCE:ShiftGlobalTarget", false);
-            PatchingUtilities.PatchUnityRand("CombatExtended.CE_Utility:RandomGaussian", false);
+            // lab switch row 57 (package G, 17 Nov): off = old behaviour
+            if (!LabOff.Row(57))
+            {
+                PatchingUtilities.PatchUnityRand("CombatExtended.Verb_ShootMortarCE:ShiftGlobalTarget", false);
+                PatchingUtilities.PatchUnityRand("CombatExtended.CE_Utility:RandomGaussian", false);
+            }
 
             var makeCasingFilth = HarmonyLib.AccessTools.DeclaredMethod("CombatExtended.CE_Utility:MakeCasingFilth")
                 ?? throw new System.MissingMethodException("CombatExtended.CE_Utility", "MakeCasingFilth");

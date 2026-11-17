@@ -38,6 +38,9 @@ namespace Multiplayer.Compat
 
         private static CellRect ViewRectForBeam(CameraDriver driver)
         {
+            // lab switch row 39 (package G, 17 Nov): off = old behaviour
+            if (LabOff.Row(39) && driver != null)
+                return driver.CurrentViewRect;
             if (MP.IsInMultiplayer || driver == null)
                 return Everything;
             return driver.CurrentViewRect;

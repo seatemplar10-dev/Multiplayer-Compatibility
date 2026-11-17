@@ -503,7 +503,11 @@ namespace Multiplayer.Compat
 
         // In MP the landing picker is one player's UI, so game logic must not depend on it.
         private static bool PickerOpenForSim(object targeter)
-            => !MP.IsInMultiplayer && (bool)isTargeting(targeter);
+        {
+            // lab switch row 217 (package G, 17 Nov): off = old behaviour
+            if (LabOff.Row(217)) return (bool)isTargeting(targeter);
+            return !MP.IsInMultiplayer && (bool)isTargeting(targeter);
+        }
 
         private static bool IsCaravanFormingProxy(Dialog_FormCaravan dialog)
             => dialog != null && dialog.GetType().FullName == CaravanFormingProxyTypeName;

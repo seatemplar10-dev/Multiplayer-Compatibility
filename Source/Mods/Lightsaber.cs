@@ -97,8 +97,12 @@ namespace Multiplayer.Compat
             // Fix 4 (row 47): default blade and core colours come from UnityEngine.Random (the blade colour feeds the
             // glow grid). Run on PostSpawnSetup / Notify_Equipped on every PC -> draw from a pushed Verse Rand instead.
             var bladeType = FindType("Lightsaber.Comp_LightsaberBlade");
-            PatchingUtilities.PatchUnityRand(GetDeclaredMethod(bladeType, "GetRandomRGBColor"));
-            PatchingUtilities.PatchUnityRand(GetDeclaredMethod(bladeType, "GetBlackOrWhiteCore"));
+            // lab switch row 47 (package G, 17 Nov): off = old behaviour
+            if (!LabOff.Row(47))
+            {
+                PatchingUtilities.PatchUnityRand(GetDeclaredMethod(bladeType, "GetRandomRGBColor"));
+                PatchingUtilities.PatchUnityRand(GetDeclaredMethod(bladeType, "GetBlackOrWhiteCore"));
+            }
         }
 
         private static readonly MethodInfo TimeDeltaTimeGetter =
@@ -123,7 +127,12 @@ namespace Multiplayer.Compat
         }
 
         // One tick at normal speed in MP; real frame time otherwise (single player unchanged).
-        private static float TickDeltaTime() => MP.IsInMultiplayer ? 1f / 60f : UnityEngine.Time.deltaTime;
+        private static float TickDeltaTime()
+        {
+            // lab switch row 47 (package G, 17 Nov): off = old behaviour
+            if (LabOff.Row(47)) return UnityEngine.Time.deltaTime;
+            return MP.IsInMultiplayer ? 1f / 60f : UnityEngine.Time.deltaTime;
+        }
 
         private static void PreGameStart()
         {

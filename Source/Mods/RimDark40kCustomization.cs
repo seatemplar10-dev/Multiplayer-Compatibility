@@ -236,6 +236,9 @@ namespace Multiplayer.Compat
             // dialog.Closed; 1.2.32 has only the two drivers above, which open the window and end.
             customizeAtStationType = AccessTools.TypeByName("Core40k.JobDriver_CustomizeAtStation");
             waitFlow = customizeAtStationType != null;
+            // lab switch row 369 (package G, 17 Nov): off = old behaviour (the 1.2.117 build is unsupported: module goes inert, "unsupported Core40k build")
+            if (LabOff.Row(369) && waitFlow)
+                throw new TypeLoadException("lab row 369 off: Core40k 1.2.117 flow not supported");
 
             // Same field ZiTools uses: while true, synced methods run locally instead of being sent. Required: without it the module
             // could not leave other interface-time callers of these methods alone.

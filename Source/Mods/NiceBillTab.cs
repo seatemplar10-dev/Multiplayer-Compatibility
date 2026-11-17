@@ -275,7 +275,8 @@ namespace Multiplayer.Compat
 
         private static bool PreInsertBill(Building_WorkTable SelTable, Bill bill, int index)
         {
-            if (!MP.IsInMultiplayer || !MP.InInterface)
+            // lab switch row 275 (package G, 17 Nov): off = old behaviour
+            if (LabOff.Row(275) || !MP.IsInMultiplayer || !MP.InInterface)
                 return true;
 
             if (SelTable?.billStack != null && bill != null)
@@ -317,7 +318,8 @@ namespace Multiplayer.Compat
 
         private static void DeferAddBill(BillStack stack, Bill bill)
         {
-            if (MP.IsInMultiplayer && MP.InInterface && pendingBill == null)
+            // lab switch row 275 (package G, 17 Nov): off = old behaviour
+            if (!LabOff.Row(275) && MP.IsInMultiplayer && MP.InInterface && pendingBill == null)
             {
                 pendingStack = stack;
                 pendingBill = bill;

@@ -40,12 +40,15 @@ public class Coventech
                           ?? throw new TypeLoadException($"{LogPrefix}type MstToyBox.Mst_BezierProjectile_ClusterBomb not found");
         var groundTarget = AccessTools.DeclaredMethod(clusterBomb, "GetGroundTarget", [typeof(IntVec3), typeof(float)])
                            ?? throw new MissingMethodException(clusterBomb.FullName, "GetGroundTarget(IntVec3, float)");
-        PatchingUtilities.PatchUnityRand(groundTarget, false);
+        // lab switch row 54 (package G, 17 Nov): off = old behaviour
+        if (!LabOff.Row(54))
+            PatchingUtilities.PatchUnityRand(groundTarget, false);
     }
 
     private static void PreInitRandOffset(Thing __instance, ref bool __state)
     {
-        if (!MP.IsInMultiplayer)
+        // lab switch row 54 (package G, 17 Nov): off = old behaviour
+        if (LabOff.Row(54) || !MP.IsInMultiplayer)
             return;
         Rand.PushState(Gen.HashCombineInt(__instance.thingIDNumber, SeedSalt));
         __state = true;

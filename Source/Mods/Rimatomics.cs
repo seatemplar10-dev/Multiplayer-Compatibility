@@ -34,11 +34,17 @@ namespace Multiplayer.Compat
                 postfix: new HarmonyMethod(typeof(Rimatomics), nameof(PostWorldComponentTick)));
         }
 
-        private static bool PreWorldComponentUpdate() => !MP.IsInMultiplayer;
+        private static bool PreWorldComponentUpdate()
+        {
+            // lab switch row 90 (package G, 17 Nov): off = old behaviour
+            if (LabOff.Row(90)) return true;
+            return !MP.IsInMultiplayer;
+        }
 
         private static void PostWorldComponentTick(WorldComponent __instance)
         {
-            if (!MP.IsInMultiplayer)
+            // lab switch row 90 (package G, 17 Nov): off = old behaviour
+            if (LabOff.Row(90) || !MP.IsInMultiplayer)
                 return;
 
             ref var notify = ref notifyField(__instance);
