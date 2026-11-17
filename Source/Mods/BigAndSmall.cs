@@ -78,6 +78,11 @@ namespace Multiplayer.Compat
     ///    PC only: "Wrong random state for the world". Row 248's cleanup only wins if Next is clicked before that tick.
     ///    Fix: in MP, BSCache.DelayedUpdate is skipped for a page pawn, and so is the forced GetCache(forceRefresh) of the
     ///    full-update schedule while GameComponentTick runs. One log line per pawn. LabOff row 420 = old behaviour.
+    ///    v2 (17 Nov, lab run r420f2): with the skip, the HOST alone refreshed the settled pawn's genes 245 ticks after the
+    ///    Settle. Whether BSCache.DelayedUpdate calls RefreshAllGenes depends on B&amp;S state that is per PC and not saved
+    ///    (GeneCache.globalCache, the cache's genesActivated / genesDeactivated lists, caches made while the pawn still had
+    ///    its page id). So after the synced FactionCreator.SendPawn command, on every PC, all of that is dropped for the
+    ///    sent pawn and one forced GetCache builds it again: both PCs queue the same DelayedUpdate for the next BS tick.
     /// Everything is MP only: outside a session nothing is written to saves and nothing changes.
     /// Not handled here: unsynced UI actions (drafted-pawn toggles, gene picker dialog, resource
     /// sliders, recolor window), and stale pre-reload Pawns that other mods' statics hand to Big and Small.
@@ -151,6 +156,129 @@ namespace Multiplayer.Compat
                 prefix: new HarmonyMethod(typeof(BigAndSmall), nameof(PreBsTick)),
                 finalizer: new HarmonyMethod(typeof(BigAndSmall), nameof(FinalBsTick)));
             MpCompat.harmony.Patch(getCache, prefix: new HarmonyMethod(typeof(BigAndSmall), nameof(PreGetCacheInTick)));
+
+            // v2: the same B&S state for a Settle pawn on every PC, right after the synced SendPawn command.
+            bsGetCache = getCache;
+            geneGlobalCacheField = AccessTools.Field(FindType("BigAndSmall.GeneCache"), "globalCache");
+            scalerTCacheField = AccessTools.Field(scalerType, "_tCache");
+            scalerTDictCacheField = AccessTools.Field(scalerType, "_tDictCache");
+            var sendPawn = AccessTools.Method("Multiplayer.Client.Factions.FactionCreator:SendPawn")
+                           ?? AccessTools.Method("Multiplayer.Client.FactionCreator:SendPawn");
+            if (sendPawn == null || geneGlobalCacheField?.GetValue(null) is not IDictionary)
+            {
+                Log.Warning("[MPCompat] FIXES row 420: FactionCreator.SendPawn or GeneCache.globalCache not found: Settle pawns keep their per-PC Big and Small state");
+                return;
+            }
+            MpCompat.harmony.Patch(sendPawn, postfix: new HarmonyMethod(typeof(BigAndSmall), nameof(PostSendPawn)));
+        }
+
+        private static MethodInfo bsGetCache;
+        private static FieldInfo geneGlobalCacheField, scalerTCacheField, scalerTDictCacheField;
+
+        // Runs on every PC when the synced command executes (p = the pawn read from the command, already renumbered).
+        // The issuer's own intercepted call (page pawn, not executing a command) is left alone.
+        private static void PostSendPawn(Pawn p)
+        {
+            if (p == null || !MP.IsInMultiplayer || !MP.IsExecutingSyncCommand)
+                return;
+            try
+            {
+                int caches = DropPawnKeys((IDictionary)pawnCacheGetter(), p) + DropPawnKeys((IDictionary)junkCacheField?.GetValue(null), p);
+                int scribed = DropCachesOf(scribedCacheProp.GetValue(null), p);
+                int sched = DropFromScheduleOf(scheduleFullUpdateField, p) + DropFromScheduleOf(schedulePostUpdateField, p)
+                            + DropCachesOf(currentlyQueuedField.GetValue(null), p);
+                int genes = 0;
+                var geneStates = (IDictionary)geneGlobalCacheField.GetValue(null);
+                var frequent = (IDictionary)frequentUpdateGenesField?.GetValue(null);
+                foreach (var gene in p.genes?.GenesListForReading ?? new List<Gene>())
+                {
+                    if (geneStates.Contains(gene))
+                    {
+                        geneStates.Remove(gene);
+                        genes++;
+                    }
+                    if (frequent != null && frequent.Contains(gene))
+                        frequent.Remove(gene);
+                }
+                // B&S's per-thread shortcut (last pawn + id table) may still point at a dropped cache.
+                if (scalerTCacheField != null)
+                    scalerTCacheField.SetValue(null, Activator.CreateInstance(scalerTCacheField.FieldType));
+                (scalerTDictCacheField?.GetValue(null) as IDictionary)?.Clear();
+
+                bsGetCache.Invoke(null, new object[] { p, true, true, -1, false });
+                Log.Message($"[MPCompat] FIXES row 420: Settle pawn {p} ({p.ThingID}) Big and Small state rebuilt " +
+                            $"(caches {caches}, scribed {scribed}, scheduled {sched}, gene states {genes}), update queued at BS tick {internalTickField?.GetValue(null)} + 1");
+            }
+            catch (Exception e)
+            {
+                Log.Error($"[MPCompat] FIXES row 420: Settle pawn {p} state rebuild failed: {e}");
+            }
+        }
+
+        // Drops the entries of this pawn. An entry made while the pawn still had its page id sits under the old
+        // hash (Thing.GetHashCode is the id), so for those the old id (from BSCache.id) is put back for the Remove.
+        private static int DropPawnKeys(IDictionary dict, Pawn p)
+        {
+            if (dict == null)
+                return 0;
+            int dropped = 0;
+            if (dict.Contains(p))
+            {
+                dict.Remove(p);
+                dropped++;
+            }
+            var stale = new List<object>();
+            foreach (DictionaryEntry entry in dict)
+                if (ReferenceEquals(entry.Key, p) && entry.Value != null)
+                    stale.Add(entry.Value);
+            int id = p.thingIDNumber;
+            try
+            {
+                foreach (var cache in stale)
+                {
+                    if (bsCacheIdField.GetValue(cache) is not string oldId || !oldId.StartsWith(p.def.defName))
+                        continue;
+                    if (!int.TryParse(oldId.Substring(p.def.defName.Length), out var oldNumber))
+                        continue;
+                    p.thingIDNumber = oldNumber;
+                    if (dict.Contains(p))
+                    {
+                        dict.Remove(p);
+                        dropped++;
+                    }
+                }
+            }
+            finally
+            {
+                p.thingIDNumber = id;
+            }
+            return dropped;
+        }
+
+        // A HashSet<BSCache>: drops the caches of this pawn.
+        private static int DropCachesOf(object set, Pawn p)
+        {
+            if (set == null)
+                return 0;
+            var drop = ((IEnumerable)set).Cast<object>()
+                .Where(c => c != null && ReferenceEquals(bsCachePawnField.GetValue(c), p)).ToList();
+            var remove = set.GetType().GetMethod("Remove");
+            foreach (var c in drop)
+                remove.Invoke(set, new[] { c });
+            return drop.Count;
+        }
+
+        private static int DropFromScheduleOf(FieldInfo field, Pawn p)
+        {
+            var dict = (IDictionary)field.GetValue(null);
+            int dropped = 0;
+            foreach (var tick in dict.Keys.Cast<object>().ToList())
+            {
+                dropped += DropCachesOf(dict[tick], p);
+                if (!((IEnumerable)dict[tick]).Cast<object>().Any())
+                    dict.Remove(tick);
+            }
+            return dropped;
         }
 
         private static void PreBsTick() => inBsTick = true;
