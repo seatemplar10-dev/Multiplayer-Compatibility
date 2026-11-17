@@ -161,7 +161,7 @@ namespace Multiplayer.Compat
         {
             pagePawnSkipCount++;
             if (pagePawnSkipLogged.Add(pawn.thingIDNumber))
-                Log.Message($"{LogPrefix}FIXES row 420: skipped page pawn update {pawn} (count {pagePawnSkipCount})");
+                Log.Message($"[MPCompat] FIXES row 420: skipped page pawn update {pawn} (count {pagePawnSkipCount})");
         }
 
         private static bool PreDelayedUpdate(object __instance)
