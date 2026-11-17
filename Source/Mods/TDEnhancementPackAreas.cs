@@ -137,7 +137,8 @@ namespace Multiplayer.Compat
         // ---- the clear button and the reorder arrows (one transpiler for DoOrderButton) ----------------------------------------------
 
         private static IEnumerable<CodeInstruction> TranspileDoOrderButton(IEnumerable<CodeInstruction> instructions)
-            => RewriteSwap(RewriteClear(instructions, out _), out _);
+            // lab switch row 374 (package G, 17 Nov): off = old behaviour (reorder arrows call Swap locally); INSTALL-ONLY
+            => LabOff.Row(374) ? RewriteClear(instructions, out _) : RewriteSwap(RewriteClear(instructions, out _), out _);
 
         // The two reorder arrows call "component.Swap(area, neighbour)": ldloc component; ldloc area; ldloc neighbour; callvirt Swap.
         // The call becomes "call SyncSwapAreas(MapComponent, Area_Allowed, Area)": the same three values on the stack, the instance first.

@@ -121,6 +121,8 @@ namespace Multiplayer.Compat
 
         private static void RunConfigSideEffects()
         {
+            // lab switch row 180 (package G, 17 Nov): off = old behaviour
+            if (LabOff.Row(180)) return;
             var skyfallerProps = AccessTools.TypeByName("AncientAmorphousThreat.CompProperties_AbilitySpawnViaSkyfaller");
             var characterParms = AccessTools.TypeByName("AncientAmorphousThreat.PredefinedCharacterParmDef");
             var maxSize = skyfallerProps == null ? null : AccessTools.DeclaredField(skyfallerProps, "MaxSize");

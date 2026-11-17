@@ -308,6 +308,8 @@ namespace Multiplayer.Compat
 
             // 1) the toil of a job this machine ordered (record); 2) the order command itself when the pawn already stood at the
             // station and the toil ran inside TryTakeOrderedJob (the record is written after it returns).
+            // lab switch row 195 (package G, 17 Nov): off = old behaviour
+            if (LabOff.Row(195)) return true;
             bool mine = TakeJobRecord(pawn) || (orderingJob != null && pawn?.CurJob == orderingJob);
             Log.Message($"{LogPrefix}{window.GetType().Name} for {pawn?.LabelShort ?? "null"} (tick {Find.TickManager?.TicksGame}): " +
                         (mine ? "ordered by this machine, window opened." : "ordered by another player, window not opened here."));

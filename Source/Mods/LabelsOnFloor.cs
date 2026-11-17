@@ -191,7 +191,8 @@ namespace Multiplayer.Compat
         // Designator_Rename.DesignateSingleCell runs as a synced command on every PC and opens the rename window there.
         private static bool PreWindowStackAdd(Window window)
             => window == null || !MP.IsInMultiplayer || !MP.IsExecutingSyncCommand || MP.IsExecutingSyncCommandIssuedBySelf
-               || !(zoneDialogType.IsInstanceOfType(window) || (roomDialogType != null && roomDialogType.IsInstanceOfType(window)));
+               || !(zoneDialogType.IsInstanceOfType(window) || (roomDialogType != null && roomDialogType.IsInstanceOfType(window)))
+               || LabOff.Row(371); // lab switch row 371 (package G, 17 Nov): off = old behaviour (window opens on every PC)
 
         // ---- the rename OK button -----------------------------------------------------------------------------------------------------
 
@@ -227,6 +228,13 @@ namespace Multiplayer.Compat
         private static void ApplyZoneChangesHook(Window dialog)
         {
             if (!MP.IsInMultiplayer)
+            {
+                applyChangesInvoker(dialog);
+                return;
+            }
+
+            // lab switch row 371 (package G, 17 Nov): off = old behaviour (the dialog's own local ApplyChanges)
+            if (LabOff.Row(371))
             {
                 applyChangesInvoker(dialog);
                 return;

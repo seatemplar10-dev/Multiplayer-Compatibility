@@ -157,6 +157,8 @@ namespace Multiplayer.Compat
             __state = false;
             if (!MP.IsInMultiplayer || (bool)overviewLetterSentField.GetValue(null))
                 return;
+            // lab switch row 146 (package G, 17 Nov): off = old behaviour
+            if (LabOff.Row(146)) return;
             overviewLetterSentField.SetValue(null, true);
             __state = true;
         }
