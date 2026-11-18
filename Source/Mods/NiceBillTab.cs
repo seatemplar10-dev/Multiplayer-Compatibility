@@ -49,8 +49,13 @@ namespace Multiplayer.Compat
         private static PropertyInfo bsScribedCacheProp, bsDictCacheProp;
         private static FieldInfo bsJunkCacheField, bsRefreshQueueField, bsCurrentlyQueuedField, bsSchedulePostField, bsScheduleFullField, bsCachePawnField;
 
+        // F.80: the local Nice Bill Tab fork (rows 143 277 275) has StatMechanoidWorker.GetMechStatsUncounted (private static, the old
+        // GetMechStats body, added in its row 143 commit); the stock dll has none.
+        private static bool forkLoaded;
+
         public NiceBillTab(ModContentPack mod)
         {
+            forkLoaded = ForkDetect.HasMethod("Nice Bill Tab", "NiceBillTab.StatMechanoidWorker", "GetMechStatsUncounted");
             idFields = AccessTools.GetDeclaredFields(typeof(UniqueIDsManager))
                 .Where(f => !f.IsStatic && f.FieldType == typeof(int))
                 .ToArray();
@@ -94,6 +99,8 @@ namespace Multiplayer.Compat
 
                 // lab switch row 277 (wave 3, 17 Nov): off = old behaviour
                 if (LabOff.Row(277)) return;
+                // F.80 row 277: the fork's HandleBillDrop calls BillStack.Reorder (MP syncs it) and has no List<Bill>.Remove / Insert left
+                if (forkLoaded) return;
                 MP.RegisterSyncMethod(typeof(NiceBillTab), nameof(SyncedReorderBill));
                 MpCompat.harmony.Patch(handleDrop, transpiler: new HarmonyMethod(typeof(NiceBillTab), nameof(HandleBillDropTranspiler)));
             }
@@ -250,8 +257,14 @@ namespace Multiplayer.Compat
                 var insertBill = AccessTools.DeclaredMethod("NiceBillTab.TabBillsDrawer:InsertBill", [typeof(Building_WorkTable), typeof(Bill), typeof(int)]);
                 if (insertBill != null)
                 {
-                    MpCompat.harmony.Patch(insertBill, prefix: new HarmonyMethod(typeof(NiceBillTab), nameof(PreInsertBill)));
-                    MP.RegisterSyncMethod(typeof(NiceBillTab), nameof(SyncedInsertBill)).ExposeParameter(1);
+                    // F.80 row 275 (InsertBill): the fork adds through BillStack.AddBill + Reorder, both synced by MP. The TryAddBillToQueue
+                    // defer below stays with the fork: the fork only sets material and name before AddBill, it does not drop the selection
+                    // of the local bill
+                    if (!forkLoaded)
+                    {
+                        MpCompat.harmony.Patch(insertBill, prefix: new HarmonyMethod(typeof(NiceBillTab), nameof(PreInsertBill)));
+                        MP.RegisterSyncMethod(typeof(NiceBillTab), nameof(SyncedInsertBill)).ExposeParameter(1);
+                    }
                 }
                 else
                     Log.Error("MPCompat - Nice Bill Tab: TabBillsDrawer.InsertBill not found - 'paste bill here' stays unsynced (FIXES row 275)");
@@ -358,23 +371,28 @@ namespace Multiplayer.Compat
             ghosts.Clear();
             var ids = Current.Game?.uniqueIDsManager;
             if (ids == null) return;
-            __state = new State { ids = idFields.Select(f => (int)f.GetValue(ids)).ToArray() };
+            // F.80 row 143: the fork's GetMechStats restores the unique-id counters and the random state itself, so with it only the
+            // row 159 part (ghost pawns out of PsiTech / Big and Small, nextTrackerId) stays here. LabOff row 143 on the stock dll = control arm
+            var idsToo = !forkLoaded && !LabOff.Row(143);
+            __state = new State { ids = idsToo ? idFields.Select(f => (int)f.GetValue(ids)).ToArray() : null };
             ResolveOtherMods();
             var psiManager = PsiManager();
             if (psiManager != null)
                 __state.psiNextTrackerId = (int)psiNextTrackerIdField.GetValue(psiManager);
-            Rand.PushState();
+            if (idsToo)
+                Rand.PushState();
         }
 
         private static void RestoreIds(State __state)
         {
             depth--;
             if (__state == null) return;
-            Rand.PopState();
+            if (__state.ids != null)
+                Rand.PopState();
             var ids = Current.Game?.uniqueIDsManager;
             if (ids == null) return;
             int thingIdsTaken = 0;
-            for (int i = 0; i < idFields.Length; i++)
+            for (int i = 0; __state.ids != null && i < idFields.Length; i++)
             {
                 if (idFields[i].Name == "nextThingID")
                     thingIdsTaken = (int)idFields[i].GetValue(ids) - __state.ids[i];
