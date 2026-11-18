@@ -83,6 +83,8 @@ namespace Multiplayer.Compat
     ///    (GeneCache.globalCache, the cache's genesActivated / genesDeactivated lists, caches made while the pawn still had
     ///    its page id). So after the synced FactionCreator.SendPawn command, on every PC, all of that is dropped for the
     ///    sent pawn and one forced GetCache builds it again: both PCs queue the same DelayedUpdate for the next BS tick.
+    ///    v3 (18 Nov, lab run hc76): a pawn sent in parts (our Multiplayer's row 421, FactionCreator.SendPawnPart) gets the
+    ///    same rebuild after the part command that stores it.
     /// Everything is MP only: outside a session nothing is written to saves and nothing changes.
     /// Not handled here: unsynced UI actions (drafted-pawn toggles, gene picker dialog, resource
     /// sliders, recolor window), and stale pre-reload Pawns that other mods' statics hand to Big and Small.
@@ -170,6 +172,38 @@ namespace Multiplayer.Compat
                 return;
             }
             MpCompat.harmony.Patch(sendPawn, postfix: new HarmonyMethod(typeof(BigAndSmall), nameof(PostSendPawn)));
+
+            // v3 (18 Nov, lab run hc76): our Multiplayer's row 421 sends a pawn over one command's size as SendPawnPart commands.
+            // The last part reads the pawn and stores it without SendPawn, so the v2 rebuild never ran for it: the client alone
+            // refreshed the Character Editor pawn's genes 1 s after the Settle ("Wrong random state for the world", trace 722).
+            // Same rebuild after the part command that stored a new pawn.
+            var sendPawnPart = AccessTools.Method("Multiplayer.Client.Factions.FactionCreator:SendPawnPart");
+            pawnStoreField = AccessTools.Field(sendPawn.DeclaringType, "pawnStore");
+            if (sendPawnPart == null)
+                return; // a Multiplayer build without row 421: every pawn goes through SendPawn
+            if (pawnStoreField == null)
+            {
+                Log.Warning("[MPCompat] FIXES row 420 v3: FactionCreator.pawnStore not found: a Settle pawn sent in parts keeps its per-PC Big and Small state");
+                return;
+            }
+            MpCompat.harmony.Patch(sendPawnPart,
+                prefix: new HarmonyMethod(typeof(BigAndSmall), nameof(PreSendPawnPart)),
+                postfix: new HarmonyMethod(typeof(BigAndSmall), nameof(PostSendPawnPart)));
+        }
+
+        private static FieldInfo pawnStoreField;
+
+        private static IList StoredPawns(int playerId) => (pawnStoreField.GetValue(null) as IDictionary)?[playerId] as IList;
+
+        private static void PreSendPawnPart(int playerId, out int __state) => __state = StoredPawns(playerId)?.Count ?? 0;
+
+        // Runs on every PC for each part command; only the part that stored a new pawn (the last one, in order) acts.
+        // The issuer's intercepted call stores nothing, so the count does not change there.
+        private static void PostSendPawnPart(int playerId, int __state)
+        {
+            var pawns = StoredPawns(playerId);
+            if (pawns != null && pawns.Count == __state + 1 && pawns[pawns.Count - 1] is Pawn p)
+                PostSendPawn(p);
         }
 
         private static MethodInfo bsGetCache;
