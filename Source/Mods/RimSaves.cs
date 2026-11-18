@@ -22,6 +22,8 @@ namespace Multiplayer.Compat
     {
         public RimSaves(ModContentPack mod)
         {
+            // Lab switch row 425 (18 Nov): -mplaboff=425 keeps the stock quicksave listener and hotkeys (no patch at all).
+            if (LabOff.Row(425)) return;
             // RimSaves' own Harmony postfix of LetterStack.ReceiveLetter; patching the postfix method itself skips it in MP.
             MpCompat.harmony.Patch(AccessTools.DeclaredMethod("aRandomKiwi.ARS.ReceiveLetter_Patch:Listener"),
                 prefix: new HarmonyMethod(typeof(RimSaves), nameof(PreListener)));
