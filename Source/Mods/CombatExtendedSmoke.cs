@@ -28,6 +28,8 @@ namespace Multiplayer.Compat
 
         public CombatExtendedSmoke(ModContentPack mod)
         {
+            // fork row 32: fix is inside the CE fork dll (sequential BlackSmokeTracker tick)
+            if (CombatExtendedFork.Has(32)) return;
             var tracker = AccessTools.TypeByName("CombatExtended.BlackSmokeTracker");
             var smoke = AccessTools.TypeByName("CombatExtended.Smoke");
             smokeListField = AccessTools.DeclaredField(tracker, "_smoke");

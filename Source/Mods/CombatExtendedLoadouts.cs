@@ -23,6 +23,8 @@ namespace Multiplayer.Compat
 
         public CombatExtendedLoadouts(ModContentPack mod)
         {
+            // fork row 164: fix is inside the CE fork dll (GetLoadout does not assign)
+            if (CombatExtendedFork.Has(164)) return;
             var manager = AccessTools.TypeByName("CombatExtended.LoadoutManager")
                           ?? throw new MissingMemberException("CombatExtended.LoadoutManager");
             assignedLoadoutsGetter = AccessTools.PropertyGetter(manager, "AssignedLoadouts")

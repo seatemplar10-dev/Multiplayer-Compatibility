@@ -24,6 +24,8 @@ namespace Multiplayer.Compat
 
         public CombatExtendedVerbDisabler(ModContentPack mod)
         {
+            // fork row 168: fix is inside the CE fork dll (CompVerbDisabler.SyncedSetHoldFire)
+            if (CombatExtendedFork.Has(168)) return;
             var compType = AccessTools.TypeByName("CombatExtended.CompVerbDisabler")
                            ?? throw new MissingMemberException("CombatExtended.CompVerbDisabler");
             var iface = AccessTools.TypeByName("CombatExtended.IVerbDisableable")

@@ -31,16 +31,20 @@ namespace Multiplayer.Compat
         public CombatExtendedRng(ModContentPack mod)
         {
             // lab switch row 57 (package G, 17 Nov): off = old behaviour
-            if (!LabOff.Row(57))
+            if (!LabOff.Row(57) && !CombatExtendedFork.Has(57))   // fork row 57: Verse.Rand inside CE
             {
                 PatchingUtilities.PatchUnityRand("CombatExtended.Verb_ShootMortarCE:ShiftGlobalTarget", false);
                 PatchingUtilities.PatchUnityRand("CombatExtended.CE_Utility:RandomGaussian", false);
             }
 
-            var makeCasingFilth = HarmonyLib.AccessTools.DeclaredMethod("CombatExtended.CE_Utility:MakeCasingFilth")
-                ?? throw new System.MissingMethodException("CombatExtended.CE_Utility", "MakeCasingFilth");
-            MpCompat.harmony.Patch(makeCasingFilth,
-                prefix: new HarmonyLib.HarmonyMethod(typeof(CombatExtendedRng), nameof(NoCasingFilthInMp)));
+            // fork row 63: the fork dll takes the casing cell from caster.Position and seeds Rand itself
+            if (!CombatExtendedFork.Has(63))
+            {
+                var makeCasingFilth = HarmonyLib.AccessTools.DeclaredMethod("CombatExtended.CE_Utility:MakeCasingFilth")
+                    ?? throw new System.MissingMethodException("CombatExtended.CE_Utility", "MakeCasingFilth");
+                MpCompat.harmony.Patch(makeCasingFilth,
+                    prefix: new HarmonyLib.HarmonyMethod(typeof(CombatExtendedRng), nameof(NoCasingFilthInMp)));
+            }
 
             var tryRegister = HarmonyLib.AccessTools.DeclaredMethod("CombatExtended.WorldObjects.WorldObjectTrackerCE:TryRegister",
                                   new[] { typeof(RimWorld.Planet.WorldObject) })
