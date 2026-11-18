@@ -42,7 +42,7 @@ namespace Multiplayer.Compat
 
         private static bool PreMapComponentTick(object __instance)
         {
-            if (!MP.IsInMultiplayer)
+            if (LabOff.Row(32) || !MP.IsInMultiplayer) // lab switch row 32: off = stock tick (Parallel.ForEach)
                 return true;
 
             var list = (IList)smokeListField.GetValue(__instance);

@@ -42,6 +42,7 @@ namespace Multiplayer.Compat
         // A NaN stays NaN (the comparison is false), exactly as before.
         private static void ClampScore(ref float __result)
         {
+            if (LabOff.Row(307)) return; // lab switch row 307: off = stock (negative score reaches the selector)
             if (__result < 0f)
                 __result = 0f;
         }

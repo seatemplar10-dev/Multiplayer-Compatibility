@@ -79,7 +79,7 @@ namespace Multiplayer.Compat
         // The Apply button in MP: the weapon branch goes out as one synced command; the loadout editor (no weapon) runs CE's code.
         private static bool PreApply(Window __instance)
         {
-            if (!MP.IsInMultiplayer || MP.IsExecutingSyncCommand)
+            if (LabOff.Row(58) || !MP.IsInMultiplayer || MP.IsExecutingSyncCommand)
                 return true;
             if (editorWeapon.GetValue(__instance) is not Thing weapon)
                 return true;

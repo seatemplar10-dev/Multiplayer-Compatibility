@@ -487,7 +487,7 @@ namespace Multiplayer.Compat
         // would hold old-game objects too.
         private static void StopTargetersBeforeReload()
         {
-            if (!MP.IsInMultiplayer)
+            if (LabOff.Row(216) || !MP.IsInMultiplayer) // lab switch row 216
                 return;
             try
             {
@@ -563,7 +563,7 @@ namespace Multiplayer.Compat
         // Only for Multiplayer's CaravanFormingProxy; every other dialog, and single player, runs VF's body unchanged.
         private static bool PreTryAndSendWithVehicles(Dialog_FormCaravan __0, ref bool __result)
         {
-            if (!MP.IsInMultiplayer || !IsCaravanFormingProxy(__0))
+            if (LabOff.Row(204) || !MP.IsInMultiplayer || !IsCaravanFormingProxy(__0))
                 return true;
 
             // Row 358: VF's body runs when its formation is this window's and the Referenced assembly syncs its game-state steps.
@@ -588,7 +588,7 @@ namespace Multiplayer.Compat
         // VF itself does when no vehicle is selected (MP syncs the chosen route through the proxy's Notify_ChoseRoute).
         private static bool PreWorldRoutePannerReroute(WorldRoutePlanner __0, Dialog_FormCaravan __1)
         {
-            if (!MP.IsInMultiplayer || !IsCaravanFormingProxy(__1))
+            if (LabOff.Row(204) || !MP.IsInMultiplayer || !IsCaravanFormingProxy(__1))
                 return true;
 
             __0.Start(__1);

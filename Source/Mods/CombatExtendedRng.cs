@@ -54,7 +54,7 @@ namespace Multiplayer.Compat
                 finalizer: new HarmonyLib.HarmonyMethod(typeof(CombatExtendedRng), nameof(FinalTryRegister)));
         }
 
-        private static bool NoCasingFilthInMp() => !Multiplayer.API.MP.IsInMultiplayer;
+        private static bool NoCasingFilthInMp() => LabOff.Row(63) || !Multiplayer.API.MP.IsInMultiplayer; // lab switch row 63: off = CE makes casing filth in MP
 
         private static void PreTryRegister(RimWorld.Planet.WorldObject worldObject, out bool __state)
         {
