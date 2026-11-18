@@ -67,9 +67,14 @@ public class CustomQuestFramework
         // Before any patch: the sync methods need nothing else, and a throw in PatchJobMenus or PatchDialogWindow (no guard in either)
         // must not leave a patched menu or window calling an unregistered sync method (it would run on the clicking PC only)
         // lab switch row 278 (wave 3, 17 Nov): off = old behaviour (no job/dialog sync, no menu or window patch)
+        // F.80 row 278 job part: the fork's five float menu lambdas call TryTakeOrderedJob (MP syncs it), so SyncedStartJob and the
+        // StartJob/StopAll transpiler are not installed with it; the dialog window choices are not in the fork and stay. The fork adds
+        // no member, it carries the marker class QuestEditor_Library.SeaForkRows (Rows contains "278job")
+        var forkJobs = ForkDetect.HasRow("Custom Quest Framework", "QuestEditor_Library.SeaForkRows", "278job");
         if (!LabOff.Row(278))
         {
-            MP.RegisterSyncMethod(typeof(CustomQuestFramework), nameof(SyncedStartJob));
+            if (!forkJobs)
+                MP.RegisterSyncMethod(typeof(CustomQuestFramework), nameof(SyncedStartJob));
             MP.RegisterSyncMethod(typeof(CustomQuestFramework), nameof(SyncedChooseOption));
         }
         // Then the gizmos: a throw in the two calls below must not skip them (each has its own TryRegister)
@@ -82,7 +87,8 @@ public class CustomQuestFramework
         // lab switch row 278 (wave 3, 17 Nov): off = old behaviour
         if (LabOff.Row(278))
             return;
-        PatchJobMenus();
+        if (!forkJobs)
+            PatchJobMenus();
         PatchDialogWindow();
     }
 
