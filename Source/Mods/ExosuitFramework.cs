@@ -117,8 +117,41 @@ public class ExosuitFramework
 
         #endregion
 
+        #region Maintenance bay Dummy (FIXES row 392)
+
+        {
+            // Building_MaintenanceBay.Dummy creates its cache pawn (ThingMaker.MakeThing) on first read. Read from the UI (ITab_Exosuit)
+            // MP gives it a local negative id, read from the sim it gets a shared id; PCs differ. Read it once in the sim at spawn on
+            // every PC (not on load: the saved cachedPawn is read by ExposeData), so the UI never creates it.
+            var bayType = AccessTools.TypeByName("Exosuit.Building_MaintenanceBay");
+            var dummyGetter = bayType == null ? null : AccessTools.DeclaredPropertyGetter(bayType, "Dummy");
+            var spawnSetup = AccessTools.DeclaredMethod(typeof(Building), nameof(Building.SpawnSetup), [typeof(Map), typeof(bool)]);
+            if (dummyGetter != null && spawnSetup != null)
+            {
+                maintenanceBayType = bayType;
+                maintenanceBayDummyGetter = MethodInvoker.GetHandler(dummyGetter);
+                MpCompat.harmony.Patch(spawnSetup, postfix: new HarmonyMethod(PostBuildingSpawnSetup));
+            }
+            else
+                Log.Warning("[MPCompat - Exosuit] Building_MaintenanceBay.Dummy not found, the Dummy id guard is not installed.");
+        }
+
+        #endregion
+
         // Once it's included in a mod/implemented, also patch Building_EjectorBay and WG_PawnFlyer.
         // The building (and thus the flyer) aren't used by this mod or any of its addons yet.
+    }
+
+    private static FastInvokeHandler maintenanceBayDummyGetter;
+    private static System.Type maintenanceBayType;
+
+    private static void PostBuildingSpawnSetup(Building __instance, bool respawningAfterLoad)
+    {
+        if (respawningAfterLoad || !MP.IsInMultiplayer || MP.InInterface || maintenanceBayDummyGetter == null)
+            return;
+        if (!maintenanceBayType.IsInstanceOfType(__instance))
+            return;
+        maintenanceBayDummyGetter(__instance);
     }
 
     #region Get in (assigned pilot)
