@@ -136,7 +136,202 @@ namespace Multiplayer.Compat
             // lab switch row 420 (17 Nov): off = old behaviour
             if (!LabOff.Row(420))
                 PatchPagePawnTick();
+            PatchGeneCacheGuard();
         }
+
+        #region Gene cache thread guard (row 422)
+
+        // FIXES row 422 (18 Nov 2026). Cause:
+        //  - Big and Small keeps "gene turned off" state in one static table, GeneCache.globalCache
+        //    (GeneCache.cs:8), read by the simulation (BSCache.cs:427-442, OverrideAllConflictingTranspiler.cs:14-19).
+        //  - HumanoidPawnScaler.GetCacheUltraSpeed tests a per-THREAD int against BigAndSmallCache.gameInt (HumanoidPawnScaler.cs:38-40)
+        //    and then runs ClearSessionData, whose last line is the GLOBAL wipe GeneCache.ClearCaches() (:67, GeneCache.cs:22-25).
+        //  - The draw patches call it on job threads (BSCacheExtensions.cs:49, ParallelGetPreRenderResults_Patch.cs:56), up to 32 times
+        //    per load, when each thread first draws a pawn: a wipe at a PC-specific moment, then a RefreshAllGenes on that PC only.
+        // ClearSessionData (HumanoidPawnScaler.cs:63-68), per thread: _tDictCache?.Clear(); threadGameInt = gameInt; _tDictCache = new ...;
+        // global: GeneCache.ClearCaches() (globalCache.Clear()).
+        // Fix: a prefix on GetCacheUltraSpeed does the per-thread part itself and skips the global wipe; PreLoadGame does the one
+        // wipe on every PC. LabOff row 422 = old behaviour (the OFF line is still logged). Sources: decomp_lab/BigAndSmall
+        // HumanoidPawnScaler.cs:28-29,38-40,63-68; GeneCache.cs:8,22-25; BigAndSmallCache.cs:26,85-87.
+
+        private const int Row422LogMax = 5;
+        [ThreadStatic] private static int guardSeenGameInt;
+        [ThreadStatic] private static bool guardQuiet;
+        private static int guardLogCount;
+        private static int guardSelfTestHits;
+        private static bool guardSelfTestDone;
+        private static Func<int> guardGameInt;
+        private static FieldInfo guardThreadGameIntField, guardTDictCacheField;
+        private static FieldInfo guardGlobalCacheField;
+        private static MethodInfo guardUltraSpeed;
+
+        private static void PatchGeneCacheGuard()
+        {
+            try
+            {
+                var cacheType = AccessTools.TypeByName("BigAndSmall.BigAndSmallCache");
+                var scalerType = AccessTools.TypeByName("BigAndSmall.HumanoidPawnScaler");
+                var geneCacheType = AccessTools.TypeByName("BigAndSmall.GeneCache");
+                var gameIntField = cacheType == null ? null : AccessTools.Field(cacheType, "gameInt");
+                if (gameIntField == null || gameIntField.FieldType != typeof(int) || !gameIntField.IsStatic)
+                {
+                    Log.Warning("[MPCompat] FIXES row 422: BigAndSmallCache.gameInt not found, gene cache thread guard skipped");
+                    return;
+                }
+                guardThreadGameIntField = scalerType == null ? null : AccessTools.Field(scalerType, "threadGameInt");
+                if (guardThreadGameIntField == null || guardThreadGameIntField.FieldType != typeof(int))
+                {
+                    Log.Warning("[MPCompat] FIXES row 422: HumanoidPawnScaler.threadGameInt not found, gene cache thread guard skipped");
+                    return;
+                }
+                guardTDictCacheField = AccessTools.Field(scalerType, "_tDictCache");
+                if (guardTDictCacheField == null || !typeof(IDictionary).IsAssignableFrom(guardTDictCacheField.FieldType))
+                {
+                    Log.Warning("[MPCompat] FIXES row 422: HumanoidPawnScaler._tDictCache not found, gene cache thread guard skipped");
+                    return;
+                }
+                guardGlobalCacheField = geneCacheType == null ? null : AccessTools.Field(geneCacheType, "globalCache");
+                if (guardGlobalCacheField == null || guardGlobalCacheField.GetValue(null) is not IDictionary)
+                {
+                    Log.Warning("[MPCompat] FIXES row 422: GeneCache.globalCache not found, gene cache thread guard skipped");
+                    return;
+                }
+                guardUltraSpeed = scalerType == null ? null
+                    : AccessTools.DeclaredMethod(scalerType, "GetCacheUltraSpeed", new[] { typeof(Pawn), typeof(bool) });
+                if (guardUltraSpeed == null)
+                {
+                    Log.Warning("[MPCompat] FIXES row 422: HumanoidPawnScaler.GetCacheUltraSpeed(Pawn, bool) not found, gene cache thread guard skipped");
+                    return;
+                }
+                var tickMethod = AccessTools.DeclaredMethod(cacheType, nameof(GameComponent.GameComponentTick));
+                if (tickMethod == null)
+                {
+                    Log.Warning("[MPCompat] FIXES row 422: BigAndSmallCache.GameComponentTick not found, gene cache thread guard skipped");
+                    return;
+                }
+                guardGameInt = System.Linq.Expressions.Expression.Lambda<Func<int>>(
+                    System.Linq.Expressions.Expression.Field(null, gameIntField)).Compile();
+
+                MpCompat.harmony.Patch(guardUltraSpeed, prefix: new HarmonyMethod(typeof(BigAndSmall), nameof(PreGetCacheUltraSpeed)));
+                MpCompat.harmony.Patch(tickMethod, prefix: new HarmonyMethod(typeof(BigAndSmall), nameof(PreGuardSelfTest)));
+            }
+            catch (Exception e)
+            {
+                guardGameInt = null;
+                Log.Warning($"[MPCompat] FIXES row 422: gene cache thread guard not installed: {e}");
+            }
+        }
+
+        // Runs on every thread that draws a pawn. Never throws.
+        private static bool PreGetCacheUltraSpeed()
+        {
+            var getGameInt = guardGameInt;
+            if (getGameInt == null)
+                return true;
+            try
+            {
+                bool off = LabOff.Row(422);
+                int gameInt = getGameInt();
+                if (guardSeenGameInt == gameInt || !MP.IsInMultiplayer)
+                    return true;
+
+                guardSeenGameInt = gameInt;
+                if ((int)guardThreadGameIntField.GetValue(null) == gameInt)
+                    return true; // Big and Small already reset this thread: the original skips the wipe anyway
+
+                var table = (IDictionary)guardGlobalCacheField.GetValue(null);
+                int entries = table.Count;
+                int thread = System.Threading.Thread.CurrentThread.ManagedThreadId;
+                int tick = Find.TickManager?.TicksGame ?? -1;
+                if (off)
+                {
+                    LogGuardOff(thread, entries, tick); // the original runs ClearSessionData including the global wipe
+                    return true;
+                }
+
+                // The per-thread part of ClearSessionData, without GeneCache.ClearCaches().
+                var oldDict = guardTDictCacheField.GetValue(null) as IDictionary;
+                oldDict?.Clear();
+                guardThreadGameIntField.SetValue(null, gameInt);
+                guardTDictCacheField.SetValue(null, Activator.CreateInstance(guardTDictCacheField.FieldType));
+
+                if (guardQuiet)
+                    System.Threading.Interlocked.Increment(ref guardSelfTestHits);
+                else if (System.Threading.Interlocked.Increment(ref guardLogCount) <= Row422LogMax)
+                    Log.Message($"FIXES row 422: gene cache wipe by thread {thread} stopped (entries kept {entries}, tick {tick})");
+            }
+            catch (Exception e)
+            {
+                Log.Warning($"[MPCompat] FIXES row 422: gene cache thread guard fault: {e.Message}");
+            }
+            return true;
+        }
+
+        // Row 422 OFF: the wipe is left to Big and Small, one line for the first few.
+        private static void LogGuardOff(int thread, int entries, int tick)
+        {
+            if (System.Threading.Interlocked.Increment(ref guardLogCount) <= Row422LogMax)
+                Log.Warning($"FIXES row 422 OFF: gene cache wiped by thread {thread} (entries lost {entries}, tick {tick})");
+        }
+
+        // Once per game load on each PC, from the first BigAndSmallCache.GameComponentTick that finds a spawned pawn.
+        private static void PreGuardSelfTest()
+        {
+            if (guardGameInt == null || guardSelfTestDone || !MP.IsInMultiplayer || LabOff.Row(422))
+                return;
+            try
+            {
+                Pawn pawn = null;
+                foreach (var map in Find.Maps)
+                {
+                    foreach (var p in map.mapPawns.AllPawnsSpawned)
+                    {
+                        pawn = p;
+                        break;
+                    }
+                    if (pawn != null) break;
+                }
+                if (pawn == null)
+                    return; // try again next tick
+                guardSelfTestDone = true;
+
+                var table = (IDictionary)guardGlobalCacheField.GetValue(null);
+                var marker = new Gene();
+                table[marker] = null;
+                string why = null;
+                try
+                {
+                    guardSelfTestHits = 0;
+                    Exception fault = null;
+                    var thread = new System.Threading.Thread(() =>
+                    {
+                        guardQuiet = true;
+                        try { guardUltraSpeed.Invoke(null, new object[] { pawn, false }); }
+                        catch (Exception e) { fault = e; }
+                    });
+                    thread.IsBackground = true;
+                    thread.Start();
+                    if (!thread.Join(10000)) why = "test thread did not finish in 10 s";
+                    else if (fault != null) why = "test thread threw " + (fault.InnerException ?? fault).GetType().Name;
+                    else if (!table.Contains(marker)) why = "marker entry was wiped";
+                    else if (guardSelfTestHits != 1) why = $"guard ran {guardSelfTestHits} times on the test thread, expected 1";
+                }
+                finally
+                {
+                    table.Remove(marker);
+                }
+                if (why == null)
+                    Log.Message("FIXES row 422: gene cache thread guard self-test PASS");
+                else
+                    Log.Warning($"FIXES row 422: gene cache thread guard self-test FAIL ({why})");
+            }
+            catch (Exception e)
+            {
+                Log.Warning($"[MPCompat] FIXES row 422: gene cache thread guard self-test fault: {e.Message}");
+            }
+        }
+
+        #endregion
 
         #region Page pawn in tick (point 11, row 420)
 
@@ -431,6 +626,12 @@ namespace Multiplayer.Compat
             // Point 6: no cache object (or queued morph) of a pre-reload Pawn may answer for a reloaded one.
             ((IDictionary)junkCacheField?.GetValue(null))?.Clear();
             ClearPawnSet(pawnsQueuedForMorphingField?.GetValue(null));
+
+            // Row 422: the one gene cache wipe, at the same point on every PC (the draw threads no longer wipe it).
+            guardLogCount = 0;
+            guardSelfTestDone = false;
+            if (guardGameInt != null && !LabOff.Row(422))
+                (guardGlobalCacheField.GetValue(null) as IDictionary)?.Clear();
         }
 
         private static void PostCacheExposeData()
