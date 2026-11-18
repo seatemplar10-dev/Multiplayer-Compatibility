@@ -1,7 +1,9 @@
+using System;
 using System.Collections.Generic;
 using System.Reflection;
 using HarmonyLib;
 using Multiplayer.API;
+using RimWorld;
 using UnityEngine;
 using Verse;
 
@@ -26,6 +28,8 @@ namespace Multiplayer.Compat
     {
         public StarWarsTheForceStandalone(ModContentPack mod)
         {
+            // lab switch row 256 (1.7 lab, 18 Nov): off = old behaviour
+            if (!LabOff.Row(256)) PatchFlyer();
             // lab switch row 48 (wave 3, 17 Nov): off = old behaviour
             if (LabOff.Row(48)) return;
             const string ns = "TheForce_Standalone.HediffComps.";
@@ -46,6 +50,36 @@ namespace Multiplayer.Compat
 
             PatchingUtilities.PatchUnityRand(
                 "TheForce_Standalone.Apprenticeship.CompAbilityEffect_MasterApprentice:ChangeBackstoryBasedOnAlignment", false);
+        }
+
+        // FIXES row 256: TelekinesisPawnFlyer (subclass of vanilla PawnFlyer, no Tick override) has a private RecomputePosition that
+        // sets the flyer's Position (saved) and runs only from its DynamicDrawPhaseAt, so only a PC that draws the map moves it
+        // (row 255 is the vanilla case). In MP the vanilla Tick (postfix, filtered to this type) and SpawnSetup recompute on every PC.
+        private static FastInvokeHandler flyerRecompute;
+        private static Type flyerType;
+
+        private static void PatchFlyer()
+        {
+            flyerType = AccessTools.TypeByName("TheForce_Standalone.Telekinesis.TelekinesisPawnFlyer");
+            var recompute = flyerType == null ? null : AccessTools.DeclaredMethod(flyerType, "RecomputePosition", []);
+            var spawn = flyerType == null ? null : AccessTools.DeclaredMethod(flyerType, nameof(Thing.SpawnSetup));
+            var tick = AccessTools.DeclaredMethod(typeof(PawnFlyer), nameof(Thing.Tick));
+            if (recompute == null || spawn == null || tick == null)
+            {
+                Log.Warning("MPCompat: TelekinesisPawnFlyer RecomputePosition/SpawnSetup/PawnFlyer.Tick not found - Telekinesis flight is not guarded (FIXES row 256)");
+                return;
+            }
+            flyerRecompute = MethodInvoker.GetHandler(recompute);
+            var post = new HarmonyMethod(typeof(StarWarsTheForceStandalone), nameof(PostFlyerRecompute));
+            MpCompat.harmony.Patch(tick, postfix: post);
+            MpCompat.harmony.Patch(spawn, postfix: post);
+        }
+
+        private static void PostFlyerRecompute(Thing __instance)
+        {
+            if (!MP.IsInMultiplayer || __instance.GetType() != flyerType || __instance.Destroyed || !__instance.Spawned) return;
+            if (__instance is not IThingHolder holder || holder.GetDirectlyHeldThings().Count == 0) return;   // DestinationPos reads it
+            flyerRecompute(__instance);
         }
 
         private static IEnumerable<CodeInstruction> DeterministicLaunchOrigin(IEnumerable<CodeInstruction> instr, MethodBase baseMethod)
