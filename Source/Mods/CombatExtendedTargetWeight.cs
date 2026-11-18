@@ -31,6 +31,8 @@ namespace Multiplayer.Compat
     {
         public CombatExtendedTargetWeight(ModContentPack mod)
         {
+            // fork row 307: fix is inside the CE fork dll (score clamp at the list add)
+            if (CombatExtendedFork.Has(307)) return;
             var score = AccessTools.DeclaredMethod("CombatExtended.NonSnapAttackTargetFinder:GetShootingTargetScore")
                         ?? throw new System.MissingMethodException("CombatExtended.NonSnapAttackTargetFinder", "GetShootingTargetScore");
             MpCompat.harmony.Patch(score,

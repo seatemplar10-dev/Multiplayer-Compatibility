@@ -28,6 +28,8 @@ namespace Multiplayer.Compat
     {
         public CombatExtendedHostilityAttack(ModContentPack mod)
         {
+            // fork row 302: fix is inside the CE fork dll (CanHitTargetFrom check in the giver)
+            if (CombatExtendedFork.Has(302)) return;
             // lab switch row 302 (wave H, 17 Nov): SITE gate in Postfix; off = old behaviour
             var method = AccessTools.DeclaredMethod(typeof(JobGiver_ConfigurableHostilityResponse), "TryGetAttackNearbyEnemyJob")
                          ?? throw new MissingMethodException(nameof(JobGiver_ConfigurableHostilityResponse), "TryGetAttackNearbyEnemyJob");

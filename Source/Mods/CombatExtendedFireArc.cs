@@ -66,6 +66,8 @@ namespace Multiplayer.Compat
 
         public CombatExtendedFireArc(ModContentPack mod)
         {
+            // fork row 136: fix is inside the CE fork dll (CompFireArc.SyncedSetFireArc)
+            if (CombatExtendedFork.Has(136)) return;
             if (LabOff.Row(40)) return;
             Init();
             MP.RegisterSyncMethod(typeof(CombatExtendedFireArc), nameof(SyncedSetFireArc)).CancelIfAnyArgNull();

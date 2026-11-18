@@ -44,6 +44,8 @@ namespace Multiplayer.Compat
 
         public CombatExtendedAttachments(ModContentPack mod)
         {
+            // fork row 58: fix is inside the CE fork dll (WeaponPlatform.SyncedApplyConfig)
+            if (CombatExtendedFork.Has(58)) return;
             var window = Req(AccessTools.TypeByName("CombatExtended.Window_AttachmentsEditor"), "Window_AttachmentsEditor");
             platformType = Req(AccessTools.TypeByName("CombatExtended.WeaponPlatform"), "WeaponPlatform");
             var fragment = Req(AccessTools.TypeByName("CombatExtended.Fragment_AttachmentEditor"), "Fragment_AttachmentEditor");

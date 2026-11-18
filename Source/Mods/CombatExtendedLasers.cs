@@ -25,6 +25,8 @@ namespace Multiplayer.Compat
 
         public CombatExtendedLasers(ModContentPack mod)
         {
+            // fork row 39: fix is inside the CE fork dll (LaserBeamCE.SpawnBeam at origin cell)
+            if (CombatExtendedFork.Has(39)) return;
             var spawnBeam = AccessTools.DeclaredMethod("CombatExtended.Lasers.LaserBeamCE:SpawnBeam");
             if (spawnBeam == null)
             {
