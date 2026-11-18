@@ -114,8 +114,13 @@ namespace Multiplayer.Compat
         // Row 358: Vehicles.World.FormationInfo.get_Dialog()
         private static MethodInfo formationDialogGetter;
 
+        // F.80: the local Vehicle Framework fork (rows 271 285 360 361 216 204) has LandingTargeter.ClearQueue(), added in its row 216
+        // commit; the stock dll has none. With the fork the patches below for those rows are skipped (steps 5, 7, 8, 10, 11).
+        private static bool forkLoaded;
+
         public VehicleFramework(ModContentPack mod)
         {
+            forkLoaded = ForkDetect.HasMethod("Vehicle Framework", "Vehicles.LandingTargeter", "ClearQueue");
             var pathingSystemType = FindType("Vehicles.VehiclePathingSystem");
             var regionGridType = FindType("Vehicles.VehicleRegionGrid");
             var regionType = FindType("Vehicles.VehicleRegion");
@@ -159,8 +164,10 @@ namespace Multiplayer.Compat
                                         ?? throw new MissingMethodException(landingTargeterType.FullName, "get_Instance");
                 landingTargeterInstance = MethodInvoker.GetHandler(landingInstanceGetter);
                 landingTargeterQueueField = AccessTools.FieldRefAccess<Queue<Action>>(landingTargeterType, "targeterQueue");
-                MpCompat.harmony.Patch(AccessTools.DeclaredMethod(typeof(MemoryUtility), nameof(MemoryUtility.ClearAllMapsAndWorld)),
-                    prefix: new HarmonyMethod(typeof(VehicleFramework), nameof(StopTargetersBeforeReload)));
+                // F.80 row 216: the fork clears the targeters itself on GameEvent.OnWorldUnloading (same ClearAllMapsAndWorld point)
+                if (!forkLoaded)
+                    MpCompat.harmony.Patch(AccessTools.DeclaredMethod(typeof(MemoryUtility), nameof(MemoryUtility.ClearAllMapsAndWorld)),
+                        prefix: new HarmonyMethod(typeof(VehicleFramework), nameof(StopTargetersBeforeReload)));
             }
             catch (Exception e)
             {
@@ -223,8 +230,10 @@ namespace Multiplayer.Compat
             try
             {
                 // lab switch row 271 (wave H, 17 Nov): SITE gate in PrePawnMassUsageInVehicle; off = old behaviour
-                MpCompat.harmony.Patch(GetDeclaredMethod(FindType("Vehicles.Patch_CaravanHandling"), "PawnMassUsageInVehicle", [typeof(float), typeof(Pawn)]),
-                    prefix: new HarmonyMethod(typeof(VehicleFramework), nameof(PrePawnMassUsageInVehicle)));
+                // F.80 row 271: the fork has the null pawn guard in PawnMassUsageInVehicle itself
+                var massMethod = GetDeclaredMethod(FindType("Vehicles.Patch_CaravanHandling"), "PawnMassUsageInVehicle", [typeof(float), typeof(Pawn)]);
+                if (!forkLoaded)
+                    MpCompat.harmony.Patch(massMethod, prefix: new HarmonyMethod(typeof(VehicleFramework), nameof(PrePawnMassUsageInVehicle)));
             }
             catch (Exception e)
             {
@@ -253,6 +262,9 @@ namespace Multiplayer.Compat
         {
             getPawnVehicle = MethodInvoker.GetHandler(GetDeclaredMethod(FindType("Vehicles.Ext_Vehicles"), "GetVehicle", [typeof(Pawn)]));
 
+            // F.80 rows 361 / 360: the fork filters AllPawnsAboard by faction and keeps claimants in thingIDNumber order itself
+            if (forkLoaded)
+                return;
             MpCompat.harmony.Patch(AccessTools.DeclaredMethod(typeof(CaravanFormingUtility), nameof(CaravanFormingUtility.AllSendablePawns)),
                 postfix: new HarmonyMethod(typeof(VehicleFramework), nameof(PostAllSendablePawns))
                 {
@@ -381,6 +393,11 @@ namespace Multiplayer.Compat
             notifyTransferablesChanged = GetDeclaredMethod(FindType("Vehicles.World.ICaravanInfo"), "NotifyTransferablesChanged", Type.EmptyTypes);
             assignSeatsType = FindType("Vehicles.World.Dialog_AssignSeats");
 
+            // F.80 row 285: the fork has `CaravanFormation.Current?.Notify...` in DrawCard and `parent?.Notify...` in the seat window's
+            // FinalizeSeats, so neither the window refusal nor the DrawCard transpiler (its Current,Notify call pair is gone: it would log an
+            // error) is installed
+            if (forkLoaded)
+                return;
             MpCompat.harmony.Patch(AccessTools.DeclaredMethod(typeof(WindowStack), nameof(WindowStack.Add)),
                 prefix: new HarmonyMethod(typeof(VehicleFramework), nameof(NoSeatWindowWithoutFormation)));
             // lab switch row 285 (wave H, 17 Nov): off = old behaviour (INSTALL gate: a transpiler)
@@ -400,12 +417,14 @@ namespace Multiplayer.Compat
             // VF's own prefix on Dialog_FormCaravan.TrySend. It is static and its first parameter is called __instance (it is a patch
             // itself): in a prefix of ours the name __instance would mean "instance of a static method" = null, so the dialog is read by
             // position (__0) in both prefixes below.
-            MpCompat.harmony.Patch(GetDeclaredMethod(formDialogPatchType, "TryAndSendWithVehicles", [typeof(Dialog_FormCaravan)]),
-                prefix: new HarmonyMethod(typeof(VehicleFramework), nameof(PreTryAndSendWithVehicles)));
-            MpCompat.harmony.Patch(
-                GetDeclaredMethod(formDialogPatchType, "WorldRoutePannerReroute",
-                    [typeof(WorldRoutePlanner), typeof(Dialog_FormCaravan), typeof(Map), typeof(bool)]),
-                prefix: new HarmonyMethod(typeof(VehicleFramework), nameof(PreWorldRoutePannerReroute)));
+            var trySendMethod = GetDeclaredMethod(formDialogPatchType, "TryAndSendWithVehicles", [typeof(Dialog_FormCaravan)]);
+            var reroute = GetDeclaredMethod(formDialogPatchType, "WorldRoutePannerReroute",
+                [typeof(WorldRoutePlanner), typeof(Dialog_FormCaravan), typeof(Map), typeof(bool)]);
+            // F.80 row 204: the fork null-checks CaravanFormation.formation in both (plain pawns: vanilla path; vehicles: warning, no send)
+            if (forkLoaded)
+                return;
+            MpCompat.harmony.Patch(trySendMethod, prefix: new HarmonyMethod(typeof(VehicleFramework), nameof(PreTryAndSendWithVehicles)));
+            MpCompat.harmony.Patch(reroute, prefix: new HarmonyMethod(typeof(VehicleFramework), nameof(PreWorldRoutePannerReroute)));
 
             Log.Message($"{LogPrefix}caravan window guard installed (Send / Change route in Multiplayer's caravan window no longer read VF's null CaravanFormation.formation)");
         }
