@@ -62,6 +62,15 @@ namespace Multiplayer.Compat
             {
                 Log.Warning("[MPCompat] row 373: Manage Areas copy fix not installed: " + e.Message);
             }
+            // FIXES row 424: the vanilla location generator's tick schedule uses the layer id, not an identity hash (LocationGeneratorStableSchedule.cs)
+            try
+            {
+                if (!LabOff.Row(424)) LocationGeneratorStableSchedule.Install(harmony);
+            }
+            catch (Exception e)
+            {
+                Log.Warning("[MPCompat] row 424: location generator schedule fix not installed: " + e.Message);
+            }
         }
 
         static IEnumerable<ISyncMethod> RegisterLambdaMethod_Impl(Type parentType, string parentMethod, MethodType methodType, params int[] lambdaOrdinals)
