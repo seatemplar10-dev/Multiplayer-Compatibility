@@ -136,7 +136,10 @@ namespace Multiplayer.Compat
             // lab switch row 420 (17 Nov): off = old behaviour
             if (!LabOff.Row(420))
                 PatchPagePawnTick();
-            PatchGeneCacheGuard();
+            // F.80 row 422: the fork has no gene cache wipe in ClearSessionData (one wipe in BigAndSmallCache.ExposeData on load). It adds
+            // no member, so it carries the marker class BigAndSmall.SeaForkRows (Rows contains "422")
+            if (!ForkDetect.HasRow("Big and Small", "BigAndSmall.SeaForkRows", "422"))
+                PatchGeneCacheGuard();
         }
 
         #region Gene cache thread guard (row 422)
