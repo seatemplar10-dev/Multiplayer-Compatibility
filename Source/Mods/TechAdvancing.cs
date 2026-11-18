@@ -36,6 +36,8 @@ namespace Multiplayer.Compat
 
         public TechAdvancing(ModContentPack mod)
         {
+            // Lab switch row 423 (18 Nov): -mplaboff=423 keeps the stock wall-clock letter gate (no patch at all).
+            if (LabOff.Row(423)) return;
             var type = AccessTools.TypeByName("TechAdvancing.TA_ResearchManager");
             flushCfgMethod = AccessTools.DeclaredMethod(type, "FlushCfg");
             flushCfg = AccessTools.MethodDelegate<Action>(flushCfgMethod);
