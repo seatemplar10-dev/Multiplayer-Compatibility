@@ -61,7 +61,6 @@ namespace Multiplayer.Compat
 
         private static void PreSnapshot(Pawn pawn, out Snapshot __state)
         {
-            if (LabOff.Row(390)) return;
             __state = null;
             if (LabOff.Row(390)) return; // lab switch row 390: off = old behaviour
             if (!MP.IsInMultiplayer || pawn?.story == null)
