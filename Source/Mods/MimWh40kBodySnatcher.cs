@@ -61,7 +61,9 @@ namespace Multiplayer.Compat
 
         private static void PreSnapshot(Pawn pawn, out Snapshot __state)
         {
+            if (LabOff.Row(390)) return;
             __state = null;
+            if (LabOff.Row(390)) return; // lab switch row 390: off = old behaviour
             if (!MP.IsInMultiplayer || pawn?.story == null)
                 return;
             var style = pawn.style;
@@ -78,6 +80,7 @@ namespace Multiplayer.Compat
 
         private static void FinRestore(Pawn pawn, Snapshot __state)
         {
+            if (LabOff.Row(390)) return;
             if (__state == null || pawn?.story == null)
                 return;
             var story = pawn.story;
