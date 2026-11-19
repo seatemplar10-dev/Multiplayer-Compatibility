@@ -123,6 +123,9 @@ public class ExosuitFramework
             // Building_MaintenanceBay.Dummy creates its cache pawn (ThingMaker.MakeThing) on first read. Read from the UI (ITab_Exosuit)
             // MP gives it a local negative id, read from the sim it gets a shared id; PCs differ. Read it once in the sim at spawn on
             // every PC (not on load: the saved cachedPawn is read by ExposeData), so the UI never creates it.
+            // lab switch row 392: off = old behaviour (no Dummy read at spawn)
+            if (!LabOff.Row(392))
+            {
             var bayType = AccessTools.TypeByName("Exosuit.Building_MaintenanceBay");
             var dummyGetter = bayType == null ? null : AccessTools.DeclaredPropertyGetter(bayType, "Dummy");
             var spawnSetup = AccessTools.DeclaredMethod(typeof(Building), nameof(Building.SpawnSetup), [typeof(Map), typeof(bool)]);
@@ -134,6 +137,7 @@ public class ExosuitFramework
             }
             else
                 Log.Warning("[MPCompat - Exosuit] Building_MaintenanceBay.Dummy not found, the Dummy id guard is not installed.");
+            }
         }
 
         #endregion
