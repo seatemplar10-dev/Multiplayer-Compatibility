@@ -33,12 +33,49 @@ namespace Multiplayer.Compat
             else
                 MP.RegisterSyncMethod(setter);
 
+            // 5. Filter check. The mod's storage tab calls Building_SupplyShelf.CheckFilter() every frame; when the allowed count
+            //    differs from lastCount it runs OnFilterChanged (rewrites the filter, DeSpawns items, reads the per-PC multiType setting).
+            //    Only the PC with the tab open ran it. The shelf has no tick, so in Multiplayer the UI call is skipped and the same
+            //    check runs in the simulation on every PC (Map.MapPostTick, once a second). The filter edits themselves are synced by
+            //    Multiplayer (ThingFilter.SetAllow), and the mod's Notify_SettingsChanged postfix already runs OnFilterChanged on every PC.
+            shelfCheckFilter = shelfType == null ? null : AccessTools.DeclaredMethod(shelfType, "CheckFilter");
+            shelfBaseType = shelfType;
+            if (shelfCheckFilter == null)
+                Log.Error("MPCompat :: Supply Shelf: Building_SupplyShelf.CheckFilter not found, a filter change made through the storage tab stays local to one PC");
+            else
+            {
+                MpCompat.harmony.Patch(shelfCheckFilter, prefix: new HarmonyMethod(typeof(SupplyShelf), nameof(PreCheckFilter)));
+                MpCompat.harmony.Patch(AccessTools.DeclaredMethod(typeof(Map), nameof(Map.MapPostTick)),
+                    postfix: new HarmonyMethod(typeof(SupplyShelf), nameof(PostMapPostTick)));
+            }
+
             var modType = AccessTools.TypeByName("SupplyShelfMod");
             var settingsWindow = modType == null ? null : AccessTools.DeclaredMethod(modType, "DoSettingsWindowContents", new[] { typeof(Rect) });
             if (settingsWindow == null)
                 Log.Warning("MPCompat :: Supply Shelf: SupplyShelfMod.DoSettingsWindowContents not found, the settings are not locked in Multiplayer");
             else
                 MpCompat.harmony.Patch(settingsWindow, prefix: new HarmonyMethod(typeof(SupplyShelf), nameof(PreDoSettingsWindowContents)));
+        }
+
+        private static System.Reflection.MethodInfo shelfCheckFilter;
+        private static Type shelfBaseType;
+        private static bool inSimulation;
+
+        // UI path (ITab_Storage FillTab prefix of the mod): skipped in Multiplayer, the simulation does the check on every PC.
+        private static bool PreCheckFilter() => !MP.IsInMultiplayer || inSimulation;
+
+        private static void PostMapPostTick(Map __instance)
+        {
+            if (!MP.IsInMultiplayer || Find.TickManager.TicksGame % 60 != 0) return;
+            var list = __instance.listerBuildings.allBuildingsColonist;
+            inSimulation = true;
+            try
+            {
+                for (int i = list.Count - 1; i >= 0; i--)
+                    if (i < list.Count && list[i].GetType() == shelfBaseType)
+                        shelfCheckFilter.Invoke(list[i], null);
+            }
+            finally { inSimulation = false; }
         }
 
         // "Freezing" feeds rot and power draw and is per PC. Locked while Multiplayer runs.
