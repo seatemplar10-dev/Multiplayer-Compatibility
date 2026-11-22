@@ -183,7 +183,177 @@ namespace Multiplayer.Compat
                 Log.Warning($"{LogPrefix}cannot reset the floor label state after a game load, the floor labels can keep reading the world components of an earlier load: {e.Message}");
             }
 
+            // Zone cleanup (FIXES row 435): separate too, the rename sync does not depend on it.
+            try
+            {
+                var dataType = AccessTools.TypeByName("LabelsOnFloor.CustomZoneData")
+                               ?? throw new TypeLoadException("type LabelsOnFloor.CustomZoneData not found");
+                validMapField = AccessTools.Field(dataType, "_map");
+                validZoneIdField = AccessTools.Field(dataType, "ZoneId");
+                MpCompat.harmony.Patch(AccessTools.DeclaredMethod(dataType, "IsZoneStillValid", Type.EmptyTypes)
+                                       ?? throw new MissingMethodException(dataType.FullName, "IsZoneStillValid"),
+                    prefix: new HarmonyMethod(typeof(LabelsOnFloor), nameof(PreIsZoneStillValid)));
+            }
+            catch (Exception e)
+            {
+                Log.Warning($"{LogPrefix}cannot keep the floor label zone data in multifaction, it can be deleted every 300 ticks: {e.Message}");
+            }
+
             Log.Message($"{LogPrefix}installed: the zone rename OK button sets the zone label and its colour through a sync method.");
+        }
+
+        // ---- zone data cleanup (FIXES row 435) ----------------------------------------------------------------------------------------
+
+        // FIXES row 435. CustomZoneLabelManagerComponent.CleanupMissingZones runs every 300 ticks and removes each CustomZoneData whose
+        // IsZoneStillValid() is false. GetZone() looks only in _map.zoneManager.AllZones. In a multifaction game the world tick sets every map's
+        // zoneManager to the spectator faction's, so the zones of the player factions are never found and every entry (name, colour) is deleted.
+        // Fix: in multifaction, the entry is valid when the map's current zone manager or any faction's zone manager of that map
+        // (MultiplayerMapComp.factionData, found with Extensions.MpComp(map)) has a zone with its ZoneId. When nothing can be read it counts as valid (never delete).
+        // Reads saved data only, no Rand, no local state: same result on every PC. Single player, plain co-op and lab switch row 435 run the original.
+        private static FieldInfo validMapField;
+        private static FieldInfo validZoneIdField;
+        private static bool validInit;
+        private static bool multifactionReady;
+        private static bool dataReady;
+        private static bool validWarned;
+        private static Func<bool> multifactionGetter;
+        private static Func<Map, object> mpCompGetter;
+        private static FieldInfo factionDataField;
+        private static FieldInfo factionZoneManagerField;
+
+        // Harmony prefix: returning false skips the original, __result is ours.
+        private static bool PreIsZoneStillValid(object __instance, ref bool __result)
+        {
+            if (!MP.IsInMultiplayer || LabOff.Row(435))
+                return true;
+
+            try
+            {
+                if (!validInit)
+                {
+                    validInit = true;
+                    InitValidAccessors();
+                }
+                // FIXES row 435 v2: when the multifaction flag cannot be read, plain co-op must not change: run the original.
+                if (!multifactionReady)
+                    return true;
+                if (!multifactionGetter())
+                    return true;
+                // multifaction is known true from here: when the faction data cannot be read, keep the entry (never delete).
+                if (!dataReady)
+                {
+                    __result = true;
+                    return false;
+                }
+
+                var map = validMapField.GetValue(__instance) as Map;
+                if (map == null)
+                    return true; // the original returns false for a null map, as before
+                var id = (int)validZoneIdField.GetValue(__instance);
+
+                if (HasZone(map.zoneManager, id))
+                {
+                    __result = true;
+                    return false;
+                }
+                // FIXES row 435 v2: MultiplayerMapComp is not a MapComponent. Multiplayer keeps it in Multiplayer.game.mapComps and
+                // finds it with Extensions.MpComp(Map). null = no faction data for this map: the original runs.
+                var comp = mpCompGetter(map);
+                if (comp != null && factionDataField.GetValue(comp) is System.Collections.IDictionary data)
+                {
+                    foreach (var fd in data.Values)
+                    {
+                        if (fd != null && HasZone(factionZoneManagerField.GetValue(fd) as ZoneManager, id))
+                        {
+                            __result = true;
+                            return false;
+                        }
+                    }
+                }
+                return true; // no faction has the zone: the original (false) removes it
+            }
+            catch (Exception e)
+            {
+                // reading the multifaction flag or the faction data threw: keep the entry in multifaction only
+                if (!validWarned)
+                {
+                    validWarned = true;
+                    Log.Warning($"{LogPrefix}cannot read the faction zone managers, floor label zone data is kept: {e.Message}");
+                }
+                if (multifactionReady)
+                {
+                    __result = true;
+                    return false;
+                }
+                return true;
+            }
+        }
+
+        private static bool HasZone(ZoneManager zm, int id)
+        {
+            if (zm == null)
+                return false;
+            var zones = zm.AllZones;
+            for (var i = 0; i < zones.Count; i++)
+                if (zones[i].ID == id)
+                    return true;
+            return false;
+        }
+
+        private static void InitValidAccessors()
+        {
+            multifactionReady = false;
+            dataReady = false;
+            try
+            {
+                var mpType = AccessTools.TypeByName("Multiplayer.Client.Multiplayer")
+                             ?? throw new TypeLoadException("Multiplayer.Client.Multiplayer");
+                var gameCompGetter = AccessTools.DeclaredPropertyGetter(mpType, "GameComp")
+                                     ?? throw new MissingMethodException("Multiplayer.Client.Multiplayer", "get_GameComp");
+                var gameCompType = AccessTools.TypeByName("Multiplayer.Client.Comp.MultiplayerGameComp")
+                                   ?? AccessTools.TypeByName("Multiplayer.Client.MultiplayerGameComp")
+                                   ?? throw new TypeLoadException("MultiplayerGameComp");
+                var multifactionField = AccessTools.Field(gameCompType, "multifaction")
+                                        ?? throw new MissingFieldException(gameCompType.FullName, "multifaction");
+                multifactionGetter = () =>
+                {
+                    var gc = gameCompGetter.Invoke(null, null);
+                    return gc != null && (bool)multifactionField.GetValue(gc);
+                };
+                multifactionReady = true;
+            }
+            catch (Exception e)
+            {
+                // plain co-op keeps the original behaviour: no kept entries, only this one warning
+                validWarned = true;
+                Log.Warning($"{LogPrefix}row 435 cannot read the multifaction flag, floor label zone data cleanup is unchanged: {e.Message}");
+                return;
+            }
+
+            try
+            {
+                var mapCompType = AccessTools.TypeByName("Multiplayer.Client.MultiplayerMapComp")
+                                  ?? throw new TypeLoadException("MultiplayerMapComp");
+                var extType = AccessTools.TypeByName("Multiplayer.Client.Extensions")
+                              ?? throw new TypeLoadException("Multiplayer.Client.Extensions");
+                var mpCompMethod = AccessTools.Method(extType, "MpComp", new[] { typeof(Map) })
+                                   ?? throw new MissingMethodException("Multiplayer.Client.Extensions", "MpComp");
+                mpCompGetter = m => mpCompMethod.Invoke(null, new object[] { m });
+                factionDataField = AccessTools.Field(mapCompType, "factionData")
+                                   ?? throw new MissingFieldException(mapCompType.FullName, "factionData");
+                var fmdType = AccessTools.TypeByName("Multiplayer.Client.FactionMapData")
+                              ?? throw new TypeLoadException("FactionMapData");
+                factionZoneManagerField = AccessTools.Field(fmdType, "zoneManager")
+                                          ?? throw new MissingFieldException(fmdType.FullName, "zoneManager");
+                if (validMapField == null || validZoneIdField == null)
+                    throw new MissingFieldException("CustomZoneData._map or ZoneId");
+                dataReady = true;
+            }
+            catch (Exception e)
+            {
+                validWarned = true;
+                Log.Warning($"{LogPrefix}row 435 accessors missing, floor label zone data is kept in multifaction: {e.Message}");
+            }
         }
 
         // ---- the rename window ---------------------------------------------------------------------------------------------------------

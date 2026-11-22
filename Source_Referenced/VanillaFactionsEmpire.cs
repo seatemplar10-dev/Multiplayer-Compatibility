@@ -62,8 +62,13 @@ namespace Multiplayer.Compat
                     // (Re)generates data
                     MP.RegisterSyncMethod(typeof(RoyaltyTabWorker_Hierarchy), nameof(RoyaltyTabWorker_Hierarchy.Notify_Open));
                     // Invite pawn
-                    MpCompat.RegisterLambdaDelegate(typeof(RoyaltyTabWorker_Hierarchy), nameof(RoyaltyTabWorker_Hierarchy.DoMainSection), 1)[0]
-                        .TransformField("CS$<>8__locals1/pawn", Serializer.New<Pawn, int>(WriteRoyalPawn, ReadRoyalPawn));
+                    var inviteDelegate = MpCompat.RegisterLambdaDelegate(typeof(RoyaltyTabWorker_Hierarchy), nameof(RoyaltyTabWorker_Hierarchy.DoMainSection), 1)[0];
+                    // Closure nesting differs between mod versions (locals1/pawn vs locals2/locals1/pawn), find the path to the pawn field
+                    var pawnPath = FindInvitePawnPath();
+                    if (pawnPath != null)
+                        inviteDelegate.TransformField(pawnPath, Serializer.New<Pawn, int>(WriteRoyalPawn, ReadRoyalPawn));
+                    else
+                        Log.Error("MPCompat :: VFE Empire: couldn't find the pawn field in the invite delegate closure chain");
                 });
 
                 // Syncing adding/removing honors
@@ -260,6 +265,26 @@ namespace Multiplayer.Compat
         #endregion
 
         #region Transformers
+
+        private static string FindInvitePawnPath()
+        {
+            var lambda = MpMethodUtil.GetLambda(typeof(RoyaltyTabWorker_Hierarchy), nameof(RoyaltyTabWorker_Hierarchy.DoMainSection), MethodType.Normal, null, 1);
+            var type = lambda.DeclaringType;
+            var path = "";
+            for (int i = 0; i < 6 && type != null; i++)
+            {
+                if (AccessTools.DeclaredField(type, "pawn") != null)
+                    return path + "pawn";
+
+                System.Reflection.FieldInfo next = null;
+                foreach (var f in AccessTools.GetDeclaredFields(type))
+                    if (f.Name.StartsWith("CS$<>8__locals")) { next = f; break; }
+                if (next == null) return null;
+                path += next.Name + "/";
+                type = next.FieldType;
+            }
+            return null;
+        }
 
         private static int WriteRoyalPawn(Pawn pawn) 
             => pawn.thingIDNumber;

@@ -25,7 +25,9 @@ namespace Multiplayer.Compat
                 // Toggle off (0) or on (1)
                 MpCompat.RegisterLambdaMethod("AlphaGenes.Ability_ReactiveArmour", "GetGizmos", 0, 2);
                 // Dev: reset scorpion counter to 0 (if it bugs out)
-                MpCompat.RegisterLambdaDelegate("AlphaGenes.CompScorpionCounter", "CompGetGizmosExtra", 0).SetDebugOnly();
+                // (Newer versions of the mod removed the method, so only register it if it exists)
+                if (AccessTools.DeclaredMethod("AlphaGenes.CompScorpionCounter:CompGetGizmosExtra") != null)
+                    MpCompat.RegisterLambdaDelegate("AlphaGenes.CompScorpionCounter", "CompGetGizmosExtra", 0).SetDebugOnly();
                 // Dev: force mutation
                 MpCompat.RegisterLambdaMethod("AlphaGenes.HediffComp_RandomMutation", "CompGetGizmos", 0).SetDebugOnly();
             }
