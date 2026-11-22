@@ -112,6 +112,8 @@ namespace Multiplayer.Compat
         private static MethodInfo hasJobItemMethod;
         private static MethodInfo cancelWorkOnMethod;
         private static MethodInfo expandJobMethod;
+        private static MethodInfo allForcedJobsMethod;
+        private static FieldInfo jobPawnField;
         private static MethodInfo getNextNonConflictingJobMethod;
         private static FieldInfo cellRadiusField;
         private static FieldInfo cancelledField;
@@ -181,6 +183,10 @@ namespace Multiplayer.Compat
 
             cancelWorkOnMethod = GetDeclaredMethod(toolsType, "CancelWorkOn", typeof(Pawn), typeof(LocalTargetInfo));
             expandJobMethod = GetDeclaredMethod(forcedJobType, "ExpandJob", typeof(int));
+            allForcedJobsMethod = GetDeclaredMethod(forcedWorkType, "AllForcedJobs");
+            if (allForcedJobsMethod.IsStatic || !allForcedJobsMethod.ReturnType.IsArray)
+                throw new MissingMethodException($"{LogPrefix}{forcedWorkType.FullName}.AllForcedJobs is not an instance method returning an array");
+            jobPawnField = GetInstanceField(forcedJobType, "pawn", typeof(Pawn));
             getNextNonConflictingJobMethod = GetDeclaredMethod(forcedJobType, "GetNextNonConflictingJob", forcedWorkType);
             if (getNextNonConflictingJobMethod.ReturnType != typeof(bool))
                 throw new MissingMethodException($"{LogPrefix}{forcedJobType.FullName}.GetNextNonConflictingJob does not return bool");
@@ -345,7 +351,8 @@ namespace Multiplayer.Compat
         private static void PatchWorldTick()
         {
             var tick = GetDeclaredMethod(FindType("AchtungMod.ForcedWork"), "WorldComponentTick");
-            MpCompat.harmony.Patch(tick, prefix: new HarmonyMethod(typeof(Achtung), nameof(PreWorldComponentTick)));
+            MpCompat.harmony.Patch(tick, prefix: new HarmonyMethod(typeof(Achtung), nameof(PreWorldComponentTick)),
+                postfix: new HarmonyMethod(typeof(Achtung), nameof(PostWorldComponentTick)));
         }
 
         // The original returns unless TicksGame % 139 == 0, then picks array[++counter % num].
@@ -357,6 +364,60 @@ namespace Multiplayer.Compat
             var ticks = Find.TickManager.TicksGame;
             if (ticks % 139 == 0)
                 counterField.SetValue(__instance, ticks / 139 - 1);
+        }
+
+        // FIXES row 443: the per-frame expander is off in MP, so the ring (cellRadius) covered more things than the job held.
+        // Simulation replacement: every ExpandTickInterval ticks, on every PC in the synced world tick, each forced job
+        // is grown with Achtung's own ExpandJob(ExpandTickBudget). Nothing local is read (no frame time, fps, camera):
+        // only TicksGame, the job list (sorted by pawn id) and the synced cellRadius/targets.
+        // LabOff.Row(443) true = row off = the old behaviour (no tick step).
+        private const int ExpandTickInterval = 15;
+        private const int ExpandTickBudget = 4;
+
+        private static void PostWorldComponentTick()
+        {
+            if (!MP.IsInMultiplayer || LabOff.Row(443))
+                return;
+
+            var ticks = Find.TickManager.TicksGame;
+            if (ticks % ExpandTickInterval != 0)
+                return;
+
+            ExpandForcedJobsStep(ticks);
+        }
+
+        private static void ExpandForcedJobsStep(int ticks)
+        {
+            var instance = instanceGetter.Invoke(null, null);
+            if (instance == null || allForcedJobsMethod.Invoke(instance, null) is not Array jobs || jobs.Length == 0)
+                return;
+
+            var list = new List<(object job, Pawn pawn)>();
+            foreach (var job in jobs)
+            {
+                var pawn = job == null ? null : (Pawn)jobPawnField.GetValue(job);
+                if (pawn?.Map != null && !(bool)cancelledField.GetValue(job))
+                    list.Add((job, pawn));
+            }
+            list.Sort((a, b) => a.pawn.thingIDNumber.CompareTo(b.pawn.thingIDNumber));
+
+            foreach (var (job, pawn) in list)
+            {
+                // Tools.Expand draws Rand; a fixed seed per tick and pawn keeps every PC on the same numbers.
+                Rand.PushState(Gen.HashCombineInt(ticks, pawn.thingIDNumber));
+                try
+                {
+                    expandJobMethod.Invoke(job, new object[] { ExpandTickBudget });
+                }
+                catch (Exception e)
+                {
+                    Log.Error($"{LogPrefix}tick expansion failed for {pawn}: {e}");
+                }
+                finally
+                {
+                    Rand.PopState();
+                }
+            }
         }
 
         #endregion
