@@ -118,6 +118,8 @@ namespace Multiplayer.Compat
         private static FieldInfo cellRadiusField;
         private static FieldInfo cancelledField;
         private static FieldInfo initializedField;
+        // FIXES row 443 (W443D): ForcedJob.getThingJobCache / getCellJobCache (QuotaCache, kept for 10 reads, not saved).
+        private static FieldInfo thingJobCacheField, cellJobCacheField, thingQuotaDictField, cellQuotaDictField;
         private static FieldInfo jobsField;
         private static FieldInfo counterField;
         private static Action<Pawn, IntVec3, Action<int>, Action> startDragging;
@@ -194,6 +196,12 @@ namespace Multiplayer.Compat
             cellRadiusField = GetInstanceField(forcedJobType, "cellRadius", typeof(int));
             cancelledField = GetInstanceField(forcedJobType, "cancelled", typeof(bool));
             initializedField = GetInstanceField(forcedJobType, "initialized", typeof(bool));
+            thingJobCacheField = GetInstanceField(forcedJobType, "getThingJobCache", null);
+            cellJobCacheField = GetInstanceField(forcedJobType, "getCellJobCache", null);
+            thingQuotaDictField = GetInstanceField(thingJobCacheField.FieldType, "cache", null);
+            cellQuotaDictField = GetInstanceField(cellJobCacheField.FieldType, "cache", null);
+            if (!typeof(IDictionary).IsAssignableFrom(thingQuotaDictField.FieldType) || !typeof(IDictionary).IsAssignableFrom(cellQuotaDictField.FieldType))
+                throw new MissingFieldException($"{LogPrefix}ForcedJob QuotaCache.cache is not a dictionary");
             jobsField = GetInstanceField(forcedJobsType, "jobs", null);
             if (!typeof(IList).IsAssignableFrom(jobsField.FieldType))
                 throw new MissingFieldException($"{LogPrefix}{forcedJobsType.FullName}.jobs is {jobsField.FieldType}, expected a list");
@@ -280,6 +288,7 @@ namespace Multiplayer.Compat
 
                     if (first)
                     {
+                        ResetJobCaches(forcedJob);
                         expandJobMethod.Invoke(forcedJob, new object[] { 1 + selectedCount * 2 });
                         if (!(bool)getNextNonConflictingJobMethod.Invoke(forcedJob, new[] { instance }))
                             continue;
@@ -323,25 +332,54 @@ namespace Multiplayer.Compat
             var continueJob = GetDeclaredMethod(FindType("AchtungMod.ForcedJob"), "ContinueJob", typeof(Pawn), typeof(JobCondition));
             if (!continueJob.IsStatic || continueJob.ReturnType != typeof(bool))
                 throw new MissingMethodException($"{LogPrefix}ForcedJob.ContinueJob is not a static bool method");
-            MpCompat.harmony.Patch(continueJob, prefix: new HarmonyMethod(typeof(Achtung), nameof(PreContinueJob)));
+            MpCompat.harmony.Patch(continueJob, prefix: new HarmonyMethod(typeof(Achtung), nameof(PreContinueJob)),
+                postfix: new HarmonyMethod(typeof(Achtung), nameof(PostContinueJob)));
         }
 
         private static bool PreFrameExpander() => !MP.IsInMultiplayer;
 
+        // FIXES row 443 (W443D, lab 443f4/443f6 + advisor q208): QuotaCache keeps a ThingHasJob/CellHasJob answer for 10 reads,
+        // so a 'no job' read while the first thing stood was still served at the job end: nothing was added and the forced
+        // job ended. The cache is also not saved, so a PC that joins mid-job reads other answers. In MP every expansion
+        // computes fresh: the caches are emptied before and after each expansion the compat starts, and after ContinueJob.
+        private static void ResetJobCaches(object forcedJob)
+        {
+            if (forcedJob == null)
+                return;
+            (thingQuotaDictField.GetValue(thingJobCacheField.GetValue(forcedJob)) as IDictionary)?.Clear();
+            (cellQuotaDictField.GetValue(cellJobCacheField.GetValue(forcedJob)) as IDictionary)?.Clear();
+        }
+
         // Runs inside EndCurrentJob (simulation). Same guards as ContinueJob itself; InterruptForced already expands there.
         private static void PreContinueJob(Pawn __0, JobCondition __1)
         {
-            if (!MP.IsInMultiplayer || __0 == null || __1 == JobCondition.InterruptForced || __0.Map == null
-                || !PawnAttackGizmoUtility.CanOrderPlayerPawn(__0))
+            if (!MP.IsInMultiplayer || __0 == null || __0.Map == null || !PawnAttackGizmoUtility.CanOrderPlayerPawn(__0))
                 return;
 
             var instance = instanceGetter.Invoke(null, null);
             var forcedJob = getForcedJobMethod.Invoke(instance, new object[] { __0 });
+            if (forcedJob == null)
+                return;
+
+            // Before the InterruptForced return: ContinueJob expands there itself.
+            ResetJobCaches(forcedJob);
             // The first call only marks the job initialized; ContinueJob returns false for it.
-            if (forcedJob == null || !(bool)initializedField.GetValue(forcedJob))
+            if (__1 == JobCondition.InterruptForced || !(bool)initializedField.GetValue(forcedJob))
                 return;
 
             expandJobMethod.Invoke(forcedJob, new object[] { 4 });
+        }
+
+        private static void PostContinueJob(Pawn __0)
+        {
+            if (!MP.IsInMultiplayer || __0 == null)
+                return;
+
+            var instance = instanceGetter.Invoke(null, null);
+            var forcedJobs = getForcedJobsInstanceMethod.Invoke(instance, new object[] { __0 });
+            if (forcedJobs != null && jobsField.GetValue(forcedJobs) is IList list)
+                foreach (var job in list)
+                    ResetJobCaches(job);
         }
 
         #endregion
@@ -407,6 +445,7 @@ namespace Multiplayer.Compat
                 Rand.PushState(Gen.HashCombineInt(ticks, pawn.thingIDNumber));
                 try
                 {
+                    ResetJobCaches(job);
                     expandJobMethod.Invoke(job, new object[] { ExpandTickBudget });
                 }
                 catch (Exception e)
@@ -415,6 +454,7 @@ namespace Multiplayer.Compat
                 }
                 finally
                 {
+                    ResetJobCaches(job);
                     Rand.PopState();
                 }
             }
