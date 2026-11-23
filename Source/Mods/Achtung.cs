@@ -317,6 +317,10 @@ namespace Multiplayer.Compat
                 return;
 
             cellRadiusField.SetValue(job, Math.Max(0, Math.Min(radius, (int)GenRadial.MaxRadialPatternRadius)));
+
+            // FIXES row 443 (W443E): fill the bubble at once (also while paused), same helper as the tick step.
+            if (MP.IsInMultiplayer && !LabOff.Row(443) && pawn.Map != null)
+                ExpandJobSeeded(job, pawn, Find.TickManager.TicksGame);
         }
 
         #endregion
@@ -440,23 +444,66 @@ namespace Multiplayer.Compat
             list.Sort((a, b) => a.pawn.thingIDNumber.CompareTo(b.pawn.thingIDNumber));
 
             foreach (var (job, pawn) in list)
+                ExpandJobSeeded(job, pawn, ticks);
+        }
+
+        private static bool factionPushResolved;
+        private static MethodInfo pushFactionMethod, popFactionMethod;
+
+        private static void ResolveFactionPush()
+        {
+            if (factionPushResolved)
+                return;
+            factionPushResolved = true;
+            try
             {
-                // Tools.Expand draws Rand; a fixed seed per tick and pawn keeps every PC on the same numbers.
-                Rand.PushState(Gen.HashCombineInt(ticks, pawn.thingIDNumber));
-                try
+                var type = AccessTools.TypeByName("Multiplayer.Client.Factions.FactionExtensions");
+                if (type == null)
+                    return;
+                pushFactionMethod = AccessTools.Method(type, "PushFaction", new[] { typeof(Map), typeof(Faction), typeof(bool) });
+                popFactionMethod = AccessTools.Method(type, "PopFaction", new[] { typeof(Map) });
+                if (pushFactionMethod == null || popFactionMethod == null)
+                    pushFactionMethod = popFactionMethod = null;
+            }
+            catch (Exception e)
+            {
+                pushFactionMethod = popFactionMethod = null;
+                Log.Error($"{LogPrefix}could not resolve FactionExtensions.PushFaction/PopFaction: {e}");
+            }
+        }
+
+        // Shared by the tick step and SyncedSetCellRadius. In multifaction the world tick runs with the spectator faction's
+        // map data (designationManager etc.), so the pawn's own faction is pushed on its map while the job is grown.
+        private static void ExpandJobSeeded(object job, Pawn pawn, int ticks)
+        {
+            // Tools.Expand draws Rand; a fixed seed per tick and pawn keeps every PC on the same numbers.
+            Rand.PushState(Gen.HashCombineInt(ticks, pawn.thingIDNumber));
+            var pushed = false;
+            var map = pawn.Map;
+            try
+            {
+                ResolveFactionPush();
+                if (pushFactionMethod != null)
                 {
-                    ResetJobCaches(job);
-                    expandJobMethod.Invoke(job, new object[] { ExpandTickBudget });
+                    pushFactionMethod.Invoke(null, new object[] { map, pawn.Faction, true });
+                    pushed = true;
                 }
-                catch (Exception e)
+                ResetJobCaches(job);
+                expandJobMethod.Invoke(job, new object[] { ExpandTickBudget });
+            }
+            catch (Exception e)
+            {
+                Log.Error($"{LogPrefix}expansion failed for {pawn}: {e}");
+            }
+            finally
+            {
+                ResetJobCaches(job);
+                if (pushed)
                 {
-                    Log.Error($"{LogPrefix}tick expansion failed for {pawn}: {e}");
+                    try { popFactionMethod.Invoke(null, new object[] { map }); }
+                    catch (Exception e) { Log.Error($"{LogPrefix}PopFaction failed: {e}"); }
                 }
-                finally
-                {
-                    ResetJobCaches(job);
-                    Rand.PopState();
-                }
+                Rand.PopState();
             }
         }
 
