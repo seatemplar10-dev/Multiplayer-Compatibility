@@ -43,7 +43,10 @@ namespace Multiplayer.Compat
     /// <c>TakeLoan</c> is dropped when the window would not offer the button (loan already taken, cooldown running, no balance and no
     /// fixed amount: a second player's click, or a withdrawal, arrived first) or when the negotiator has no map.
     /// Opening the bank window from the terminal (row 393b) is a separate module, <c>VanillaTradingExpandedTerminal</c>.
-    /// Not covered here: contracts, stock market, transactions. Each bank is shared by all player factions (one saved balance).
+    /// FIXES row 466 (26 Nov 2026): the contract transaction windows the simulation opens on every PC (contract reward, player
+    /// contract payment, contract caravan reward) applied Confirm / Close on the clicking PC only; both are synced now, see
+    /// <c>PatchContractTransactionWindows</c>.
+    /// Not covered here: stock market, transactions opened from the interface. Each bank is shared by all player factions (one saved balance).
     /// </remarks>
     [MpCompatFor("VanillaExpanded.VanillaTradingExpanded")]
     public class VanillaTradingExpanded
@@ -106,6 +109,223 @@ namespace Multiplayer.Compat
             {
                 Log.Error($"MPCompat :: Vanilla Trading Expanded: the bank deposit/withdraw sync is not fully registered: {e.InnerException ?? e}");
             }
+
+            // Row 466. Own try/catch: a changed transaction class must not undo the bank syncs above.
+            try
+            {
+                PatchContractTransactionWindows();
+            }
+            catch (Exception e)
+            {
+                Log.Error($"[MPCompat - Vanilla Trading Expanded] row 466: contract transaction windows not synced: {e.InnerException ?? e}");
+            }
+        }
+
+        // Row 466. TradingManager.CompleteContract / ProcessContracts and the contract caravan's ExitCaravan open
+        // Window_PerformTransactionGains / Window_PerformTransactionCosts from the simulation, so every PC shows one, each with its own
+        // TransactionProcess. Confirm (PerformTransaction: bank DepositAmount += / -= the amounts the player set per bank, then the
+        // contract's postTransactionAction = item drop pods + letter) and Close (PostCancel) ran on the clicking PC only, and the window's
+        // PostClose (postCloseAction: remove the player contract) ran on each PC whenever its own window closed. Every TransactionProcess
+        // built in the simulation in MP is now recorded with (tick, order in that tick), the same on every PC. Confirm sends the chosen
+        // per-bank amounts in one synced call, Close sends a synced cancel; the command finds the process by its key, applies the amounts,
+        // runs the original and closes that window on every PC (PostClose runs once inside the command). The first command wins: a later
+        // click on the other PC finds no process and does nothing. Processes built in the interface (stock market) are not recorded and
+        // stay unchanged (known gap). Not synced: windows opened before a player joined (the joiner has no process for the key).
+        private sealed class ContractWindowEntry
+        {
+            public Game game;
+            public int tick;
+            public int seq;
+            public object process;
+        }
+
+        private static readonly List<ContractWindowEntry> contractWindowEntries = new List<ContractWindowEntry>();
+        private static Game contractEntryGame;
+        private static int contractEntryTick = int.MinValue;
+        private static int contractEntrySeq;
+        private static Type gainsWindowType;
+        private static Type costsWindowType;
+        private static FieldInfo gainsWindowProcessField;
+        private static FieldInfo costsWindowProcessField;
+        private static FieldInfo processTransferField;
+        private static FieldInfo processSpendField;
+        private static FieldInfo processGainField;
+        private static FieldInfo processCostField;
+        private static FieldInfo processSharesField;
+        private static MethodInfo processPerformMethod;
+        private static MethodInfo processPostCancelMethod;
+        private static MethodInfo processPostCloseMethod;
+
+        internal static void PatchContractTransactionWindows()
+        {
+            if (LabOff.Row(466))
+            {
+                Log.Message("[MPCompat - Vanilla Trading Expanded] row 466 switched off by the lab, contract transaction windows not synced");
+                return;
+            }
+            var processType = AccessTools.TypeByName("VanillaTradingExpanded.TransactionProcess");
+            gainsWindowType = AccessTools.TypeByName("VanillaTradingExpanded.Window_PerformTransactionGains");
+            costsWindowType = AccessTools.TypeByName("VanillaTradingExpanded.Window_PerformTransactionCosts");
+            var utilsType = AccessTools.TypeByName("VanillaTradingExpanded.Utils");
+            var bankType = AccessTools.TypeByName("VanillaTradingExpanded.Bank");
+            var ctor = processType == null ? null : AccessTools.DeclaredConstructor(processType, Type.EmptyTypes);
+            processPerformMethod = processType == null ? null : AccessTools.DeclaredMethod(processType, "PerformTransaction", Type.EmptyTypes);
+            processPostCancelMethod = processType == null ? null : AccessTools.DeclaredMethod(processType, "PostCancel", Type.EmptyTypes);
+            processPostCloseMethod = processType == null ? null : AccessTools.DeclaredMethod(processType, "PostClose", Type.EmptyTypes);
+            processTransferField = processType == null ? null : AccessTools.DeclaredField(processType, "amountToTransfer");
+            processSpendField = processType == null ? null : AccessTools.DeclaredField(processType, "amountToSpend");
+            processGainField = processType == null ? null : AccessTools.DeclaredField(processType, "transactionGain");
+            processCostField = processType == null ? null : AccessTools.DeclaredField(processType, "transactionCost");
+            processSharesField = processType == null ? null : AccessTools.DeclaredField(processType, "companySharesToBuyOrSell");
+            gainsWindowProcessField = gainsWindowType == null ? null : AccessTools.DeclaredField(gainsWindowType, "transactionProcess");
+            costsWindowProcessField = costsWindowType == null ? null : AccessTools.DeclaredField(costsWindowType, "transactionProcess");
+            if (getBankMethod == null && utilsType != null)
+                getBankMethod = AccessTools.DeclaredMethod(utilsType, "GetBank", new[] { typeof(Faction) });
+            var parentFaction = bankType == null ? null : AccessTools.DeclaredField(bankType, "parentFaction");
+            if (bankParentFactionField == null && parentFaction != null && parentFaction.FieldType == typeof(Faction))
+                bankParentFactionField = AccessTools.FieldRefAccess<object, Faction>(parentFaction);
+            if (ctor == null || processPerformMethod == null || processPostCancelMethod == null || processPostCloseMethod == null
+                || processTransferField == null || processSpendField == null || processGainField?.FieldType != typeof(int)
+                || processCostField?.FieldType != typeof(int) || processSharesField == null || gainsWindowProcessField == null
+                || costsWindowProcessField == null || getBankMethod == null || bankParentFactionField == null
+                || !typeof(IDictionary).IsAssignableFrom(processTransferField.FieldType) || !typeof(IDictionary).IsAssignableFrom(processSpendField.FieldType))
+            {
+                Log.Error("[MPCompat - Vanilla Trading Expanded] row 466: TransactionProcess or its windows changed, contract transaction windows can desync");
+                return;
+            }
+            MP.RegisterSyncMethod(typeof(VanillaTradingExpanded), nameof(SyncedContractTransaction));
+            MP.RegisterSyncMethod(typeof(VanillaTradingExpanded), nameof(SyncedContractCancel));
+            var self = typeof(VanillaTradingExpanded);
+            MpCompat.harmony.Patch(ctor, postfix: new HarmonyMethod(self, nameof(PostTransactionProcessCtor)));
+            MpCompat.harmony.Patch(processPerformMethod, prefix: new HarmonyMethod(self, nameof(PrePerformTransaction)));
+            MpCompat.harmony.Patch(processPostCancelMethod, prefix: new HarmonyMethod(self, nameof(PreTransactionPostCancel)));
+            MpCompat.harmony.Patch(processPostCloseMethod, prefix: new HarmonyMethod(self, nameof(PreTransactionPostClose)));
+            Log.Message("[MPCompat - Vanilla Trading Expanded] row 466: contract transaction windows (Confirm, Close) synced");
+        }
+
+        internal static void PostTransactionProcessCtor(object __instance)
+        {
+            if (!MP.IsInMultiplayer || MP.InInterface) return;
+            var game = Current.Game;
+            var tick = game?.tickManager?.TicksGame ?? -1;
+            if (!ReferenceEquals(game, contractEntryGame) || tick != contractEntryTick)
+            {
+                contractEntryGame = game;
+                contractEntryTick = tick;
+                contractEntrySeq = 0;
+            }
+            contractWindowEntries.RemoveAll(e => !ReferenceEquals(e.game, game));
+            contractWindowEntries.Add(new ContractWindowEntry { game = game, tick = tick, seq = contractEntrySeq++, process = __instance });
+            if (contractWindowEntries.Count > 64) contractWindowEntries.RemoveAt(0);
+        }
+
+        private static ContractWindowEntry EntryOf(object process)
+        {
+            foreach (var e in contractWindowEntries)
+                if (ReferenceEquals(e.process, process) && ReferenceEquals(e.game, Current.Game)) return e;
+            return null;
+        }
+
+        private static ContractWindowEntry EntryOf(int tick, int seq)
+        {
+            foreach (var e in contractWindowEntries)
+                if (e.tick == tick && e.seq == seq && ReferenceEquals(e.game, Current.Game)) return e;
+            return null;
+        }
+
+        private static void ReadAmounts(object process, FieldInfo field, out bool has, out List<Faction> banks, out List<int> amounts)
+        {
+            banks = new List<Faction>();
+            amounts = new List<int>();
+            has = field.GetValue(process) is IDictionary dict;
+            if (!has) return;
+            foreach (DictionaryEntry kv in (IDictionary)field.GetValue(process))
+            {
+                banks.Add(kv.Key == null ? null : bankParentFactionField(kv.Key));
+                amounts.Add((int)kv.Value);
+            }
+        }
+
+        internal static bool PrePerformTransaction(object __instance)
+        {
+            if (!MP.IsInMultiplayer || MP.IsExecutingSyncCommand) return true;
+            var entry = EntryOf(__instance);
+            if (entry == null || (processSharesField.GetValue(__instance) as IDictionary)?.Count > 0) return true;
+            ReadAmounts(__instance, processTransferField, out var hasTransfer, out var transferBanks, out var transferAmounts);
+            ReadAmounts(__instance, processSpendField, out var hasSpend, out var spendBanks, out var spendAmounts);
+            SyncedContractTransaction(entry.tick, entry.seq, hasTransfer, transferBanks, transferAmounts, hasSpend, spendBanks, spendAmounts);
+            return false;
+        }
+
+        internal static bool PreTransactionPostCancel(object __instance)
+        {
+            if (!MP.IsInMultiplayer || MP.IsExecutingSyncCommand) return true;
+            var entry = EntryOf(__instance);
+            if (entry == null) return true;
+            SyncedContractCancel(entry.tick, entry.seq);
+            return false;
+        }
+
+        // The clicking PC closes its own window at once; its PostClose waits for the command (it removes the player contract).
+        internal static bool PreTransactionPostClose(object __instance)
+            => !MP.IsInMultiplayer || MP.IsExecutingSyncCommand || EntryOf(__instance) == null;
+
+        private static IDictionary BuildAmounts(FieldInfo field, List<Faction> banks, List<int> amounts, int total)
+        {
+            if (banks == null || amounts == null || banks.Count != amounts.Count) return null;
+            var dict = (IDictionary)Activator.CreateInstance(field.FieldType);
+            var sum = 0;
+            for (var i = 0; i < banks.Count; i++)
+            {
+                var bank = BankOf(banks[i]);
+                if (bank == null || amounts[i] < 0 || dict.Contains(bank)) return null;
+                dict[bank] = amounts[i];
+                sum += amounts[i];
+            }
+            return sum == total ? dict : null;
+        }
+
+        internal static void SyncedContractTransaction(int tick, int seq, bool hasTransfer, List<Faction> transferBanks, List<int> transferAmounts,
+            bool hasSpend, List<Faction> spendBanks, List<int> spendAmounts)
+        {
+            var entry = EntryOf(tick, seq);
+            if (entry == null) return;  // already confirmed or cancelled by another PC's command, or this PC never had the window
+            var process = entry.process;
+            IDictionary transfer = null, spend = null;
+            if (hasTransfer && (transfer = BuildAmounts(processTransferField, transferBanks, transferAmounts, (int)processGainField.GetValue(process))) == null) return;
+            if (hasSpend && (spend = BuildAmounts(processSpendField, spendBanks, spendAmounts, (int)processCostField.GetValue(process))) == null) return;
+            contractWindowEntries.Remove(entry);
+            processTransferField.SetValue(process, transfer);
+            processSpendField.SetValue(process, spend);
+            processPerformMethod.Invoke(process, null);
+            CloseContractWindows(process);
+        }
+
+        internal static void SyncedContractCancel(int tick, int seq)
+        {
+            var entry = EntryOf(tick, seq);
+            if (entry == null) return;
+            contractWindowEntries.Remove(entry);
+            processPostCancelMethod.Invoke(entry.process, null);
+            CloseContractWindows(entry.process);
+        }
+
+        private static void CloseContractWindows(object process)
+        {
+            var closed = false;
+            var windows = Current.Root?.uiRoot?.windows?.Windows;
+            if (windows != null)
+            {
+                foreach (var window in new List<Window>(windows))
+                {
+                    var field = gainsWindowType.IsInstanceOfType(window) ? gainsWindowProcessField
+                        : costsWindowType.IsInstanceOfType(window) ? costsWindowProcessField : null;
+                    if (field == null || !ReferenceEquals(field.GetValue(window), process)) continue;
+                    window.Close(false);    // its PostClose runs the process's PostClose, inside the command
+                    closed = true;
+                }
+            }
+            if (!closed) processPostCloseMethod.Invoke(process, null);  // the clicking PC closed its window already
         }
 
         private static void RegisterBankSyncs(Type utilsType)
