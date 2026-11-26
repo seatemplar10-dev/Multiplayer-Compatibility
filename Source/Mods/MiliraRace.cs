@@ -75,6 +75,7 @@ public class MiliraRace
         return false;
     }
 
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     internal static void SyncedSetUseWorkPriorities(bool value)
     {
         if (Current.Game?.playSettings == null || Current.Game.playSettings.useWorkPriorities == value) return;

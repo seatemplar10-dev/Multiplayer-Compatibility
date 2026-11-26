@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Reflection;
 using System.Reflection.Emit;
 using HarmonyLib;
@@ -30,7 +31,7 @@ namespace Multiplayer.Compat
 
         internal static void PatchMedCare()
         {
-            var outer = AccessTools.TypeByName("MedicalCareUtility_Patch+MedicalCareUtility_MedicalCareSelectButton_Patch");
+            var outer = AccessTools.AllTypes().FirstOrDefault(t => t.Name == "MedicalCareUtility_MedicalCareSelectButton_Patch" && t.Assembly.GetName().Name.StartsWith("Artificial Beings Framework"));
             MethodInfo lambda = null;
             if (outer != null && medCareField != null && settingsPawnField != null)
                 foreach (var nested in outer.GetNestedTypes(BindingFlags.Public | BindingFlags.NonPublic))
@@ -76,6 +77,7 @@ namespace Multiplayer.Compat
         }
 
         // the stack at the old store is (playerSettings, category)
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
         public static void WriteMedCare(Pawn_PlayerSettings settings, MedicalCareCategory category)
         {
             var pawn = settings == null ? null : (Pawn)settingsPawnField.GetValue(settings);
@@ -85,6 +87,7 @@ namespace Multiplayer.Compat
                 settings.medCare = category;
         }
 
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
         internal static void SyncedSetMedCare(Pawn pawn, MedicalCareCategory category)
         {
             if (pawn?.playerSettings != null) pawn.playerSettings.medCare = category;
