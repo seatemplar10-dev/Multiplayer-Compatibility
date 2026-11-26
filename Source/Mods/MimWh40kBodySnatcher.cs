@@ -32,8 +32,51 @@ namespace Multiplayer.Compat
             public TattooDef bodyTattoo;
         }
 
+        // FIXES row 464: Utility_WolfenMutation.DoMutationConsideration rolls Wulfen / Long Fang / Space Wolves with a
+        // time-seeded private static System.Random, so every PC rolls a different class. It is called from
+        // Hediff_Mutation_WulfenNPC.Tick -> DoMutation (hediff tick, in the simulation). In Multiplayer the roll now comes from Verse.Rand
+        // through PatchingUtilities.RandRedirector. The Rubric copy only rolls Next(1,100) against a limit it never passes: not patched.
+        private static readonly System.Reflection.FieldInfo wolfenRand = AccessTools.Field(AccessTools.TypeByName("Utility_WolfenMutation"), "rand");
+
+        private static void PatchWolfenRand()
+        {
+            if (LabOff.Row(464))
+            {
+                Log.Message(LogPrefix + "row 464 switched off by the lab, Wulfen roll still uses System.Random");
+                return;
+            }
+            var method = AccessTools.Method("Utility_WolfenMutation:DoMutationConsideration");
+            if (method == null || wolfenRand == null || wolfenRand.FieldType != typeof(Random))
+            {
+                Log.Error(LogPrefix + "row 464: Utility_WolfenMutation.DoMutationConsideration or its rand field not found, the Wulfen roll can desync");
+                return;
+            }
+            MpCompat.harmony.Patch(method, transpiler: new HarmonyMethod(typeof(MimWh40kBodySnatcher), nameof(UseRandRedirector)));
+            Log.Message(LogPrefix + "row 464: Wulfen / Long Fang / Space Wolves roll uses Verse.Rand in Multiplayer");
+        }
+
+        internal static System.Collections.Generic.IEnumerable<CodeInstruction> UseRandRedirector(System.Collections.Generic.IEnumerable<CodeInstruction> instr)
+        {
+            var helper = AccessTools.Method(typeof(MimWh40kBodySnatcher), nameof(GetWolfenRand));
+            var found = false;
+            foreach (var ci in instr)
+            {
+                if (ci.opcode == System.Reflection.Emit.OpCodes.Ldsfld && ci.operand as System.Reflection.FieldInfo == wolfenRand)
+                {
+                    ci.opcode = System.Reflection.Emit.OpCodes.Call;
+                    ci.operand = helper;
+                    found = true;
+                }
+                yield return ci;
+            }
+            if (!found) Log.Error(LogPrefix + "row 464: no read of the rand field in DoMutationConsideration, the Wulfen roll can desync");
+        }
+
+        internal static Random GetWolfenRand() => MP.IsInMultiplayer ? PatchingUtilities.RandRedirector.Instance : (Random)wolfenRand.GetValue(null);
+
         public MimWh40kBodySnatcher(ModContentPack mod)
         {
+            PatchWolfenRand();
             try
             {
                 var targets = new[]
