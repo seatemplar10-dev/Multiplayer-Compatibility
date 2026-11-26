@@ -1,5 +1,6 @@
 ﻿using System;
 using HarmonyLib;
+using Multiplayer.API;
 using Verse;
 
 namespace Multiplayer.Compat
@@ -9,7 +10,49 @@ namespace Multiplayer.Compat
     [MpCompatFor("Dubwise.DubsMintMenus")]
     internal class DubsMintMenu
     {
-        public DubsMintMenu(ModContentPack mod) => LongEventHandler.ExecuteWhenFinished(() => Patch("DubsMintMenus.MP_Util"));
+        public DubsMintMenu(ModContentPack mod)
+        {
+            LongEventHandler.ExecuteWhenFinished(() => Patch("DubsMintMenus.MP_Util"));
+
+            // FIXES row 469 (26 Nov 2026): MainTabWindow_MintBillMenu.DoInterface is Dubs' own copy of Bill.DoInterface. Its
+            // suspend button writes bill.suspended on the clicking PC only; Multiplayer syncs that field only inside the vanilla
+            // Bill.DoInterface. The other writes in it are already synced vanilla calls (BillStack.Reorder, BillStack.Delete,
+            // Bill.DoConfigInterface opens Dialog_BillConfig) or local (Clipboard). So watch suspended around Dubs' DoInterface.
+            if (LabOff.Row(469))
+                Log.Message("[MPCompat - Dubs Mint Menus] row 469 switched off by the lab, bill suspend button not synced");
+            else
+                PatchSuspend();
+        }
+
+        private static ISyncField suspendedField;
+
+        internal static void PatchSuspend()
+        {
+            var type = AccessTools.TypeByName("DubsMintMenus.MainTabWindow_MintBillMenu");
+            var method = type == null ? null : AccessTools.DeclaredMethod(type, "DoInterface");
+            if (method == null || AccessTools.Field(typeof(RimWorld.Bill), "suspended") == null)
+            {
+                Log.Error("[MPCompat - Dubs Mint Menus] row 469: MainTabWindow_MintBillMenu.DoInterface or Bill.suspended not found, the suspend button can desync");
+                return;
+            }
+            suspendedField = MP.RegisterSyncField(typeof(RimWorld.Bill), "suspended");
+            MpCompat.harmony.Patch(method,
+                prefix: new HarmonyMethod(typeof(DubsMintMenu), nameof(PreDoInterface)),
+                finalizer: new HarmonyMethod(typeof(DubsMintMenu), nameof(PostDoInterface)));
+            Log.Message("[MPCompat - Dubs Mint Menus] row 469: bill suspend button synced");
+        }
+
+        internal static void PreDoInterface(RimWorld.Bill bill)
+        {
+            if (!MP.IsInMultiplayer || bill == null) return;
+            MP.WatchBegin();
+            suspendedField.Watch(bill);
+        }
+
+        internal static void PostDoInterface()
+        {
+            if (MP.IsInMultiplayer) MP.WatchEnd();
+        }
 
         public static void Patch(string name)
         {
