@@ -20,6 +20,10 @@ public class MiliraRace
     {
         // lab switch row 256 (wave 2, 17 Nov): off = old behaviour
         if (!LabOff.Row(256)) PatchFlyer();
+        if (LabOff.Row(471))
+            Log.Message("[MPCompat - Milira] row 471 switched off by the lab, Milian work tab manual priorities checkbox not synced");
+        else
+            PatchManualPriorities();
         var postfix = AccessTools.DeclaredMethod("Milira.Milira_MilianPawnGenerator_Patch:Postfix");
         if (postfix == null)
         {
@@ -29,6 +33,55 @@ public class MiliraRace
         MpCompat.harmony.Patch(postfix,
             prefix: new HarmonyMethod(typeof(MiliraRace), nameof(PreMilianGear)),
             finalizer: new HarmonyMethod(typeof(MiliraRace), nameof(PostMilianGear)));
+    }
+
+    // FIXES row 471 (26 Nov 2026): MainTabWindow_MilianWork.DoManualPrioritiesCheckbox draws the "Manual priorities" checkbox on
+    // `ref Current.Game.playSettings.useWorkPriorities` and then calls Notify_UseWorkPrioritiesChanged on the clicking PC's pawns.
+    // Multiplayer syncs that field only in the vanilla work tab. In MP the checkbox is redrawn here on a local copy and a change
+    // is sent as one SyncedSetUseWorkPriorities(value), which writes the field and runs the notify loop on every PC.
+    // The tab's priority cells are the AncotLibrary work type columns (not checked here).
+    internal static void PatchManualPriorities()
+    {
+        var method = AccessTools.DeclaredMethod("Milira.MainTabWindow_MilianWork:DoManualPrioritiesCheckbox");
+        if (method == null || AccessTools.Field(typeof(PlaySettings), nameof(PlaySettings.useWorkPriorities)) == null)
+        {
+            Log.Error("[MPCompat - Milira] row 471: MainTabWindow_MilianWork.DoManualPrioritiesCheckbox not found, the manual priorities checkbox can desync");
+            return;
+        }
+        MP.RegisterSyncMethod(typeof(MiliraRace), nameof(SyncedSetUseWorkPriorities));
+        MpCompat.harmony.Patch(method, prefix: new HarmonyMethod(typeof(MiliraRace), nameof(PreManualPriorities)));
+        Log.Message("[MPCompat - Milira] row 471: manual priorities checkbox synced");
+    }
+
+    internal static bool PreManualPriorities()
+    {
+        if (!MP.IsInMultiplayer || MP.IsExecutingSyncCommand) return true;
+        Text.Font = GameFont.Small;
+        UnityEngine.GUI.color = UnityEngine.Color.white;
+        Text.Anchor = UnityEngine.TextAnchor.UpperLeft;
+        var box = new UnityEngine.Rect(5f, 5f, 140f, 30f);
+        var old = Current.Game.playSettings.useWorkPriorities;
+        var value = old;
+        Widgets.CheckboxLabeled(box, "ManualPriorities".Translate(), ref value);
+        if (value != old)
+            SyncedSetUseWorkPriorities(value);
+        if (Current.Game.playSettings.useWorkPriorities)
+        {
+            using (new TextBlock(new UnityEngine.Color(1f, 1f, 1f, 0.5f)))
+                Widgets.Label(new UnityEngine.Rect(box.x, box.yMax - 6f, box.width, 60f), "PriorityOneDoneFirst".Translate());
+        }
+        else
+            UIHighlighter.HighlightOpportunity(box, "ManualPriorities-Off");
+        return false;
+    }
+
+    internal static void SyncedSetUseWorkPriorities(bool value)
+    {
+        if (Current.Game?.playSettings == null || Current.Game.playSettings.useWorkPriorities == value) return;
+        Current.Game.playSettings.useWorkPriorities = value;
+        foreach (var pawn in PawnsFinder.AllMapsWorldAndTemporary_Alive)
+            if (pawn.Faction == Faction.OfPlayer && pawn.workSettings != null)
+                pawn.workSettings.Notify_UseWorkPrioritiesChanged();
     }
 
     // 1.7 lab, FIXES row 256: MiliraPawnFlyer is a copy of vanilla PawnFlyer (not a subclass): its RecomputePosition sets the flyer's
