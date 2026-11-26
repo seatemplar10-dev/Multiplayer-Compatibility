@@ -56,6 +56,54 @@ namespace Multiplayer.Compat
                 Log.Message("[MPCompat - Dubs Bad Hygiene] row 460 switched off by the lab, fertilize zone toggle not synced");
             else
                 PatchFertilizeToggle();
+
+            // FIXES row 462 (26 Nov 2026): the "allow auto refuel" toggles on the wash bucket and on CompWaterFillable flip
+            // allowAutoRefuel on the clicking PC only; the refill WorkGiver reads it. Each click lambda is synced.
+            if (LabOff.Row(462))
+                Log.Message("[MPCompat - Dubs Bad Hygiene] row 462 switched off by the lab, auto refuel toggles not synced");
+            else
+                PatchAutoRefuelToggles();
+        }
+
+        private static void PatchAutoRefuelToggles()
+        {
+            var targets = new[]
+            {
+                ("DubsBadHygiene.Building_washbucket", "<GetGizmos>b__22_1"),
+                ("DubsBadHygiene.CompWaterFillable", "<CompGetGizmosExtra>b__9_1"),
+            };
+            int count = 0;
+            foreach (var (typeName, name) in targets)
+            {
+                var type = AccessTools.TypeByName(typeName);
+                var method = type == null ? null : AccessTools.DeclaredMethod(type, name);
+                if (method == null || method.IsStatic || method.ReturnType != typeof(void) || method.GetParameters().Length != 0
+                    || !WritesAutoRefuel(method))
+                {
+                    Log.Error($"[MPCompat - Dubs Bad Hygiene] row 462: {typeName}.{name} (flips allowAutoRefuel) not found, that toggle can desync");
+                    continue;
+                }
+                MP.RegisterSyncMethod(method);
+                count++;
+            }
+            Log.Message($"[MPCompat - Dubs Bad Hygiene] row 462: {count} of {targets.Length} auto refuel toggles synced");
+        }
+
+        private static bool WritesAutoRefuel(System.Reflection.MethodInfo method)
+        {
+            var il = method.GetMethodBody()?.GetILAsByteArray();
+            if (il == null) return false;
+            for (int i = 0; i < il.Length - 4; i++)
+            {
+                if (il[i] != 0x7D) continue; // stfld
+                try
+                {
+                    if (method.Module.ResolveField(BitConverter.ToInt32(il, i + 1), method.DeclaringType.GetGenericArguments(), null).Name == "allowAutoRefuel")
+                        return true;
+                }
+                catch { }
+            }
+            return false;
         }
 
         private static void PatchFertilizeToggle()
