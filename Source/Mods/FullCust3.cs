@@ -58,7 +58,8 @@ namespace Multiplayer.Compat
         }
 
         static Type mapCompType;
-        static MethodInfo setFactionM, inInterfaceGetter;
+        static MethodInfo setFactionM, inInterfaceGetter, mpCompM;
+        static bool mapsMissLogged, mapsLogged;
         static bool inInterfaceLooked;
 
         /// <summary>Multiplayer.InInterface (false during a long event, a reload, a tick, executing commands), read by reflection. Outside MP: true.</summary>
@@ -82,13 +83,23 @@ namespace Multiplayer.Compat
             {
                 mapCompType = AccessTools.TypeByName("Multiplayer.Client.MultiplayerMapComp");
                 setFactionM = mapCompType == null ? null : AccessTools.Method(mapCompType, "SetFaction", new[] { typeof(Faction) });
+                // MultiplayerMapComp is not a MapComponent: MP keeps it in Multiplayer.game.mapComps and finds it with the
+                // Extensions.MpComp(Map) extension (MP Util/Extensions.cs:49-50). map.GetComponent returns null for it (orchestrator 28 Nov).
+                var ext = AccessTools.TypeByName("Multiplayer.Client.Extensions");
+                mpCompM = ext == null ? null : AccessTools.Method(ext, "MpComp", new[] { typeof(Map) });
             }
-            if (setFactionM == null) return;
+            if (setFactionM == null || mpCompM == null)
+            {
+                if (!mapsMissLogged) { mapsMissLogged = true; Log.Error("[MPCompat - Simple Warrants] SetMapsFaction: MP MultiplayerMapComp.SetFaction or Extensions.MpComp not found, map faction not switched"); }
+                return;
+            }
+            int n = 0;
             foreach (var map in Find.Maps)
             {
-                var comp = map.GetComponent(mapCompType);
-                if (comp != null) setFactionM.Invoke(comp, new object[] { f });
+                var comp = mpCompM.Invoke(null, new object[] { map });
+                if (comp != null) { setFactionM.Invoke(comp, new object[] { f }); n++; }
             }
+            if (!mapsLogged && n > 0) { mapsLogged = true; Log.Message("[MPCompat - Simple Warrants] SetMapsFaction: switched " + n + " map(s) (row 553)"); }
         }
 
         /// <summary>Push f and switch every map's MP faction data (areaManager, zones) to it, like MP's LongEvents does.</summary>
