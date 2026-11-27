@@ -121,8 +121,9 @@ namespace Multiplayer.Compat
             if (!idsLookupDone)
             {
                 idsLookupDone = true;   // 27 Nov hang: string lookups scan every mod's types, so look up once per session (this runs every tick)
-                worldCompGet = AccessTools.Method("Multiplayer.Client.Multiplayer:get_WorldComp");
-                factionDataField = AccessTools.Field("Multiplayer.Client.MultiplayerWorldComp:factionData");
+                // AccessTools.Field(string) throws NullReferenceException when the type is missing, so each lookup gets its own try
+                try { worldCompGet = AccessTools.Method("Multiplayer.Client.Multiplayer:get_WorldComp"); } catch (Exception) { worldCompGet = null; }
+                try { factionDataField = AccessTools.Field("Multiplayer.Client.MultiplayerWorldComp:factionData"); } catch (Exception) { factionDataField = null; }
             }
             var world = worldCompGet?.Invoke(null, null);
             var data = world == null ? null : factionDataField?.GetValue(world) as IDictionary;
@@ -264,9 +265,9 @@ namespace Multiplayer.Compat
             if (!clockLookupDone)
             {
                 clockLookupDone = true;   // 27 Nov hang: string lookups scan every mod's types, so look up once per session (this runs every tick)
-                asyncWorldTimeGet = AccessTools.Method("Multiplayer.Client.Multiplayer:get_AsyncWorldTime");
+                try { asyncWorldTimeGet = AccessTools.Method("Multiplayer.Client.Multiplayer:get_AsyncWorldTime"); } catch (Exception) { asyncWorldTimeGet = null; }
                 // 27 Nov field fault: the class is Multiplayer.Client.AsyncTime.AsyncWorldTimeComp in MP 1.7 (the old name found nothing, so TicksGame was used)
-                worldTicksField = AccessTools.Field("Multiplayer.Client.AsyncTime.AsyncWorldTimeComp:worldTicks");
+                try { worldTicksField = AccessTools.Field("Multiplayer.Client.AsyncTime.AsyncWorldTimeComp:worldTicks"); } catch (Exception) { worldTicksField = null; }
             }
             var w = asyncWorldTimeGet?.Invoke(null, null);
             var f = w == null ? null : worldTicksField;
