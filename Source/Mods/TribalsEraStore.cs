@@ -68,6 +68,7 @@ namespace Multiplayer.Compat
         static FieldInfo fPoints, fTech, fEthos, fEthosLocked, fCorner, fFireTicks, fFireUpdate, fLastResearch, fFinished;
         static bool fieldsBound, hooksInstalled, errorLogged;
         static FieldInfo multifactionField, spectatorField;
+        static int activeLogged = -1;
         static Func<object> gameCompGetter, worldCompGetter;
         static Func<Faction> realPlayerGetter;
         static FieldInfo instanceField;
@@ -488,12 +489,26 @@ namespace Multiplayer.Compat
             {
                 if (multifactionField == null)
                 {
-                    multifactionField = AccessTools.Field("Multiplayer.Client.MultiplayerGameComp:multifaction");
+                    // 27 Nov field fault: the class is Multiplayer.Client.Comp.MultiplayerGameComp in MP 1.7 (the old name found nothing, so this was always false)
+                    multifactionField = AccessTools.Field("Multiplayer.Client.Comp.MultiplayerGameComp:multifaction")
+                                        ?? AccessTools.Field("Multiplayer.Client.MultiplayerGameComp:multifaction");
                     gameCompGetter = (Func<object>)Delegate.CreateDelegate(typeof(Func<object>), AccessTools.PropertyGetter("Multiplayer.Client.Multiplayer:GameComp"));
                 }
-                return (bool)multifactionField.GetValue(gameCompGetter());
+                var on = (bool)multifactionField.GetValue(gameCompGetter());
+                // 27 Nov: one line each time the value changes, so Player.log shows whether the era store really runs (the start lines print either way)
+                if ((on ? 1 : 0) != activeLogged)
+                {
+                    activeLogged = on ? 1 : 0;
+                    Log.Message(logPrefix + (on ? "row 523: ACTIVE in this game: multifaction is on, each player faction keeps its own era"
+                                                : "row 523: multifaction is off in this game, one era for all players (stock)"));
+                }
+                return on;
             }
-            catch (Exception) { return false; }
+            catch (Exception e)
+            {
+                Log.WarningOnce("[MPCompat - VFE Tribals] row 523: the multifaction flag is not readable, one era per game as before: " + e.GetType().Name, 52352300);
+                return false;
+            }
         }
 
         static Faction DefaultSpectator()
