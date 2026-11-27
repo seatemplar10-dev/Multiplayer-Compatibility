@@ -49,6 +49,7 @@ namespace Multiplayer.Compat
             hegemonyAssembly = AccessTools.TypeByName(Ns + "ModEntry")?.Assembly;
             frameworkAssembly = AccessTools.TypeByName("JaegerUtilityFramework.WorkQueue")?.Assembly;
             BindCoreUi();
+            PatchOutpostChoice(); // FIXES row 479
 
             // G5, F1: Hegemony void postfixes. Skipped, they leave the vanilla __result and ref args as they are.
             // F1 stays skipped with the fork: MP syncs every WorldObject.GetFloatMenuOptions(caravan) click (SyncActions.cs:31,
@@ -327,6 +328,150 @@ namespace Multiplayer.Compat
         {
             if (__result && MP.IsInMultiplayer && !CoreUi && __instance.def?.defName == VassalageButton)
                 __result = false;
+        }
+
+        // FIXES row 479. WD2 settlement purchase in the co-op fork (WorldDominationConversion). After a load the world tick
+        // (Wd2ConversionPopulation.WorldComponentTick) calls WorldDominationConversion.Reopen, which adds
+        // TSA_WorldDomination.Dialog_OutpostSelection on every PC (the WD2 purchase arrival opens the same dialog). Its click runs
+        // FinalizeOutpost, whose fork prefix ConvertOutpost makes and adds the outpost WorldObject and marks the record chosen on
+        // the clicking PC only. In MP a click on such a purchase dialog (context fromSettlementBuy and a committed record on its
+        // tile, the same test as ConvertOutpost) sends one SyncedChooseOutpost(tile, def) and does nothing here. The command runs
+        // FinalizeOutpost on every PC, on this PC's open dialog for the tile or else on a new one built as Reopen builds it, and
+        // closes the dialogs for that tile. The record is found by its saved tile, so every PC finds the same one. First command
+        // wins: a later command or click for a chosen record does nothing. Other dialogs (no purchase context) are unchanged.
+        private static ConstructorInfo outpostDialogCtor;
+        private static FieldInfo outpostDialogTile, outpostDialogContext, outpostContextFromBuy, outpostTierField;
+        private static MethodInfo outpostFinalize, outpostPopulationCurrent, outpostRecordAt;
+        private static FieldInfo recordChosen, recordName, recordTier, recordPeople;
+        private static Type outpostContextType;
+
+        internal static void PatchOutpostChoice()
+        {
+            if (LabOff.Row(479))
+            {
+                Log.Message("[MP Compat] Hegemony UI: row 479 switched off by the lab, WD2 purchased outpost choice not synced");
+                return;
+            }
+
+            var conversion = AccessTools.TypeByName(Ns + "WorldDominationConversion");
+            var population = AccessTools.TypeByName(Ns + "Wd2ConversionPopulation");
+            var record = AccessTools.TypeByName(Ns + "Wd2ConvertedPopulation");
+            if (conversion == null || population == null || record == null)
+            {
+                Log.Error("[MP Compat] Hegemony UI: row 479: WorldDominationConversion/Wd2ConversionPopulation not found, the WD2 purchased outpost choice can desync");
+                return;
+            }
+
+            var available = AccessTools.PropertyGetter(conversion, "Available");
+            if (available == null || !(bool)available.Invoke(null, null))
+            {
+                Log.Message("[MP Compat] Hegemony UI: row 479: WD2 settlement purchase conversion not active, nothing to sync");
+                return;
+            }
+
+            outpostDialogCtor = AccessTools.Field(conversion, "selection")?.GetValue(null) as ConstructorInfo;
+            outpostDialogTile = AccessTools.Field(conversion, "selectionTile")?.GetValue(null) as FieldInfo;
+            outpostDialogContext = AccessTools.Field(conversion, "context")?.GetValue(null) as FieldInfo;
+            outpostContextFromBuy = AccessTools.Field(conversion, "fromBuy")?.GetValue(null) as FieldInfo;
+            outpostTierField = AccessTools.Field(conversion, "tier")?.GetValue(null) as FieldInfo;
+            outpostContextType = outpostDialogContext?.FieldType;
+            outpostFinalize = outpostDialogCtor == null ? null
+                : AccessTools.DeclaredMethod(outpostDialogCtor.DeclaringType, "FinalizeOutpost", [typeof(WorldObjectDef)]);
+            outpostPopulationCurrent = AccessTools.PropertyGetter(population, "Current");
+            outpostRecordAt = AccessTools.DeclaredMethod(population, "At", [typeof(int)]);
+            recordChosen = AccessTools.DeclaredField(record, "chosen");
+            recordName = AccessTools.DeclaredField(record, "name");
+            recordTier = AccessTools.DeclaredField(record, "tier");
+            recordPeople = AccessTools.DeclaredField(record, "people");
+            if (outpostDialogCtor == null || outpostDialogTile == null || outpostDialogContext == null || outpostContextFromBuy == null
+                || outpostTierField == null || outpostFinalize == null || outpostPopulationCurrent == null || outpostRecordAt == null
+                || recordChosen == null || recordName == null || recordTier == null || recordPeople == null)
+            {
+                Log.Error("[MP Compat] Hegemony UI: row 479: Dialog_OutpostSelection.FinalizeOutpost or a WD2 purchase member not found, the WD2 purchased outpost choice can desync");
+                return;
+            }
+
+            try
+            {
+                MP.RegisterSyncMethod(typeof(HegemonyUi), nameof(SyncedChooseOutpost));
+                MpCompat.harmony.Patch(outpostFinalize,
+                    prefix: new HarmonyMethod(typeof(HegemonyUi), nameof(PreFinalizeOutpost)) { priority = Priority.First });
+            }
+            catch (Exception e)
+            {
+                Log.Error($"[MP Compat] Hegemony UI: row 479: patching FinalizeOutpost failed, the WD2 purchased outpost choice can desync. {e}");
+                return;
+            }
+
+            Log.Message("[MP Compat] Hegemony UI: row 479: WD2 purchased outpost choice synced");
+        }
+
+        private static object OutpostRecord(int tile)
+        {
+            var population = outpostPopulationCurrent.Invoke(null, null);
+            return population == null ? null : outpostRecordAt.Invoke(population, [tile]);
+        }
+
+        private static bool IsPurchaseChoice(object dialog, out int tile, out object record)
+        {
+            tile = -1;
+            record = null;
+            var context = dialog == null ? null : outpostDialogContext.GetValue(dialog);
+            if (context == null || !(bool)outpostContextFromBuy.GetValue(context))
+                return false;
+            tile = (int)outpostDialogTile.GetValue(dialog);
+            record = OutpostRecord(tile);
+            return record != null;
+        }
+
+        private static bool PreFinalizeOutpost(object __instance, WorldObjectDef __0)
+        {
+            if (!MP.IsInMultiplayer || MP.IsExecutingSyncCommand || !IsPurchaseChoice(__instance, out var tile, out var record))
+                return true;
+
+            if (__0 != null && !(bool)recordChosen.GetValue(record))
+                SyncedChooseOutpost(tile, __0);
+            return false;
+        }
+
+        private static void SyncedChooseOutpost(int tile, WorldObjectDef def)
+        {
+            var record = def == null ? null : OutpostRecord(tile);
+            if (record == null || (bool)recordChosen.GetValue(record))
+                return;
+
+            var openDialogs = new List<Window>();
+            var windows = Current.Root?.uiRoot?.windows?.Windows;
+            if (windows != null)
+            {
+                foreach (var window in windows)
+                {
+                    if (window.GetType() == outpostDialogCtor.DeclaringType && IsPurchaseChoice(window, out var openTile, out _) && openTile == tile)
+                        openDialogs.Add(window);
+                }
+            }
+
+            var dialog = openDialogs.Count > 0 ? openDialogs[0] : NewOutpostDialog(record);
+            if (dialog != null)
+                outpostFinalize.Invoke(dialog, [def]);
+
+            foreach (var window in openDialogs)
+            {
+                if (window.IsOpen)
+                    window.Close(false);
+            }
+        }
+
+        // As WorldDominationConversion.Reopen builds it, without adding it to the window stack.
+        private static object NewOutpostDialog(object record)
+        {
+            var name = (string)recordName.GetValue(record);
+            var tier = Enum.ToObject(outpostTierField.FieldType, (int)recordTier.GetValue(record));
+            var people = recordPeople.GetValue(record);
+            var faction = people == null ? null : AccessTools.Field(people.GetType(), "originalFaction")?.GetValue(people);
+            var tile = (int)AccessTools.Field(record.GetType(), "tile").GetValue(record);
+            var context = Activator.CreateInstance(outpostContextType, [tile, name, -1, tier, faction, -1, true]);
+            return outpostDialogCtor.Invoke([tile, name, -1, tier, context, null, false, null, null, false]);
         }
     }
 }
