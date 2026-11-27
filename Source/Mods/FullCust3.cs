@@ -360,35 +360,45 @@ namespace Multiplayer.Compat
         static bool BeginPrefix(Caravan caravan, Settlement settlement, IEnumerable<Pawn> crew, IEnumerable alms, object breakdown)
         {
             if (!MP.IsInMultiplayer || MP.IsExecutingSyncCommand) return true;
-            var src = new List<Thing>(); var defs = new List<ThingDef>(); var stuffs = new List<ThingDef>();
-            var q = new List<int>(); var hp = new List<int>(); var cnt = new List<int>(); var mv = new List<float>(); var mass = new List<float>();
+            var src = new List<Thing>(); var defs = new List<ThingDef>(); var stuffs = new List<string>();
+            var ints = new List<int>(); var floats = new List<float>();
+            float quality = (float)AccessTools.PropertyGetter(breakdownT, "TotalQuality").Invoke(breakdown, null);
+            floats.Add(quality);
             foreach (var a in alms)
             {
-                src.Add((Thing)af[0].GetValue(a)); defs.Add((ThingDef)af[1].GetValue(a)); stuffs.Add((ThingDef)af[2].GetValue(a));
+                var st = (Thing)af[0].GetValue(a);
+                int si = -1;
+                if (st != null) { si = src.Count; src.Add(st); }
+                defs.Add((ThingDef)af[1].GetValue(a));
+                stuffs.Add(((ThingDef)af[2].GetValue(a))?.defName ?? "");
                 var qv = (QualityCategory?)af[3].GetValue(a);
-                q.Add(qv.HasValue ? (int)qv.Value : -1);
-                hp.Add((int)af[4].GetValue(a)); cnt.Add((int)af[5].GetValue(a)); mv.Add((float)af[6].GetValue(a)); mass.Add((float)af[7].GetValue(a));
+                ints.Add(qv.HasValue ? (int)qv.Value : -1); ints.Add((int)af[4].GetValue(a)); ints.Add((int)af[5].GetValue(a)); ints.Add(si);
+                floats.Add((float)af[6].GetValue(a)); floats.Add((float)af[7].GetValue(a));
             }
-            float quality = (float)AccessTools.PropertyGetter(breakdownT, "TotalQuality").Invoke(breakdown, null);
-            SyncedBegin(caravan, settlement, crew.ToList(), (Pawn)bdNeg.GetValue(breakdown), quality, src, defs, stuffs, q, hp, cnt, mv, mass);
+            SyncedBegin(caravan, settlement, crew.ToList(), (Pawn)bdNeg.GetValue(breakdown), src, defs, stuffs, ints, floats);
             return false;
         }
 
+        // 9 parameters on purpose: HarmonyLib MethodInvoker.GetHandler (used by MP's SyncMethod) throws ArgumentException "opcode" at 13 parameters (D2 cu3).
+        // Per alms request: defs[i], stuffs[i] (defName or ""), ints[4i..4i+3] = quality(-1 none), hitPoints, count, index into src (-1 none), floats[1+2i], floats[2+2i] = value, mass; floats[0] = base quality.
         [SyncMethod]
-        static void SyncedBegin(Caravan caravan, Settlement settlement, List<Pawn> crew, Pawn negotiator, float quality, List<Thing> src, List<ThingDef> defs, List<ThingDef> stuffs,
-            List<int> q, List<int> hp, List<int> cnt, List<float> mv, List<float> mass)
+        static void SyncedBegin(Caravan caravan, Settlement settlement, List<Pawn> crew, Pawn negotiator, List<Thing> src, List<ThingDef> defs, List<string> stuffs,
+            List<int> ints, List<float> floats)
         {
             var list = (IList)Activator.CreateInstance(typeof(List<>).MakeGenericType(almsT));
             for (int i = 0; i < defs.Count; i++)
             {
                 var a = Activator.CreateInstance(almsT);
-                af[0].SetValue(a, src[i]); af[1].SetValue(a, defs[i]); af[2].SetValue(a, stuffs[i]);
-                af[3].SetValue(a, q[i] < 0 ? (QualityCategory?)null : (QualityCategory)q[i]);
-                af[4].SetValue(a, hp[i]); af[5].SetValue(a, cnt[i]); af[6].SetValue(a, mv[i]); af[7].SetValue(a, mass[i]);
+                int si = ints[4 * i + 3];
+                af[0].SetValue(a, si < 0 ? null : src[si]); af[1].SetValue(a, defs[i]);
+                af[2].SetValue(a, stuffs[i].Length == 0 ? null : DefDatabase<ThingDef>.GetNamedSilentFail(stuffs[i]));
+                int qi = ints[4 * i];
+                af[3].SetValue(a, qi < 0 ? (QualityCategory?)null : (QualityCategory)qi);
+                af[4].SetValue(a, ints[4 * i + 1]); af[5].SetValue(a, ints[4 * i + 2]); af[6].SetValue(a, floats[1 + 2 * i]); af[7].SetValue(a, floats[2 + 2 * i]);
                 list.Add(a);
             }
             var bd = Activator.CreateInstance(breakdownT);
-            bdBase.SetValue(bd, quality);
+            bdBase.SetValue(bd, floats[0]);
             bdNeg.SetValue(bd, negotiator);
             var inst = AccessTools.PropertyGetter(compT, "Instance").Invoke(null, null);
             beginM.Invoke(inst, new object[] { caravan, settlement, crew, list, bd });
