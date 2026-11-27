@@ -135,7 +135,9 @@ namespace Multiplayer.Compat
         private static readonly Dictionary<string, Window> windows = new Dictionary<string, Window>();
         private static List<SwDlg> dlgs = new List<SwDlg>();
         private static Game dlgGame;
-        private static int makeMode;   // 0 tick (the real dialog), 1 UI show, 2 capture for a synced choice
+        // B3: record ids whose choice was clicked on this PC and not yet resolved; PostUiRoot does not reopen those (local, UI only)
+        private static readonly HashSet<string> clicked = new HashSet<string>();
+        private static int makeMode;  // 0 tick (the real dialog), 1 UI show, 2 capture for a synced choice
         private static List<DiaOption> captured;
         private static FieldInfo curNodeField;
         private static MethodInfo miMake;
@@ -163,6 +165,8 @@ namespace Multiplayer.Compat
 
         private static void PostExpose()
         {
+            // B5: a record whose warrant or target is gone (world pawn vanished) is dropped: it would throw on save and in the UI
+            if (Scribe.mode == LoadSaveMode.Saving || Scribe.mode == LoadSaveMode.PostLoadInit) PruneDead();
             var list = Dlgs();
             if (Scribe.mode == LoadSaveMode.Saving && list.Count == 0) return;
             var l = Scribe.mode == LoadSaveMode.Saving ? list : null;
@@ -170,23 +174,29 @@ namespace Multiplayer.Compat
             if (Scribe.mode == LoadSaveMode.LoadingVars) { dlgs = l ?? new List<SwDlg>(); windows.Clear(); }
         }
 
+        private static void PruneDead()
+        {
+            if (dlgs == null) return;
+            dlgs.RemoveAll(d => d == null || d.warrant == null || Fld(d.warrant, "thing") == null);
+        }
+
         private static void PreMake(object __0, out MakeCtx __state)
         {
             __state = null;
             if (!MP.IsInMultiplayer || __0 == null) return;
             var c = new MakeCtx();
+            __state = c;   // B4: set before any push, so FinMake always sees the context
             var f = PlayerOf(__0);
-            if (f != null && f != Faction.OfPlayer) { FullCust3.Push(null, f); c.pushed = f; }
+            if (f != null && f != Faction.OfPlayer) { FullCust3.PushMaps(f); c.pushed = f; }
             Rand.PushState(GenText.StableStringHash((string)Fld(__0, "loadID") ?? "") ^ 1127);
             c.rand = true;
-            __state = c;
         }
 
         private static void FinMake(MakeCtx __state)
         {
             if (__state == null) return;
-            if (__state.rand) Rand.PopState();
-            if (__state.pushed != null) FullCust3.Pop(null);
+            try { if (__state.rand) Rand.PopState(); }
+            finally { if (__state.pushed != null) FullCust3.PopMaps(); }
         }
 
         private static void PostMakeDialog(object __0)
@@ -203,7 +213,7 @@ namespace Multiplayer.Compat
                 for (int i = 0; i < node.options.Count; i++)
                 {
                     int idx = i;
-                    if (node.options[idx].action != null) node.options[idx].action = () => SyncedChoice(id, idx);
+                    if (node.options[idx].action != null) node.options[idx].action = () => { clicked.Add(id); SyncedChoice(id, idx); };
                 }
                 windows[id] = win;
                 return;
@@ -227,12 +237,16 @@ namespace Multiplayer.Compat
         {
             if (!MP.IsInMultiplayer || dlgs == null || dlgs.Count == 0 || Current.ProgramState != ProgramState.Playing) return;
             if (UnityEngine.Event.current == null || UnityEngine.Event.current.type != UnityEngine.EventType.Repaint || UnityEngine.Time.frameCount % 20 != 0) return;
+            // B1: only in the interface (not in a long event, not reloading): else UniqueIds hands out real ids on this PC only
+            if (!FullCust3.InInterface()) return;
             var local = LocalRealPlayer();
             if (local == null) return;
+            if (clicked.Count > 0) clicked.RemoveWhere(cid => !dlgs.Any(d => d != null && d.LoadID == cid));
             foreach (var st in Dlgs().ToList())
             {
                 string id = st.LoadID;
                 if (id == null || PlayerOf(st.warrant) != local) continue;
+                if (clicked.Contains(id)) continue;
                 if (windows.TryGetValue(id, out var w) && Find.WindowStack.IsOpen(w)) continue;
                 makeMode = 1;
                 try { WithArchiveTrim(() => miMake.Invoke(fInstance.GetValue(null), new object[] { st.warrant })); }
@@ -246,8 +260,8 @@ namespace Multiplayer.Compat
             var st = Dlgs().FirstOrDefault(d => d.LoadID == loadID);
             if (st == null) return;
             var f = PlayerOf(st.warrant);
-            bool push = f != null && f != Faction.OfPlayer;
-            if (push) FullCust3.Push(null, f);
+            bool push = false;
+            if (f != null && f != Faction.OfPlayer) { FullCust3.PushMaps(f); push = true; }
             try
             {
                 makeMode = 2; captured = null;
@@ -256,12 +270,17 @@ namespace Multiplayer.Compat
                 var opts = captured; captured = null;
                 if (opts == null || index < 0 || index >= opts.Count) return;
                 var opt = opts[index];
-                if (opt.disabled) return;   // e.g. not enough silver: same answer on every PC, the record stays
+                if (opt.disabled) { clicked.Remove(loadID); return; }   // e.g. not enough silver: same answer on every PC, the record stays
                 Dlgs().Remove(st);
-                if (windows.TryGetValue(loadID, out var w)) { windows.Remove(loadID); if (Find.WindowStack.IsOpen(w)) w.Close(); }
+                // B3: no close sound (it would run on one PC only, inside the command)
+                if (windows.TryGetValue(loadID, out var w)) { windows.Remove(loadID); if (Find.WindowStack.IsOpen(w)) Find.WindowStack.TryRemove(w, false); }
                 opt.action?.Invoke();
             }
-            finally { if (push) FullCust3.Pop(null); }
+            finally
+            {
+                if (push) FullCust3.PopMaps();
+                if (Dlgs().Contains(st)) clicked.Remove(loadID);
+            }
         }
     }
 
