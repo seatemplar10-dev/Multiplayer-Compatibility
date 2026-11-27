@@ -186,7 +186,9 @@ namespace Multiplayer.Compat
                 var local = LocalValues();
                 if (local == null || synced.Matches(local))
                     return __exception;
-                SyncedSet((bool)local[0], (bool)local[1], (bool)local[2], (bool)local[3], (bool)local[4], (int)local[5],
+                // 9 parameters at most: Harmony MethodInvoker.GetHandler throws ArgumentException "opcode" at 10+ (D2 cu1/cu3).
+                int flags = ((bool)local[0] ? 1 : 0) | ((bool)local[1] ? 2 : 0) | ((bool)local[2] ? 4 : 0) | ((bool)local[3] ? 8 : 0) | ((bool)local[4] ? 16 : 0);
+                SyncedSet(flags, (int)local[5],
                     (float)local[6], (float)local[7], (float)local[8], (float)local[9], (float)local[10], (float)local[11], (float)local[12]);
             }
             catch (Exception e)
@@ -203,9 +205,11 @@ namespace Multiplayer.Compat
 
         // Runs on every PC from the same arguments.
         [MethodImpl(MethodImplOptions.NoInlining)]
-        internal static void SyncedSet(bool enableMod, bool onlyColonists, bool refillInfinite, bool autoRefill, bool scale, int baseline,
+        internal static void SyncedSet(int flags, int baseline,
             float animal, float neolithic, float medieval, float industrial, float spacer, float ultra, float archotech)
         {
+            bool enableMod = (flags & 1) != 0, onlyColonists = (flags & 2) != 0, refillInfinite = (flags & 4) != 0,
+                autoRefill = (flags & 8) != 0, scale = (flags & 16) != 0;
             var synced = ProgressionAmmunitionSyncedSettings.Instance;
             if (synced == null)
                 return;
