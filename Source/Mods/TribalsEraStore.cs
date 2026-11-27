@@ -488,12 +488,18 @@ namespace Multiplayer.Compat
             {
                 if (multifactionField == null)
                 {
-                    multifactionField = AccessTools.Field("Multiplayer.Client.MultiplayerGameComp:multifaction");
+                    // 27 Nov field fault: the class is Multiplayer.Client.Comp.MultiplayerGameComp in MP 1.7 (the old name found nothing, so this was always false)
+                    multifactionField = AccessTools.Field("Multiplayer.Client.Comp.MultiplayerGameComp:multifaction")
+                                        ?? AccessTools.Field("Multiplayer.Client.MultiplayerGameComp:multifaction");
                     gameCompGetter = (Func<object>)Delegate.CreateDelegate(typeof(Func<object>), AccessTools.PropertyGetter("Multiplayer.Client.Multiplayer:GameComp"));
                 }
                 return (bool)multifactionField.GetValue(gameCompGetter());
             }
-            catch (Exception) { return false; }
+            catch (Exception e)
+            {
+                Log.WarningOnce("[MPCompat - VFE Tribals] row 523: the multifaction flag is not readable, one era per game as before: " + e.GetType().Name, 52352300);
+                return false;
+            }
         }
 
         static Faction DefaultSpectator()

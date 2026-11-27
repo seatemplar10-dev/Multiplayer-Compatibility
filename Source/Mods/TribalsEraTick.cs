@@ -90,10 +90,15 @@ namespace Multiplayer.Compat
 
             if (!LabOff.Row(529))
             {
-                var init = AccessTools.DeclaredMethod("Multiplayer.Client.FactionCreator:InitNewGame");
-                if (init != null) harmony.Patch(init, postfix: new HarmonyMethod(typeof(TribalsEraTick), nameof(NewFactionPostfix)));
+                // 27 Nov field fault: the class is Multiplayer.Client.Factions.FactionCreator in MP 1.7 (the old name found nothing)
+                var init = AccessTools.DeclaredMethod("Multiplayer.Client.Factions.FactionCreator:InitNewGame")
+                           ?? AccessTools.DeclaredMethod("Multiplayer.Client.FactionCreator:InitNewGame");
+                if (init != null)
+                {
+                    harmony.Patch(init, postfix: new HarmonyMethod(typeof(TribalsEraTick), nameof(NewFactionPostfix)));
+                    Log.Message(logPrefix + "row 529: a new faction starts at its pristine era with its animal research and obligations");
+                }
                 else Log.Warning(logPrefix + "row 529: FactionCreator.InitNewGame not found, a new faction gets no animal research from this module");
-                Log.Message(logPrefix + "row 529: a new faction starts at its pristine era with its animal research and obligations");
             }
         }
 
@@ -248,7 +253,10 @@ namespace Multiplayer.Compat
         static int DefaultClock()
         {
             var w = AccessTools.Method("Multiplayer.Client.Multiplayer:get_AsyncWorldTime")?.Invoke(null, null);
-            var f = w == null ? null : AccessTools.Field("Multiplayer.Client.AsyncWorldTimeComp:worldTicks");
+            // 27 Nov field fault: the class is Multiplayer.Client.AsyncTime.AsyncWorldTimeComp in MP 1.7 (the old name found nothing, so TicksGame was used)
+            var f = w == null ? null : (AccessTools.Field("Multiplayer.Client.AsyncTime.AsyncWorldTimeComp:worldTicks")
+                                        ?? AccessTools.Field("Multiplayer.Client.AsyncWorldTimeComp:worldTicks"));
+            if (w != null && f == null) LogOnce("row 528: AsyncWorldTimeComp.worldTicks not found, the large fire counter uses TicksGame");
             return f == null ? Find.TickManager.TicksGame : (int)f.GetValue(w);
         }
 
