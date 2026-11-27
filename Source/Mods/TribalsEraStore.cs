@@ -63,6 +63,7 @@ namespace Multiplayer.Compat
         /// <summary>Known-false switch for the D2 only: mirror just the new faction's def (the Twin's "weak form"). Never set in the game.</summary>
         internal static bool testMirrorNewOnly;
         internal static int swapCount;
+        public static bool HooksInstalled => hooksInstalled;
 
         static FieldInfo fPoints, fTech, fEthos, fEthosLocked, fCorner, fFireTicks, fFireUpdate, fLastResearch, fFinished;
         static bool fieldsBound, hooksInstalled, errorLogged;
@@ -105,6 +106,7 @@ namespace Multiplayer.Compat
             hooksInstalled = true;
             Log.Message(logPrefix + "row 523: era, points, cornerstones and ethos are kept per player faction in multifaction");
             InstallSave(harmony, compType);
+            TribalsEraTick.Install(harmony, compType);   // rows 525-529
         }
 
         // ================= row 524: save, load, old saves, joiners, SP host =================

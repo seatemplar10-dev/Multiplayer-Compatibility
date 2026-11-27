@@ -173,8 +173,17 @@ namespace Multiplayer.Compat
             return points > 0 && !cornerstones.Contains(def);
         }
 
+        internal static bool ShouldRefreshWindows()
+        {
+            if (LabOff.Row(529) || !MP.IsInMultiplayer || !TribalsEraStore.IsActive()) return true;
+            var local = TribalsEraStore.RealPlayer();
+            return local == null || Faction.OfPlayer == local;
+        }
+
         private static void PostAddCornerstone(object instance, object[] args)
         {
+            // Row 529: the command runs on every PC under the acting faction; only the PC whose local faction acted has a window to refill
+            if (!ShouldRefreshWindows()) return;
             // Ensure the list of cornerstones the player sees is up-to-date after picking one
             foreach (var window in Find.WindowStack.Windows)
             {
