@@ -1566,7 +1566,7 @@ namespace Multiplayer.Compat
             if (sync.isWriting)
                 sync.Write(localRoadType);
             else
-                Designator_AreaRoad.roadType = sync.Read<Designator_AreaRoad.RoadType>();
+                roadTypeRef() = sync.Read<Designator_AreaRoad.RoadType>();
         }
 
         #endregion
@@ -2228,9 +2228,15 @@ namespace Multiplayer.Compat
 
         #region Designator
 
-        [MpCompatPrefix(typeof(Designator_AreaRoad), nameof(Designator_AreaRoad.ProcessInput), 1)]
-        private static void StoreNewLocalRoadType(Designator_AreaRoad.RoadType ___roadType)
-            => localRoadType = ___roadType;
+        // roadType is a private static of Designator_AreaRoad now (no longer a closure field), so access it by reflection.
+        private static readonly AccessTools.FieldRef<Designator_AreaRoad.RoadType> roadTypeRef =
+            AccessTools.StaticFieldRefAccess<Designator_AreaRoad.RoadType>(AccessTools.Field(typeof(Designator_AreaRoad), "roadType"));
+
+        // Lambda 1 of ProcessInput (in local function RoadTypeOption) does `roadType = type; base.ProcessInput(ev);`,
+        // so the postfix sees the road type the player just picked.
+        [MpCompatPostfix(typeof(Designator_AreaRoad), nameof(Designator_AreaRoad.ProcessInput), 1)]
+        private static void StoreNewLocalRoadType()
+            => localRoadType = roadTypeRef();
 
         [MpCompatPrefix(typeof(Designator_AreaRoad), nameof(Designator_AreaRoad.DesignateSingleCell))]
         [MpCompatPrefix(typeof(Designator_AreaRoad), nameof(Designator_AreaRoad.CanDesignateCell))]
@@ -2239,7 +2245,7 @@ namespace Multiplayer.Compat
             // If in MP and not executing synced commands, restore the current player's road type.
             // It may become overwritten by a different value when syncing.
             if (MP.IsInMultiplayer && !MP.IsExecutingSyncCommand)
-                Designator_AreaRoad.roadType = localRoadType;
+                roadTypeRef() = localRoadType;
         }
 
         #endregion

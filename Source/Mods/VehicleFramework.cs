@@ -125,7 +125,7 @@ namespace Multiplayer.Compat
             var regionGridType = FindType("Vehicles.VehicleRegionGrid");
             var regionType = FindType("Vehicles.VehicleRegion");
             var updaterType = FindType("Vehicles.VehicleRegionAndRoomUpdater");
-            var taskManagerType = FindType("SmashTools.TaskManager");
+            var taskManagerType = FindType("CoreLib.Performance.TaskManager");
 
             // 1. No dedicated thread work in MP.
             var threadAvailable = AccessTools.DeclaredPropertyGetter(pathingSystemType, "ThreadAvailable")
@@ -139,7 +139,7 @@ namespace Multiplayer.Compat
 
             // 3. Region list in a fixed order.
             regionUpdaterField = AccessTools.FieldRefAccess<object>(regionGridType, "regionUpdater");
-            mappingField = AccessTools.FieldRefAccess<object>(regionGridType, "mapping");
+            mappingField = AccessTools.FieldRefAccess<object>(regionGridType, "map");
             getRegionAt = MethodInvoker.GetHandler(GetDeclaredMethod(regionGridType, "GetRegionAt", [typeof(int)]));
             updaterEnabled = MethodInvoker.GetHandler(AccessTools.DeclaredPropertyGetter(updaterType, "Enabled")
                                                       ?? throw new MissingMethodException(updaterType.FullName, "get_Enabled"));
@@ -510,7 +510,7 @@ namespace Multiplayer.Compat
             if (updater == null || !(bool)updaterEnabled(updater))
                 return false;
             var list = (IList)regions;
-            var map = ((MapComponent)mappingField(__instance)).map;
+            var map = (Map)mappingField(__instance);
             var seen = new HashSet<object>();
             var args = new object[1];
             var cells = map.cellIndices.NumGridCells;
