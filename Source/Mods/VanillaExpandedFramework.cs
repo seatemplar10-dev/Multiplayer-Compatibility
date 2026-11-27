@@ -247,6 +247,12 @@ namespace Multiplayer.Compat
 
         private static void PatchWeapons()
         {
+            if (!LabOff.Row(498)) // row 498: camera-gated Rand (GenView.ShouldSpawnMotesAt) differs per PC
+            {
+                PatchingUtilities.PatchPushPopRand("VEF.Weapons.Projectile_VisualEffectComp:CompTickInterval");
+                PatchingUtilities.PatchPushPopRand("VEF.Weapons.ExpandableProjectile:StopMotion");
+                Log.Message("[MPCompat - Vanilla Expanded Framework] row 498: 2 camera-gated Rand methods push/pop");
+            }
             PatchingUtilities.PatchPushPopRand([
                 // Musket guns, etc
                 "VEF.Weapons.Verb_ShootWithSmoke:TryCastShot",

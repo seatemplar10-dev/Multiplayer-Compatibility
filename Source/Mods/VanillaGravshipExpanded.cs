@@ -24,7 +24,15 @@ namespace Multiplayer.Compat
     {
         private const string LogPrefix = "[MPCompat - Vanilla Gravship Expanded] ";
 
-        public VanillaGravshipExpanded(ModContentPack mod) => PatchMapDecision();
+        public VanillaGravshipExpanded(ModContentPack mod)
+        {
+            PatchMapDecision();
+            if (!LabOff.Row(498)) // row 498: camera-gated Rand (GenView.ShouldSpawnMotesAt) differs per PC
+            {
+                PatchingUtilities.PatchPushPopRand("VanillaGravshipExpanded.CompGravMaintainable:EmissionTick");
+                Log.Message("[MPCompat - Vanilla Gravship Expanded] row 498: 1 camera-gated Rand methods push/pop");
+            }
+        }
 
         private sealed class DecisionEntry
         {

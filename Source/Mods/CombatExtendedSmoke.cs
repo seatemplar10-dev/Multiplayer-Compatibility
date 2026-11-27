@@ -28,6 +28,11 @@ namespace Multiplayer.Compat
 
         public CombatExtendedSmoke(ModContentPack mod)
         {
+            if (!LabOff.Row(498)) // row 498: camera-gated Rand (GenView.ShouldSpawnMotesAt) differs per PC
+            {
+                PatchingUtilities.PatchPushPopRand("ProjectileImpactFX.ImpactFleckThrower:ThrowFleck");
+                Log.Message("[MPCompat - Combat Extended] row 498: 1 camera-gated Rand methods push/pop");
+            }
             // fork row 32: fix is inside the CE fork dll (sequential BlackSmokeTracker tick)
             if (CombatExtendedFork.Has(32)) return;
             var tracker = AccessTools.TypeByName("CombatExtended.BlackSmokeTracker");

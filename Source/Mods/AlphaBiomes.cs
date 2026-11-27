@@ -15,6 +15,11 @@ namespace Multiplayer.Compat
 
         public AlphaBiomes(ModContentPack mod)
         {
+            if (!LabOff.Row(498)) // row 498: camera-gated Rand (GenView.ShouldSpawnMotesAt) differs per PC
+            {
+                PatchingUtilities.PatchPushPopRand("AlphaBiomes.MagmaSprayer:ThrowAirPuffUp");
+                Log.Message("[MPCompat - Alpha Biomes] row 498: 1 camera-gated Rand methods push/pop");
+            }
             var type = AccessTools.TypeByName("AlphaBiomes.Command_SetStoneType");
 
             buildingField = AccessTools.FieldRefAccess<Building>(type, "building");
