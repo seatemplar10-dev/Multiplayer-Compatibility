@@ -117,7 +117,7 @@ namespace Multiplayer.Compat
     /// start a raid or spawn visitors on the clicking PC only. After the original builds the dialog, every option action is replaced by
     /// a call to a synced method that runs the original action on every PC and closes the dialog elsewhere.</summary>
     [MpCompatFor("pb3n.simplewarrants")]
-    public class SimpleWarrantsFull1127
+    public partial class SimpleWarrantsFull1127
     {
         private static readonly Dictionary<int, Action[]> pending = new Dictionary<int, Action[]>();
         private static readonly Dictionary<int, Window> windows = new Dictionary<int, Window>();
@@ -132,9 +132,10 @@ namespace Multiplayer.Compat
             MpCompat.harmony.Patch(AccessTools.DeclaredMethod(type, "MakeWarrantDialog"),
                 postfix: new HarmonyMethod(typeof(SimpleWarrantsFull1127), nameof(PostMakeDialog)));
             Log.Message("[MPCompat - FULL1127 L1] Simple Warrants: MakeWarrantDialog option actions synced");
+            RegisterCu4(type);
         }
 
-        private static void PostMakeDialog()
+        private static void PostMakeDialog(object __0)
         {
             if (!MP.IsInMultiplayer) return;
             var win = Find.WindowStack.Windows.LastOrDefault(w => w is Dialog_NodeTree);
@@ -144,7 +145,12 @@ namespace Multiplayer.Compat
             int id = nextId++;
             var originals = node.options.Select(o => o.action).ToArray();
             pending[id] = originals;
-            windows[id] = win;
+            // The dialog belongs to the warrant owner (issuer). Other PCs keep the pending actions (so the synced choice still finds
+            // them) but never show the dialog. Opening or closing a window is UI only.
+            var owner = OwnerOf(__0);
+            var local = LocalRealPlayer();
+            if (owner != null && local != null && owner != local) { win.Close(false); }
+            else windows[id] = win;
             for (int i = 0; i < node.options.Count; i++)
             {
                 int idx = i;
