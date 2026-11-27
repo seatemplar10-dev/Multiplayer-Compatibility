@@ -133,6 +133,7 @@ namespace Multiplayer.Compat
             PatchInterfaceReadOnly();
             PatchGeneSaveHook();
             PatchSettlePages();
+            PatchAutoPregnancyToggle();
             // lab switch row 420 (17 Nov): off = old behaviour
             if (!LabOff.Row(420))
                 PatchPagePawnTick();
@@ -141,6 +142,32 @@ namespace Multiplayer.Compat
             if (!ForkDetect.HasRow("Big and Small", "BigAndSmall.SeaForkRows", "422"))
                 PatchGeneCacheGuard();
         }
+
+        #region Auto Pregnancy gizmo toggle (row 494)
+
+        // FIXES row 494 (27 Nov 2026). BigAndSmall.AutoPregnancy (a TickdownGene) yields a Command_Action whose action is
+        // ToggleAutoPregnancy (AutoPregnancy.cs:129), which runs autoPregDisabled = !autoPregDisabled (:119). The field is saved (:136)
+        // and read by TickEvent (:42). Nothing synced it, so a click flipped it on the clicking PC only. TickdownGene has no gizmo
+        // and AutoPregnancy has no other one. Fix: the method is a registered sync method (Gene target, like
+        // BMT_PollutedLands.Gene_AddHediffWithInterval:Pain). LabOff row 494 = old behaviour.
+        private static void PatchAutoPregnancyToggle()
+        {
+            if (LabOff.Row(494))
+            {
+                Log.Message($"{LogPrefix}row 494: Auto Pregnancy gizmo toggle sync OFF (lab switch)");
+                return;
+            }
+            var method = AccessTools.DeclaredMethod("BigAndSmall.AutoPregnancy:ToggleAutoPregnancy");
+            if (method == null)
+            {
+                Log.Warning($"{LogPrefix}FIXES row 494: AutoPregnancy.ToggleAutoPregnancy not found, not synced");
+                return;
+            }
+            MP.RegisterSyncMethod(method);
+            Log.Message($"{LogPrefix}row 494: Auto Pregnancy gizmo toggle synced");
+        }
+
+        #endregion
 
         #region Gene cache thread guard (row 422)
 
