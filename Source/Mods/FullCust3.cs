@@ -20,11 +20,19 @@ namespace Multiplayer.Compat
         static MethodInfo pushM, popM;
 
         /// <summary>Lowest loadID player faction that is not the MP spectator; null outside multiplayer or when none.</summary>
+        public static Faction LowestRealPlayerIfSpectator(Faction f) => IsSpectator(f) ? LowestRealPlayer() : f;
+
+        static Faction Spectator()
+        {
+            try { return Traverse.CreateWithType("Multiplayer.Client.Multiplayer").Property("WorldComp").Field("spectatorFaction").GetValue<Faction>(); } catch { return null; }
+        }
+
+        public static bool IsSpectator(Faction f) => f != null && f == Spectator();
+
         public static Faction LowestRealPlayer()
         {
             if (!MP.IsInMultiplayer) return null;
-            Faction spectator = null;
-            try { spectator = Traverse.CreateWithType("Multiplayer.Client.Multiplayer").Property("WorldComp").Field("spectatorFaction").GetValue<Faction>(); } catch { }
+            Faction spectator = Spectator();
             Faction best = null;
             foreach (var f in Find.FactionManager.AllFactionsListForReading)
                 if (f.IsPlayer && f != spectator && (best == null || f.loadID < best.loadID)) best = f;
@@ -435,5 +443,44 @@ namespace Multiplayer.Compat
     class FullPanhandling
     {
         public FullPanhandling(ModContentPack mod) => FullPanhandlingCu3.Init();
+    }
+}
+
+namespace Multiplayer.Compat
+{
+    /// <summary>Semi Random Research (cruesoe.semirandompfork.continued): ResearchTracker is one WorldComponent with one shared offer list, and GetResearchableProjects
+    /// (rolled from the world tick, under the spectator) reads Faction.OfPlayer.def.techLevel twice (plus a lambda capture). Each read becomes TechFaction():
+    /// Faction.OfPlayer when it is a real player, else the lowest-loadID non-spectator player faction (same on every PC, no Rand). The shared offer list means one
+    /// faction's tech level decides for all; UI buttons of MainTabWindow_NextResearch are NOT synced.</summary>
+    [MpCompatFor("cruesoe.semirandompfork.continued")]
+    class FullSemiRandomResearch
+    {
+        static int swapped = -1;
+
+        public FullSemiRandomResearch(ModContentPack mod)
+        {
+            var m = AccessTools.Method("CM_Semi_Random_Research.ResearchTracker:GetResearchableProjects");
+            if (m == null) { Log.Error(FullCust3.Log3 + "Semi Random Research: GetResearchableProjects not found"); return; }
+            MpCompat.harmony.Patch(m, transpiler: new HarmonyMethod(typeof(FullSemiRandomResearch), nameof(Tr)));
+            Log.Message(FullCust3.Log3 + "Semi Random Research: GetResearchableProjects tech level faction registered (" + swapped + " reads)");
+        }
+
+        public static Faction TechFaction()
+        {
+            var f = Faction.OfPlayer;
+            if (!MP.IsInMultiplayer || RightPlayerFaction.PlayerFactionCount() < 2) return f;
+            return FullCust3.LowestRealPlayerIfSpectator(f) ?? f;
+        }
+
+        static IEnumerable<CodeInstruction> Tr(IEnumerable<CodeInstruction> instr)
+        {
+            var list = instr.ToList();
+            var me = AccessTools.Method(typeof(FullSemiRandomResearch), nameof(TechFaction));
+            int n = 0;
+            foreach (var ci in list)
+                if (ci.Calls(FullCust3.OfPlayerGetter)) { ci.opcode = OpCodes.Call; ci.operand = me; n++; }
+            swapped = n;
+            return list;
+        }
     }
 }
