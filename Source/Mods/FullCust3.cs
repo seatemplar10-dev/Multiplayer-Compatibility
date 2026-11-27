@@ -7,6 +7,7 @@ using System.Reflection.Emit;
 using HarmonyLib;
 using Multiplayer.API;
 using RimWorld;
+using RimWorld.Planet;
 using Verse;
 using Verse.AI.Group;
 
@@ -17,6 +18,18 @@ namespace Multiplayer.Compat
     {
         public const string Log3 = "[MPCompat - FULL1127 CU] ";
         static MethodInfo pushM, popM;
+
+        /// <summary>Lowest loadID player faction that is not the MP spectator; null outside multiplayer or when none.</summary>
+        public static Faction LowestRealPlayer()
+        {
+            if (!MP.IsInMultiplayer) return null;
+            Faction spectator = null;
+            try { spectator = Traverse.CreateWithType("Multiplayer.Client.Multiplayer").Property("WorldComp").Field("spectatorFaction").GetValue<Faction>(); } catch { }
+            Faction best = null;
+            foreach (var f in Find.FactionManager.AllFactionsListForReading)
+                if (f.IsPlayer && f != spectator && (best == null || f.loadID < best.loadID)) best = f;
+            return best;
+        }
 
         public static void Push(Map map, Faction f)
         {
@@ -134,6 +147,159 @@ namespace Multiplayer.Compat
             var inst = instanceP.GetValue(null);
             var m = AccessTools.Method(stateType, name);
             m.Invoke(inst, name == "DemandToll" ? new object[] { id, level } : new object[] { id });
+        }
+    }
+}
+
+namespace Multiplayer.Compat
+{
+    /// <summary>Visit Settlements (ninagoblin.visitsettlements): TriggerRaidEvent(Map) reads Faction.OfPlayer in a closure (HostileTo filter) from a world component tick,
+    /// where it is the spectator. The visited settlement map has no player owner, so the visiting player is the owner of the colonists spawned on it:
+    /// the lowest-loadID non-spectator player faction with a spawned pawn there is pushed around the call (map passed), popped in a finalizer.
+    /// DropFoodPodsForSettlements (same class, per-map loop, pod filter) is not covered.</summary>
+    internal static class FullVisitRaidCu3
+    {
+        public static void Init()
+        {
+            var m = AccessTools.Method("VS_WorldComponent_SettlementEvents:TriggerRaidEvent");
+            if (m == null) { Log.Error(FullCust3.Log3 + "Visit Settlements: TriggerRaidEvent not found"); return; }
+            MpCompat.harmony.Patch(m,
+                prefix: new HarmonyMethod(typeof(FullVisitRaidCu3), nameof(Pre)) { priority = Priority.First },
+                finalizer: new HarmonyMethod(typeof(FullVisitRaidCu3), nameof(Fin)));
+            Log.Message(FullCust3.Log3 + "Visit Settlements: TriggerRaidEvent visiting-player faction push registered");
+        }
+
+        /// <summary>Visiting player faction of a map: lowest loadID among player-faction pawns spawned there, or null.</summary>
+        internal static Faction VisitorFaction(Map map)
+        {
+            if (map == null) return null;
+            Faction best = null;
+            foreach (var p in map.mapPawns.AllPawnsSpawned)
+            {
+                var f = p?.Faction;
+                if (f == null || !f.IsPlayer || f.def == null || !f.def.isPlayer) continue;
+                if (best == null || f.loadID < best.loadID) best = f;
+            }
+            return best;
+        }
+
+        static void Pre(Map map, out bool __state)
+        {
+            __state = false;
+            if (!MP.IsInMultiplayer || RightPlayerFaction.PlayerFactionCount() < 2) return;
+            var f = VisitorFaction(map);
+            if (f == null || f == Faction.OfPlayer) return;
+            FullCust3.Push(map, f);
+            __state = true;
+        }
+
+        static void Fin(Map map, bool __state)
+        {
+            if (__state) FullCust3.Pop(map);
+        }
+    }
+}
+
+namespace Multiplayer.Compat
+{
+    /// <summary>Worksites Expanded / MiningOutpost (godsfathermixtape.worksitesexpanded).
+    /// 1) WorkSiteDefenseTracker methods that read Faction.OfPlayer (IssueOffer, ApplyTruce, RestoreRelation, DetermineAttacker, SettleAttackerRelation,
+    ///    OnDefenseSuccess) run from the game component tick under the spectator. The owner is the player faction at the site: lowest loadID of a player pawn
+    ///    spawned on the site map, else of a player caravan on the tile, else lowest loadID non-spectator player faction (deterministic). Pushed with a finalizer pop.
+    /// 2) WorksiteImpressionTracker.MakeOffer: pushes the leader pawn's faction.
+    /// 3) UI float-menu actions (RecruitImpressed, SetEscort, ClearEscort) become synced methods. Ask-for-healing lambda and Dialog_Parley buttons are NOT synced.</summary>
+    internal static class FullMiningOutpostCu3
+    {
+        static FieldInfo worldTileF;
+        static MethodInfo siteOnTileM;
+        static FieldInfo leaderF;
+
+        public static void Init()
+        {
+            var tr = AccessTools.TypeByName("MiningOutpost.WorkSiteDefenseTracker");
+            var defT = AccessTools.TypeByName("MiningOutpost.WorkSiteDefense");
+            worldTileF = AccessTools.Field(defT, "worldTile");
+            siteOnTileM = AccessTools.Method(tr, "GetSiteOnTile");
+            var h = MpCompat.harmony;
+            int n = 0;
+            foreach (var name in new[] { "IssueOffer", "ApplyTruce", "RestoreRelation", "DetermineAttacker", "SettleAttackerRelation", "OnDefenseSuccess" })
+            {
+                var m = AccessTools.Method(tr, name);
+                if (m == null) { Log.Error(FullCust3.Log3 + "MiningOutpost: " + name + " not found"); continue; }
+                h.Patch(m, prefix: new HarmonyMethod(typeof(FullMiningOutpostCu3), nameof(PreDef)) { priority = Priority.First },
+                    finalizer: new HarmonyMethod(typeof(FullMiningOutpostCu3), nameof(Fin)));
+                n++;
+            }
+            var imp = AccessTools.TypeByName("MiningOutpost.WorksiteImpressionTracker");
+            var mo = AccessTools.Method(imp, "MakeOffer");
+            if (mo == null) Log.Error(FullCust3.Log3 + "MiningOutpost: MakeOffer not found");
+            else
+            {
+                leaderF = AccessTools.Field(AccessTools.TypeByName("MiningOutpost.WorksiteImpressionRecord"), "leader");
+                h.Patch(mo, prefix: new HarmonyMethod(typeof(FullMiningOutpostCu3), nameof(PreOffer)) { priority = Priority.First },
+                    finalizer: new HarmonyMethod(typeof(FullMiningOutpostCu3), nameof(Fin)));
+                n++;
+            }
+            int s = 0;
+            foreach (var (t, name) in new[] { ("MiningOutpost.WorksiteRecruitUtility", "RecruitImpressed"), ("MiningOutpost.WorksiteEscortTracker", "SetEscort"), ("MiningOutpost.WorksiteEscortTracker", "ClearEscort") })
+            {
+                var m = AccessTools.Method(t + ":" + name);
+                if (m == null) { Log.Error(FullCust3.Log3 + "MiningOutpost: " + name + " not found"); continue; }
+                MP.RegisterSyncMethod(m);
+                s++;
+            }
+            Log.Message(FullCust3.Log3 + "MiningOutpost: " + n + " OfPlayer owners pushed, " + s + " UI actions synced registered");
+        }
+
+        internal static Faction OwnerOf(object def)
+        {
+            Faction best = null;
+            Map map = null;
+            try
+            {
+                var site = siteOnTileM?.Invoke(null, new object[] { Convert.ToInt32(worldTileF.GetValue(def)) }) as MapParent;
+                map = site?.Map;
+            }
+            catch { }
+            if (map != null) best = FullVisitRaidCu3.VisitorFaction(map);
+            if (best == null && map == null)
+            {
+                foreach (var c in Find.WorldObjects.Caravans)
+                {
+                    var f = c.Faction;
+                    if (f == null || !f.IsPlayer || !f.def.isPlayer) continue;
+                    if (best == null || f.loadID < best.loadID) best = f;
+                }
+            }
+            return best ?? FullCust3.LowestRealPlayer();
+        }
+
+        static void PreDef(object[] __args, out bool __state)
+        {
+            __state = false;
+            if (!MP.IsInMultiplayer || RightPlayerFaction.PlayerFactionCount() < 2) return;
+            object def = null;
+            foreach (var a in __args) if (a != null && a.GetType() == worldTileF.DeclaringType) { def = a; break; }
+            if (def == null) return;
+            var f = OwnerOf(def);
+            if (f == null || f == Faction.OfPlayer) return;
+            FullCust3.Push(null, f);
+            __state = true;
+        }
+
+        static void PreOffer(object r, out bool __state)
+        {
+            __state = false;
+            if (!MP.IsInMultiplayer || RightPlayerFaction.PlayerFactionCount() < 2) return;
+            var f = RightPlayerFaction.Resolve((leaderF.GetValue(r) as Pawn)?.Faction);
+            if (f == null || f == Faction.OfPlayer) return;
+            FullCust3.Push(null, f);
+            __state = true;
+        }
+
+        static void Fin(bool __state)
+        {
+            if (__state) FullCust3.Pop(null);
         }
     }
 }
