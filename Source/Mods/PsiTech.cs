@@ -248,12 +248,42 @@ namespace Multiplayer.Compat
                     finalizer: new HarmonyMethod(typeof(PsiTech), nameof(FinalLocalFactionChange))));
 
             RegisterPsiCardRow495();
+            RegisterAutocastToggleRow507();
 
             if (LabPsiLog)
                 Try("lab tracker id log", () =>
                     MpCompat.harmony.Patch(AccessTools.DeclaredMethod(managerType, "GetNextTrackerId"),
                         postfix: new HarmonyMethod(typeof(PsiTech), nameof(PostNextTrackerId))));
         }
+
+        #region Row 507 autocast toggle
+
+        /// <summary>FIXES row 507: the 'Autocast' Command_Toggle built in <c>PsiTechTracker.GetGizmos</c> has toggleAction
+        /// <c>AutocastEnabled = !AutocastEnabled</c> (IL <c>&lt;GetGizmos&gt;b__138_2</c>, ordinal 2: 0 = the predicate in &lt;&gt;c, 1 = isActive).
+        /// It wrote the saved field on the clicking PC only. The lambda is an instance method of the tracker, so it is synced as it is
+        /// (target = the tracker, found again by <see cref="SyncTracker"/>); the cached gizmo keeps the same delegate.</summary>
+        private static void RegisterAutocastToggleRow507()
+        {
+            if (LabOff.Row(507))
+            {
+                Log.Message($"{LogPrefix}row 507: PsiTech autocast toggle sync OFF (lab switch)");
+                return;
+            }
+
+            try
+            {
+                MpCompat.RegisterLambdaMethod(trackerType, "GetGizmos", 2);
+            }
+            catch (Exception e)
+            {
+                Log.Error($"{LogPrefix}FIXES row 507: PsiTechTracker.GetGizmos autocast toggle lambda not registered: {e}");
+                return;
+            }
+
+            Log.Message($"{LogPrefix}row 507: PsiTech autocast toggle synced");
+        }
+
+        #endregion
 
         #region Row 495 psi card training queue
 
