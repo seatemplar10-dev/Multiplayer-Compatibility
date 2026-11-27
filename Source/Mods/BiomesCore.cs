@@ -37,6 +37,9 @@ namespace Multiplayer.Compat
                     MP.RegisterSyncMethod(AccessTools.DeclaredMethod(method)).SetDebugOnly();
             }
 
+            // FULL1127 KE: JobGiver_StealPlayerFood.NearestFoodToSteal (Find.CurrentMap -> pawn.Map)
+            FullKE.PatchCurrentMap("Biomes! Core", new[] { "BiomesCore.JobGiver_StealPlayerFood:NearestFoodToSteal" });
+
             // Current map usage
             {
                 PatchingUtilities.ReplaceCurrentMapUsage("BiomesCore.GameCondition_Earthquake:GameConditionTick");
