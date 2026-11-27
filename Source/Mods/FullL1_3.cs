@@ -201,8 +201,8 @@ namespace Multiplayer.Compat
             var cur = AccessTools.PropertyGetter(typeof(Find), "CurrentMap");
             foreach (var ins in instructions)
             {
-                if (ins.Calls(drawing)) { replacedDrawing++; yield return new CodeInstruction(OpCodes.Call, AccessTools.Method(typeof(FirefliesTwoFull1127), nameof(DrawingMapMp))); }
-                else if (ins.Calls(cur)) { replacedCurrentMap++; yield return new CodeInstruction(OpCodes.Ldarg_0); yield return new CodeInstruction(OpCodes.Call, AccessTools.Method(typeof(FirefliesTwoFull1127), nameof(CurrentMapFor))); }
+                if (ins.Calls(drawing)) { replacedDrawing++; yield return new CodeInstruction(OpCodes.Call, AccessTools.Method(typeof(FirefliesTwoFull1127), nameof(DrawingMapMp))) { labels = ins.labels, blocks = ins.blocks }; }
+                else if (ins.Calls(cur)) { replacedCurrentMap++; yield return new CodeInstruction(OpCodes.Ldarg_0) { labels = ins.labels, blocks = ins.blocks }; yield return new CodeInstruction(OpCodes.Call, AccessTools.Method(typeof(FirefliesTwoFull1127), nameof(CurrentMapFor))); }
                 else yield return ins;
             }
         }
@@ -256,7 +256,7 @@ namespace Multiplayer.Compat
             var cur = AccessTools.PropertyGetter(typeof(Find), "CurrentMap");
             foreach (var ins in instructions)
             {
-                if (ins.Calls(cur)) { replacedCurrentMap++; yield return new CodeInstruction(OpCodes.Call, AccessTools.Method(typeof(AlliesAreHelpfulFull1127), nameof(CurMap))); }
+                if (ins.Calls(cur)) { replacedCurrentMap++; yield return new CodeInstruction(OpCodes.Call, AccessTools.Method(typeof(AlliesAreHelpfulFull1127), nameof(CurMap))) { labels = ins.labels, blocks = ins.blocks }; }
                 else yield return ins;
             }
         }
