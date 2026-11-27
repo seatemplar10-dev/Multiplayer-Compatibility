@@ -26,6 +26,11 @@ public class Coventech
 
     public Coventech(ModContentPack mod)
     {
+        if (!LabOff.Row(498)) // row 498: camera-gated Rand (GenView.ShouldSpawnMotesAt) differs per PC
+        {
+            PatchingUtilities.PatchPushPopRand("FunnelBit.CompProjectileInterceptor_LineFunnelBit:SpawnLineFleck");
+            Log.Message("[MPCompat - Coventech] row 498: 1 camera-gated Rand methods push/pop");
+        }
         foreach (var typeName in new[] { "MstToyBox.Mst_BezierProjectile", "ProjectileSFX.Mst_BezierProjectile" })
         {
             var type = AccessTools.TypeByName(typeName) ?? throw new TypeLoadException($"{LogPrefix}type {typeName} not found");

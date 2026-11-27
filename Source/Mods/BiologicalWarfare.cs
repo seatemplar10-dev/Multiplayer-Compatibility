@@ -25,6 +25,11 @@ public class BiologicalWarfare
 
     public BiologicalWarfare(ModContentPack mod)
     {
+        if (!LabOff.Row(498)) // row 498: camera-gated Rand (GenView.ShouldSpawnMotesAt) differs per PC
+        {
+            PatchingUtilities.PatchPushPopRand("USH_BW.CompBacteriaIncubator:ThrowBacterialSmoke");
+            Log.Message("[MPCompat - Biological Warfare] row 498: 1 camera-gated Rand methods push/pop");
+        }
         // lab switch row 53 (package G, 17 Nov): off = old behaviour
         if (!LabOff.Row(53))
             PatchingUtilities.PatchUnityRand("USH_BW.HediffCompParasiteReproduction:RandomOrganicPart", false);
