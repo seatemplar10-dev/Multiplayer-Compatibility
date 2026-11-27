@@ -42,16 +42,21 @@ namespace Multiplayer.Compat
             Log.Message("[MPCompat - Dubs Mint Menus] row 469: bill suspend button synced");
         }
 
-        internal static void PreDoInterface(RimWorld.Bill bill)
+        // 27 Nov (row 469b, Neon review): WatchEnd only when this prefix ran WatchBegin. DoInterface runs with bill == null too;
+        // an unmatched WatchEnd pops the next frame of Multiplayer's watch stack (SyncFieldUtil.FieldWatchPostfix), so an outer
+        // watch would lose its later field changes.
+        internal static void PreDoInterface(RimWorld.Bill bill, out bool __state)
         {
+            __state = false;
             if (!MP.IsInMultiplayer || bill == null) return;
             MP.WatchBegin();
+            __state = true;
             suspendedField.Watch(bill);
         }
 
-        internal static void PostDoInterface()
+        internal static void PostDoInterface(bool __state)
         {
-            if (MP.IsInMultiplayer) MP.WatchEnd();
+            if (__state) MP.WatchEnd();
         }
 
         public static void Patch(string name)
