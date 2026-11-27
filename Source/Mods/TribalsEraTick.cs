@@ -33,6 +33,7 @@ namespace Multiplayer.Compat
         internal const int FireTolerance = 60;
 
         static bool inLoop;
+        static bool loopStarted;     // set by RunPerFaction once the faction list is known: an error before it runs the stock body, never skips it
         static bool errorLogged;
         static MethodInfo researchAll, tryRegister;
         static FieldInfo cultureField, fFireUpdate, instanceField;
@@ -146,9 +147,11 @@ namespace Multiplayer.Compat
         /// <summary>Runs <paramref name="body"/> once per faction, each under PushFaction(force) / PopFaction. Returns false when there is nothing to loop.</summary>
         internal static bool RunPerFaction(Action<Faction> body)
         {
+            loopStarted = false;
             if (!MP.IsInMultiplayer || !TribalsEraStore.IsActive()) return false;
             var list = TickFactions();
             if (list == null || list.Count == 0) return false;
+            loopStarted = true;
             foreach (var f in list)
             {
                 PushF(f);
@@ -167,7 +170,7 @@ namespace Multiplayer.Compat
                 try { return !RunPerFaction(f => __instance.GameComponentTick()); }
                 finally { inLoop = false; }
             }
-            catch (Exception e) { LogOnce("row 525: looped tick failed (logged once): " + e); return false; }
+            catch (Exception e) { LogOnce("row 525: looped tick failed (logged once): " + e); return !loopStarted; }   // failed before the loop (single player, MP check): run stock
         }
 
         // ---------------- row 526 ----------------
@@ -194,7 +197,7 @@ namespace Multiplayer.Compat
                 if (!anyCulture && Find.IdeoManager != null) Find.IdeoManager.classicMode = true;
                 return false;
             }
-            catch (Exception e) { LogOnce("row 526: looped FinalizeInit failed (logged once): " + e); return false; }
+            catch (Exception e) { LogOnce("row 526: looped FinalizeInit failed (logged once): " + e); return !loopStarted; }   // failed before the loop: run stock
         }
 
         // ---------------- row 527 ----------------
