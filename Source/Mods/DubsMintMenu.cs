@@ -35,7 +35,7 @@ namespace Multiplayer.Compat
                 Log.Error("[MPCompat - Dubs Mint Menus] row 469: MainTabWindow_MintBillMenu.DoInterface or Bill.suspended not found, the suspend button can desync");
                 return;
             }
-            suspendedField = MP.RegisterSyncField(typeof(RimWorld.Bill), "suspended");
+            suspendedField = SharedSyncFields.Get(typeof(RimWorld.Bill), "suspended"); // shared: Nice Bill Tab watches it too (27 Nov)
             MpCompat.harmony.Patch(method,
                 prefix: new HarmonyMethod(typeof(DubsMintMenu), nameof(PreDoInterface)),
                 finalizer: new HarmonyMethod(typeof(DubsMintMenu), nameof(PostDoInterface)));

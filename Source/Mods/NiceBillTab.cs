@@ -192,7 +192,7 @@ namespace Multiplayer.Compat
                     return;
                 }
 
-                syncSuspended = MP.RegisterSyncField(typeof(Bill), nameof(Bill.suspended));
+                syncSuspended = SharedSyncFields.Get(typeof(Bill), nameof(Bill.suspended)); // shared: Dubs Mint Menus watches it too (27 Nov)
                 syncProduction =
                 [
                     MP.RegisterSyncField(typeof(Bill_Production), nameof(Bill_Production.repeatMode)),
