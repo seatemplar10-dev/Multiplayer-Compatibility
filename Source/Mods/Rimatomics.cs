@@ -1,3 +1,6 @@
+using System.Collections.Generic;
+using System.Reflection;
+using System.Reflection.Emit;
 using HarmonyLib;
 using Multiplayer.API;
 using RimWorld.Planet;
@@ -33,6 +36,24 @@ namespace Multiplayer.Compat
             MpCompat.harmony.Patch(AccessTools.DeclaredMethod(type, nameof(WorldComponent.WorldComponentTick)),
                 postfix: new HarmonyMethod(typeof(Rimatomics), nameof(PostWorldComponentTick)));
 
+            // FIXES row 518 (27 Nov 2026): IncidentQueueTick (from WorldComponentTick) keeps or drops a queued raid-warning incident by
+            // HostileTo(incident faction, Faction.OfPlayer), which is the spectator faction in multifaction MP. The two reads (IL_00BF,
+            // IL_0199) become the target map's own player faction (PlayerFactionForTick.ForMap); everything else is unchanged.
+            // The separate FactionUpdates method (not on a tick path of its own) is left alone.
+            if (LabOff.Row(518))
+                Log.Message("[MPCompat - Rimatomics] row 518 switched off by the lab, queued incidents stay on OfPlayer");
+            else
+            {
+                var queueTick = AccessTools.DeclaredMethod(type, "IncidentQueueTick");
+                if (queueTick == null)
+                    Log.Error("[MPCompat - Rimatomics] row 518: IncidentQueueTick not found, queued incidents stay on OfPlayer");
+                else
+                {
+                    MpCompat.harmony.Patch(queueTick, transpiler: new HarmonyMethod(typeof(Rimatomics), nameof(SwapOfPlayerInQueueTick)));
+                    Log.Message("[MPCompat - Rimatomics] row 518: Rimatomics IncidentQueueTick uses the right player faction in multifaction");
+                }
+            }
+
             // FIXES row 461 (26 Nov 2026): the shield radius buttons and the missile silo yield / cancel buttons write sim state in
             // their click lambdas on the clicking PC only (targetRadius is read by CompTick, WarheadYield / launchPhase by the silo).
             // The lambdas capture only "this", so they are plain instance methods of the Thing / ThingComp: sync them directly.
@@ -40,6 +61,17 @@ namespace Multiplayer.Compat
                 Log.Message("[MPCompat - Rimatomics] row 461 switched off by the lab, shield radius and silo buttons not synced");
             else
                 PatchGizmoLambdas();
+        }
+
+        private static IEnumerable<CodeInstruction> SwapOfPlayerInQueueTick(IEnumerable<CodeInstruction> instr, MethodBase __originalMethod)
+        {
+            var local = PlayerFactionForTick.OnlyLocalOfType(__originalMethod, typeof(Map));
+            if (local < 0)
+            {
+                Log.Error("[MPCompat - Rimatomics] row 518: IncidentQueueTick has no single Map local, queued incidents stay on OfPlayer");
+                return instr;
+            }
+            return PlayerFactionForTick.SwapOfPlayer(instr, () => new CodeInstruction(OpCodes.Ldloc, local), 2, "Rimatomics IncidentQueueTick");
         }
 
         private static void PatchGizmoLambdas()
