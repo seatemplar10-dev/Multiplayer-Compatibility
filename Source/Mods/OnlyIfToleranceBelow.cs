@@ -1,5 +1,4 @@
 using System;
-using System.Linq;
 using System.Reflection;
 using HarmonyLib;
 using Multiplayer.API;
@@ -14,49 +13,72 @@ namespace Multiplayer.Compat
 	[MpCompatFor("seohyeon.onlyIfToleranceBelow")]
 	internal class OnlyIfToleranceBelow
 	{
-		private static ISyncField toleranceSyncField;
+		// Current mod builds keep the value in a ConditionalWeakTable (1.7) or a Prepatcher field (older),
+		// so DrugPolicyEntry has no real field to sync. The mod exposes Get_/Set_OnlyIfToleranceBelow instead.
+		private static MethodInfo getTolerance;
+		private static MethodInfo setTolerance;
+		private static float[] before;
+
 		public OnlyIfToleranceBelow(ModContentPack mod)
 		{
-			Type mpSyncType = AccessTools.TypeByName("Multiplayer.Client.Sync");
-			MethodInfo mpSyncField = AccessTools.Method(mpSyncType, "Field",
-				[typeof(Type), typeof(string), typeof(string)
-			]);
+			var exposed = AccessTools.TypeByName("DrugPolicyEnhanced.ExposedPrepatcherFields");
+			getTolerance = AccessTools.Method(exposed, "Get_OnlyIfToleranceBelow", [typeof(DrugPolicyEntry)]);
+			setTolerance = AccessTools.Method(exposed, "Set_OnlyIfToleranceBelow", [typeof(DrugPolicyEntry), typeof(float)]);
 
-			FieldInfo toleranceField = typeof(DrugPolicyEntry)
-				.GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
-				.First(f => f.Name.Contains("OnlyIfToleranceBelow"
-			));
-
-			toleranceSyncField = (ISyncField)mpSyncField.Invoke(null,
-			[
-				typeof(DrugPolicy),
-				$"{nameof(DrugPolicy.entriesInt)}/[]",
-				toleranceField.Name
-			]);
-			toleranceSyncField.SetBufferChanges();
+			MP.RegisterSyncMethod(typeof(OnlyIfToleranceBelow), nameof(SyncedSetTolerance));
 
 			MpCompat.harmony.Patch(AccessTools.Method(typeof(Dialog_ManageDrugPolicies), nameof(Dialog_ManageDrugPolicies.DoPolicyConfigArea)),
-				prefix: new HarmonyMethod(typeof(OnlyIfToleranceBelow), nameof(PreDoPolicy)),
-				postfix: new HarmonyMethod(typeof(OnlyIfToleranceBelow), nameof(PostDoPolicy)));
+				prefix: new HarmonyMethod(typeof(OnlyIfToleranceBelow), nameof(PreDoPolicy)) { priority = Priority.First },
+				postfix: new HarmonyMethod(typeof(OnlyIfToleranceBelow), nameof(PostDoPolicy)) { priority = Priority.Last });
 		}
+
+		private static float Get(DrugPolicyEntry entry) => (float)getTolerance.Invoke(null, [entry]);
 
 		static void PreDoPolicy(Dialog_ManageDrugPolicies __instance)
 		{
 			if (!MP.IsInMultiplayer)
 				return;
 
-			MP.WatchBegin();
 			DrugPolicy policy = __instance.SelectedPolicy;
-			for (int i = 0; i < policy.Count; i++)
-				toleranceSyncField.Watch(policy, i);
+			if (policy == null)
+			{
+				before = null;
+				return;
+			}
+
+			before = new float[policy.Count];
+			for (int i = 0; i < before.Length; i++)
+				before[i] = Get(policy[i]);
 		}
 
 		static void PostDoPolicy(Dialog_ManageDrugPolicies __instance)
 		{
-			if (MP.IsInMultiplayer)
-				MP.WatchEnd();
+			var old = before;
+			before = null;
+			if (!MP.IsInMultiplayer || old == null)
+				return;
+
+			DrugPolicy policy = __instance.SelectedPolicy;
+			if (policy == null || policy.Count != old.Length)
+				return;
+
+			for (int i = 0; i < old.Length; i++)
+			{
+				float now = Get(policy[i]);
+				if (now == old[i])
+					continue;
+
+				// Undo the local write, then apply it on every client through the sync.
+				setTolerance.Invoke(null, [policy[i], old[i]]);
+				SyncedSetTolerance(policy, i, now);
+			}
 		}
 
+		private static void SyncedSetTolerance(DrugPolicy policy, int index, float value)
+		{
+			if (policy == null || index < 0 || index >= policy.Count)
+				return;
+			setTolerance.Invoke(null, [policy[index], value]);
+		}
 	}
-
 }
