@@ -303,3 +303,137 @@ namespace Multiplayer.Compat
         }
     }
 }
+
+namespace Multiplayer.Compat
+{
+    /// <summary>Panhandling (acutus.begging), one bundle.
+    /// 1) PanhandlingWorldComponent.BeginBegging (called from Dialog_Panhandling) is sent as one synced static call; the alms requests and the breakdown (mod classes)
+    ///    travel as parallel lists of primitives / defs / things and are rebuilt on every PC, then the original method runs.
+    /// 2) ResolveSession (world tick) runs with session.caravan.Faction pushed (goodwill, hostility, letter, drafting).
+    /// 3) StartAssaultEncounterNow (can run in a queued long event) runs with that faction pushed, and CameraJumper.TryJumpAndSelect inside it only jumps on the PC
+    ///    whose own faction owns the caravan. Rand inside the long event is NOT touched (row 543).</summary>
+    internal static class FullPanhandlingCu3
+    {
+        static Type almsT, breakdownT, compT, sessionT;
+        static FieldInfo[] af;
+        static FieldInfo bdBase, bdNeg, sCaravan;
+        static MethodInfo beginM;
+        [ThreadStatic] static Faction assaultOwner;
+
+        public static void Init()
+        {
+            compT = AccessTools.TypeByName("Panhandling.PanhandlingWorldComponent");
+            almsT = AccessTools.TypeByName("Panhandling.PanhandlingAlmsRequest");
+            breakdownT = AccessTools.TypeByName("Panhandling.PanhandlingQualityBreakdown");
+            sessionT = AccessTools.TypeByName("Panhandling.PanhandlingSession");
+            beginM = AccessTools.Method(compT, "BeginBegging");
+            var resolveM = AccessTools.Method(compT, "ResolveSession");
+            var assaultM = AccessTools.Method(compT, "StartAssaultEncounterNow");
+            var jumpM = AccessTools.Method(typeof(CameraJumper), nameof(CameraJumper.TryJumpAndSelect));
+            string[] names = { "sourceThing", "def", "stuff", "quality", "hitPoints", "count", "marketValuePerUnit", "massPerUnit" };
+            af = names.Select(n => AccessTools.Field(almsT, n)).ToArray();
+            bdBase = AccessTools.Field(breakdownT, "baseQuality");
+            bdNeg = AccessTools.Field(breakdownT, "negotiator");
+            sCaravan = AccessTools.Field(sessionT, "caravan");
+            if (beginM == null || resolveM == null || assaultM == null || jumpM == null || af.Any(x => x == null) || bdBase == null || bdNeg == null || sCaravan == null)
+            {
+                Log.Error(FullCust3.Log3 + "Panhandling: member missing, nothing patched");
+                return;
+            }
+            var h = MpCompat.harmony;
+            h.Patch(beginM, prefix: new HarmonyMethod(typeof(FullPanhandlingCu3), nameof(BeginPrefix)) { priority = Priority.First });
+            h.Patch(resolveM, prefix: new HarmonyMethod(typeof(FullPanhandlingCu3), nameof(PushPre)) { priority = Priority.First }, finalizer: new HarmonyMethod(typeof(FullPanhandlingCu3), nameof(PopFin)));
+            h.Patch(assaultM, prefix: new HarmonyMethod(typeof(FullPanhandlingCu3), nameof(AssaultPre)) { priority = Priority.First }, finalizer: new HarmonyMethod(typeof(FullPanhandlingCu3), nameof(AssaultFin)));
+            h.Patch(jumpM, prefix: new HarmonyMethod(typeof(FullPanhandlingCu3), nameof(JumpPre)) { priority = Priority.First });
+            MP.RegisterSyncMethod(typeof(FullPanhandlingCu3), nameof(SyncedBegin));
+            Log.Message(FullCust3.Log3 + "Panhandling: BeginBegging synced, ResolveSession/StartAssaultEncounterNow faction push, camera jump guard registered");
+        }
+
+        static bool BeginPrefix(Caravan caravan, Settlement settlement, IEnumerable<Pawn> crew, IEnumerable alms, object breakdown)
+        {
+            if (!MP.IsInMultiplayer || MP.IsExecutingSyncCommand) return true;
+            var src = new List<Thing>(); var defs = new List<ThingDef>(); var stuffs = new List<ThingDef>();
+            var q = new List<int>(); var hp = new List<int>(); var cnt = new List<int>(); var mv = new List<float>(); var mass = new List<float>();
+            foreach (var a in alms)
+            {
+                src.Add((Thing)af[0].GetValue(a)); defs.Add((ThingDef)af[1].GetValue(a)); stuffs.Add((ThingDef)af[2].GetValue(a));
+                var qv = (QualityCategory?)af[3].GetValue(a);
+                q.Add(qv.HasValue ? (int)qv.Value : -1);
+                hp.Add((int)af[4].GetValue(a)); cnt.Add((int)af[5].GetValue(a)); mv.Add((float)af[6].GetValue(a)); mass.Add((float)af[7].GetValue(a));
+            }
+            float quality = (float)AccessTools.PropertyGetter(breakdownT, "TotalQuality").Invoke(breakdown, null);
+            SyncedBegin(caravan, settlement, crew.ToList(), (Pawn)bdNeg.GetValue(breakdown), quality, src, defs, stuffs, q, hp, cnt, mv, mass);
+            return false;
+        }
+
+        [SyncMethod]
+        static void SyncedBegin(Caravan caravan, Settlement settlement, List<Pawn> crew, Pawn negotiator, float quality, List<Thing> src, List<ThingDef> defs, List<ThingDef> stuffs,
+            List<int> q, List<int> hp, List<int> cnt, List<float> mv, List<float> mass)
+        {
+            var list = (IList)Activator.CreateInstance(typeof(List<>).MakeGenericType(almsT));
+            for (int i = 0; i < defs.Count; i++)
+            {
+                var a = Activator.CreateInstance(almsT);
+                af[0].SetValue(a, src[i]); af[1].SetValue(a, defs[i]); af[2].SetValue(a, stuffs[i]);
+                af[3].SetValue(a, q[i] < 0 ? (QualityCategory?)null : (QualityCategory)q[i]);
+                af[4].SetValue(a, hp[i]); af[5].SetValue(a, cnt[i]); af[6].SetValue(a, mv[i]); af[7].SetValue(a, mass[i]);
+                list.Add(a);
+            }
+            var bd = Activator.CreateInstance(breakdownT);
+            bdBase.SetValue(bd, quality);
+            bdNeg.SetValue(bd, negotiator);
+            var inst = AccessTools.PropertyGetter(compT, "Instance").Invoke(null, null);
+            beginM.Invoke(inst, new object[] { caravan, settlement, crew, list, bd });
+        }
+
+        static Faction SessionOwner(object session)
+        {
+            var f = (sCaravan.GetValue(session) as Caravan)?.Faction;
+            return f != null && f.IsPlayer ? f : null;
+        }
+
+        static void PushPre(object session, out bool __state)
+        {
+            __state = false;
+            if (!MP.IsInMultiplayer || RightPlayerFaction.PlayerFactionCount() < 2) return;
+            var f = SessionOwner(session);
+            if (f == null || f == Faction.OfPlayer) return;
+            FullCust3.Push(null, f);
+            __state = true;
+        }
+
+        static void PopFin(bool __state)
+        {
+            if (__state) FullCust3.Pop(null);
+        }
+
+        static void AssaultPre(object session, out bool __state)
+        {
+            PushPre(session, out __state);
+            assaultOwner = MP.IsInMultiplayer ? SessionOwner(session) : null;
+        }
+
+        static void AssaultFin(bool __state)
+        {
+            assaultOwner = null;
+            PopFin(__state);
+        }
+
+        static bool JumpPre()
+        {
+            var owner = assaultOwner;
+            if (owner == null || !MP.IsInMultiplayer) return true;
+            return owner == MP.RealPlayerFaction;
+        }
+    }
+}
+
+namespace Multiplayer.Compat
+{
+    /// <summary>Panhandling (acutus.begging): see FullPanhandlingCu3.</summary>
+    [MpCompatFor("acutus.begging")]
+    class FullPanhandling
+    {
+        public FullPanhandling(ModContentPack mod) => FullPanhandlingCu3.Init();
+    }
+}
