@@ -27,7 +27,9 @@ namespace Multiplayer.Compat
         internal static Action<Faction> PushF = DefaultPush;
         internal static Action PopF = DefaultPop;
         internal static Func<int> MpClock = DefaultClock;
-        static bool clockLogged;
+        static bool clockLogged, clockLookupDone, idsLookupDone;
+        static MethodInfo asyncWorldTimeGet, worldCompGet;
+        static FieldInfo worldTicksField, factionDataField;
         /// <summary>Known-false switch for the D2 only: the loop also runs the body for the spectator (the 525 arm must FAIL with it). Never set in the game.</summary>
         internal static bool testIncludeSpectator;
         /// <summary>Row 528: the component tick resets the fire counter only when the last fire tick is more than this many world ticks old.</summary>
@@ -116,8 +118,15 @@ namespace Multiplayer.Compat
         static List<int> DefaultIds()
         {
             var ids = new List<int>();
-            var world = AccessTools.Method("Multiplayer.Client.Multiplayer:get_WorldComp")?.Invoke(null, null);
-            var data = world == null ? null : AccessTools.Field("Multiplayer.Client.MultiplayerWorldComp:factionData")?.GetValue(world) as IDictionary;
+            if (!idsLookupDone)
+            {
+                idsLookupDone = true;   // 27 Nov hang: string lookups scan every mod's types, so look up once per session (this runs every tick)
+                // AccessTools.Field(string) throws NullReferenceException when the type is missing, so each lookup gets its own try
+                try { worldCompGet = AccessTools.Method("Multiplayer.Client.Multiplayer:get_WorldComp"); } catch (Exception) { worldCompGet = null; }
+                try { factionDataField = AccessTools.Field("Multiplayer.Client.MultiplayerWorldComp:factionData"); } catch (Exception) { factionDataField = null; }
+            }
+            var world = worldCompGet?.Invoke(null, null);
+            var data = world == null ? null : factionDataField?.GetValue(world) as IDictionary;
             if (data != null) foreach (var k in data.Keys) ids.Add((int)k);
             return ids;
         }
@@ -253,10 +262,15 @@ namespace Multiplayer.Compat
         // AsyncWorldTimeComp.worldTicks (AsyncWorldTimeComp.cs:69, the world's own count, ++ at :111 after DoSingleTick; the same value in both places).
         static int DefaultClock()
         {
-            var w = AccessTools.Method("Multiplayer.Client.Multiplayer:get_AsyncWorldTime")?.Invoke(null, null);
-            // 27 Nov field fault: the class is Multiplayer.Client.AsyncTime.AsyncWorldTimeComp in MP 1.7 (the old name found nothing, so TicksGame was used)
-            var f = w == null ? null : (AccessTools.Field("Multiplayer.Client.AsyncTime.AsyncWorldTimeComp:worldTicks")
-                                        ?? AccessTools.Field("Multiplayer.Client.AsyncWorldTimeComp:worldTicks"));
+            if (!clockLookupDone)
+            {
+                clockLookupDone = true;   // 27 Nov hang: string lookups scan every mod's types, so look up once per session (this runs every tick)
+                try { asyncWorldTimeGet = AccessTools.Method("Multiplayer.Client.Multiplayer:get_AsyncWorldTime"); } catch (Exception) { asyncWorldTimeGet = null; }
+                // 27 Nov field fault: the class is Multiplayer.Client.AsyncTime.AsyncWorldTimeComp in MP 1.7 (the old name found nothing, so TicksGame was used)
+                try { worldTicksField = AccessTools.Field("Multiplayer.Client.AsyncTime.AsyncWorldTimeComp:worldTicks"); } catch (Exception) { worldTicksField = null; }
+            }
+            var w = asyncWorldTimeGet?.Invoke(null, null);
+            var f = w == null ? null : worldTicksField;
             if (w != null && f == null) LogOnce("row 528: AsyncWorldTimeComp.worldTicks not found, the large fire counter uses TicksGame");
             if (f != null && !clockLogged)
             {

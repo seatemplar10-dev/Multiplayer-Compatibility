@@ -69,6 +69,7 @@ namespace Multiplayer.Compat
         static bool fieldsBound, hooksInstalled, errorLogged;
         static FieldInfo multifactionField, spectatorField;
         static int activeLogged = -1;
+        static bool activeLookupDone, spectatorLookupDone;
         static Func<object> gameCompGetter, worldCompGetter;
         static Func<Faction> realPlayerGetter;
         static FieldInfo instanceField;
@@ -487,13 +488,19 @@ namespace Multiplayer.Compat
             if (!MP.IsInMultiplayer) return false;
             try
             {
-                if (multifactionField == null)
+                if (!activeLookupDone)
                 {
+                    // 27 Nov hang: a failed lookup was retried on EVERY faction push, and each miss scans every type of every mod (map generation froze).
+                    // Look up once per session, success or not.
+                    activeLookupDone = true;
                     // 27 Nov field fault: the class is Multiplayer.Client.Comp.MultiplayerGameComp in MP 1.7 (the old name found nothing, so this was always false)
-                    multifactionField = AccessTools.Field("Multiplayer.Client.Comp.MultiplayerGameComp:multifaction")
-                                        ?? AccessTools.Field("Multiplayer.Client.MultiplayerGameComp:multifaction");
-                    gameCompGetter = (Func<object>)Delegate.CreateDelegate(typeof(Func<object>), AccessTools.PropertyGetter("Multiplayer.Client.Multiplayer:GameComp"));
+                    multifactionField = AccessTools.Field("Multiplayer.Client.Comp.MultiplayerGameComp:multifaction");
+                    var getter = AccessTools.PropertyGetter("Multiplayer.Client.Multiplayer:GameComp");
+                    gameCompGetter = getter == null ? null : (Func<object>)Delegate.CreateDelegate(typeof(Func<object>), getter);
+                    if (multifactionField == null || gameCompGetter == null)
+                        Log.Warning(logPrefix + "row 523: MultiplayerGameComp.multifaction not found, one era per game as before");
                 }
+                if (multifactionField == null || gameCompGetter == null) return false;
                 var on = (bool)multifactionField.GetValue(gameCompGetter());
                 // 27 Nov: one line each time the value changes, so Player.log shows whether the era store really runs (the start lines print either way)
                 if ((on ? 1 : 0) != activeLogged)
@@ -515,11 +522,14 @@ namespace Multiplayer.Compat
         {
             try
             {
-                if (spectatorField == null)
+                if (!spectatorLookupDone)
                 {
+                    spectatorLookupDone = true;   // 27 Nov hang: look up once per session, success or not
                     spectatorField = AccessTools.Field("Multiplayer.Client.MultiplayerWorldComp:spectatorFaction");
-                    worldCompGetter = (Func<object>)Delegate.CreateDelegate(typeof(Func<object>), AccessTools.PropertyGetter("Multiplayer.Client.Multiplayer:WorldComp"));
+                    var getter = AccessTools.PropertyGetter("Multiplayer.Client.Multiplayer:WorldComp");
+                    worldCompGetter = getter == null ? null : (Func<object>)Delegate.CreateDelegate(typeof(Func<object>), getter);
                 }
+                if (spectatorField == null || worldCompGetter == null) return null;
                 return spectatorField.GetValue(worldCompGetter()) as Faction;
             }
             catch (Exception) { return null; }
