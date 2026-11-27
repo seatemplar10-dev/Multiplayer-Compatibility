@@ -74,8 +74,11 @@ namespace Multiplayer.Compat
     ///
     /// Per-PC reads inside the synced bodies: none (they use only the objects found above, Defs and DefDatabase lists, no selection, no
     /// <c>Find.CurrentMap</c>, no settings, no Rand).
-    /// NOT covered: the rest of <c>PawnPsiCard</c> / <c>ITab_Pawn_Psi</c> (energy and focus nodes, training queue, ability slots) edits the tracker
-    /// directly as well.
+    /// F. FIXES row 495 (27 Nov 2026): the psi card (<c>PawnPsiCard</c>) training queue buttons wrote the saved tracker on the clicking PC only:
+    /// Add energy/focus node, queue an ability, queue its removal (<c>Add*ToTrainingQueue</c>, synced as they are), Suspend training (<c>TrainingSuspended</c>,
+    /// watched around <c>DrawTrainingQueue</c>), reorder and delete queue entries (<c>MoveTrainingEntryUp/Down</c>, <c>RemoveTrainingEntry</c> take a struct,
+    /// so a prefix sends <c>SyncQueueEntry</c> (pawn, op, entry id) instead). Dev-only writers (<c>_devInstantTraining</c>) are not synced.
+    /// Still not covered: nothing known on the card (the AbilityWindow is point A/B).
     /// Status: [unverified] - compiled, names and Harmony patch binding checked offline, not run in game.
     /// </remarks>
     [MpCompatFor("K.PsiTech")]
@@ -244,11 +247,141 @@ namespace Multiplayer.Compat
                     prefix: new HarmonyMethod(typeof(PsiTech), nameof(PreLocalFactionChange)),
                     finalizer: new HarmonyMethod(typeof(PsiTech), nameof(FinalLocalFactionChange))));
 
+            RegisterPsiCardRow495();
+
             if (LabPsiLog)
                 Try("lab tracker id log", () =>
                     MpCompat.harmony.Patch(AccessTools.DeclaredMethod(managerType, "GetNextTrackerId"),
                         postfix: new HarmonyMethod(typeof(PsiTech), nameof(PostNextTrackerId))));
         }
+
+        #region Row 495 psi card training queue
+
+        private static Type cardType;
+        private static FieldInfo trackerQueueField, trackerSuspendedField, entryIdField;
+        private static ISyncField trackerSuspendedSync;
+        private static readonly string[] QueueEntryOps = { "RemoveTrainingEntry", "MoveTrainingEntryUp", "MoveTrainingEntryDown" };
+
+        private static void RegisterPsiCardRow495()
+        {
+            if (LabOff.Row(495))
+            {
+                Log.Message($"{LogPrefix}row 495: psi card training queue sync OFF (lab switch)");
+                return;
+            }
+
+            int n = 0;
+            try
+            {
+                cardType = AccessTools.TypeByName("PsiTech.Interface.PawnPsiCard");
+                trackerQueueField = AccessTools.DeclaredField(trackerType, "TrainingQueue");
+                trackerSuspendedField = AccessTools.DeclaredField(trackerType, "TrainingSuspended");
+                var entryType = trackerQueueField?.FieldType.GenericTypeArguments[0];
+                entryIdField = entryType == null ? null : AccessTools.DeclaredField(entryType, "Id");
+                var draw = cardType == null ? null : AccessTools.DeclaredMethod(cardType, "DrawTrainingQueue");
+                if (trackerQueueField == null || trackerSuspendedField == null || entryIdField == null || draw == null)
+                {
+                    Log.Warning($"{LogPrefix}FIXES row 495: PawnPsiCard.DrawTrainingQueue / tracker TrainingQueue / TrainingSuspended / entry Id not found, not synced");
+                    return;
+                }
+
+                foreach (var name in new[] { "AddEnergyToTrainingQueue", "AddFocusToTrainingQueue", "AddAbilityToTrainingQueue", "AddRemoveToTrainingQueue" })
+                {
+                    if (AccessTools.DeclaredMethod(trackerType, name) == null)
+                    {
+                        Log.Warning($"{LogPrefix}FIXES row 495: PsiTechTracker.{name} not found, not synced");
+                        continue;
+                    }
+                    MP.RegisterSyncMethod(trackerType, name);
+                    n++;
+                }
+
+                trackerSuspendedSync = MP.RegisterSyncField(trackerType, "TrainingSuspended");
+                MpCompat.harmony.Patch(draw,
+                    prefix: new HarmonyMethod(typeof(PsiTech), nameof(PreDrawTrainingQueue)),
+                    finalizer: new HarmonyMethod(typeof(PsiTech), nameof(PostDrawTrainingQueue)));
+                n++;
+
+                MP.RegisterSyncMethod(typeof(PsiTech), nameof(SyncQueueEntry));
+                for (int i = 0; i < QueueEntryOps.Length; i++)
+                {
+                    var m = AccessTools.DeclaredMethod(trackerType, QueueEntryOps[i]);
+                    if (m == null)
+                    {
+                        Log.Warning($"{LogPrefix}FIXES row 495: PsiTechTracker.{QueueEntryOps[i]} not found, not synced");
+                        continue;
+                    }
+                    var prefix = i == 0 ? nameof(PreRemoveEntry) : i == 1 ? nameof(PreMoveUp) : nameof(PreMoveDown);
+                    MpCompat.harmony.Patch(m, prefix: new HarmonyMethod(typeof(PsiTech), prefix));
+                    n++;
+                }
+            }
+            catch (Exception e)
+            {
+                Log.Error($"{LogPrefix}FIXES row 495: psi card sync was not fully registered: {e}");
+                return;
+            }
+
+            Log.Message($"{LogPrefix}row 495: psi card training queue synced ({n} methods)");
+        }
+
+        private static bool UiQueueCall(object tracker, object entry, int op)
+        {
+            if (!MP.IsInMultiplayer || !MP.InInterface || MP.IsExecutingSyncCommand || entry == null)
+                return true;
+            if (trackerPawnField.GetValue(tracker) is not Pawn pawn)
+                return true;
+            SyncQueueEntry(pawn, op, (int)entryIdField.GetValue(entry));
+            return false;
+        }
+
+        private static bool PreRemoveEntry(object __instance, object entry) => UiQueueCall(__instance, entry, 0);
+        private static bool PreMoveUp(object __instance, object entry) => UiQueueCall(__instance, entry, 1);
+        private static bool PreMoveDown(object __instance, object entry) => UiQueueCall(__instance, entry, 2);
+
+        // op 0 = RemoveTrainingEntry, 1 = MoveTrainingEntryUp, 2 = MoveTrainingEntryDown; the entry is found again by its saved Id.
+        private static void SyncQueueEntry(Pawn pawn, int op, int entryId)
+        {
+            try
+            {
+                var tracker = FindTracker(pawn);
+                if (tracker == null || op < 0 || op >= QueueEntryOps.Length || trackerQueueField.GetValue(tracker) is not IList queue)
+                    return;
+                foreach (var entry in queue)
+                {
+                    if ((int)entryIdField.GetValue(entry) != entryId)
+                        continue;
+                    AccessTools.DeclaredMethod(trackerType, QueueEntryOps[op]).Invoke(tracker, [entry]);
+                    return;
+                }
+            }
+            catch (Exception e)
+            {
+                LogPatchError("training queue entry", e);
+            }
+        }
+
+        // Suspend training: tracker.TrainingSuspended = !tracker.TrainingSuspended inside DrawTrainingQueue(Rect, Pawn).
+        private static void PreDrawTrainingQueue(Pawn pawn, ref bool __state)
+        {
+            __state = false;
+            if (!MP.IsInMultiplayer || trackerSuspendedSync == null)
+                return;
+            var tracker = FindTracker(pawn);
+            if (tracker == null)
+                return;
+            MP.WatchBegin();
+            trackerSuspendedSync.Watch(tracker);
+            __state = true;
+        }
+
+        private static void PostDrawTrainingQueue(bool __state)
+        {
+            if (__state)
+                MP.WatchEnd();
+        }
+
+        #endregion
 
         private static void PreLocalFactionChange() => localFactionChange++;
 
