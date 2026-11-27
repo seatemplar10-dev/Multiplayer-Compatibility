@@ -1,5 +1,10 @@
 using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Reflection;
+using System.Reflection.Emit;
 using HarmonyLib;
+using Multiplayer.API;
 using Verse;
 
 namespace Multiplayer.Compat
@@ -49,6 +54,98 @@ namespace Multiplayer.Compat
             // lab switch row 50 (package G, 17 Nov): off = old behaviour
             if (!LabOff.Row(50))
                 MpCompat.harmony.Patch(tick, transpiler: new HarmonyMethod(typeof(GlitterNet), nameof(NoIdentityHash)));
+
+            PatchSystemWakeMap();
+        }
+
+        // FIXES row 499: GlitterNetSystemWakeEnforcer.GameComponentTick picks the awakening hub from GetNetworkManager(Find.CurrentMap), the map
+        // each PC is VIEWING, so PCs on different maps disagree on whether and which hub wakes (hubAwoken, AwokenHub, the quest) and desync.
+        // Fix: in multiplayer every Find.CurrentMap read in that method becomes SystemWakeMap(), the same map on every PC.
+        // (GlitterNetSystemWakeEnforcer.FinalizeInit also reads Find.CurrentMap, but only on the one-off legacy-save migration when triggeredSignals == null; left alone.)
+        internal static void PatchSystemWakeMap()
+        {
+            // lab switch row 499: off = old behaviour
+            if (LabOff.Row(499))
+            {
+                Log.Message($"{LogPrefix}row 499 OFF: system wake map choice left as in the original");
+                return;
+            }
+            var enforcerType = AccessTools.TypeByName("GlitterNet.Events.GlitterNetSystemWakeEnforcer")
+                ?? throw new TypeLoadException($"{LogPrefix}type GlitterNet.Events.GlitterNetSystemWakeEnforcer not found");
+            var tick = AccessTools.DeclaredMethod(enforcerType, "GameComponentTick")
+                ?? throw new MissingMethodException(enforcerType.FullName, "GameComponentTick");
+            MpCompat.harmony.Patch(tick, transpiler: new HarmonyMethod(typeof(GlitterNet), nameof(SystemWakeMapTranspiler)));
+            Log.Message($"{LogPrefix}row 499: system wake map choice synced");
+        }
+
+        private static readonly MethodInfo CurrentMapGetter = AccessTools.PropertyGetter(typeof(Find), nameof(Find.CurrentMap));
+        private static readonly MethodInfo SystemWakeMapMethod = AccessTools.Method(typeof(GlitterNet), nameof(SystemWakeMap));
+
+        private static IEnumerable<CodeInstruction> SystemWakeMapTranspiler(IEnumerable<CodeInstruction> instr, MethodBase original)
+        {
+            var replaced = 0;
+            foreach (var ci in instr)
+            {
+                if (ci.Calls(CurrentMapGetter))
+                {
+                    ci.opcode = OpCodes.Call;
+                    ci.operand = SystemWakeMapMethod;
+                    replaced++;
+                }
+                yield return ci;
+            }
+            if (replaced == 0)
+                Log.Error($"{LogPrefix}row 499: no Find.CurrentMap call found in {original?.FullDescription()}");
+        }
+
+        // The map the system wake check looks at. Outside multiplayer: Find.CurrentMap, unchanged. In multiplayer: the first map in Find.Maps
+        // (same list order on every PC) that has a network hub the mod would awaken, else the first player home map, else null.
+        public static Map SystemWakeMap()
+        {
+            if (!MP.IsInMultiplayer) return Find.CurrentMap;
+            return PickMap(Find.Maps, HasWakeHub);
+        }
+
+        internal static Map PickMap(List<Map> maps, Func<Map, bool> hasHub)
+        {
+            foreach (var map in maps)
+                if (hasHub(map)) return map;
+            foreach (var map in maps)
+                if (map.IsPlayerHome) return map;
+            return null;
+        }
+
+        private static Type utilType, hubCompType, netType;
+        private static MethodInfo getManager, getHub;
+        private static PropertyInfo hubNetwork, totalPower;
+
+        // Same test as the mod: GetNetworkManager(map)?.GetHighestProcessingValueNetworkHub() with GlitterNetNetwork.TotalProcessorPower > 100.
+        internal static bool HasWakeHub(Map map)
+        {
+            try
+            {
+                if (getManager == null)
+                {
+                    utilType = AccessTools.TypeByName("GlitterNet.GlitterNetNetworkUtility");
+                    getManager = AccessTools.Method(utilType, "GetNetworkManager");
+                    var mgrType = AccessTools.TypeByName("GlitterNet.GlitterNetNetworkManager");
+                    getHub = AccessTools.Method(mgrType, "GetHighestProcessingValueNetworkHub");
+                    hubCompType = getHub.ReturnType;
+                    hubNetwork = AccessTools.Property(hubCompType, "GlitterNetNetwork");
+                    totalPower = AccessTools.Property(hubNetwork.PropertyType, "TotalProcessorPower");
+                }
+                var mgr = getManager.Invoke(null, new object[] { map });
+                if (mgr == null) return false;
+                var hub = getHub.Invoke(mgr, null);
+                if (hub == null) return false;
+                var net = hubNetwork.GetValue(hub);
+                return net != null && (float)totalPower.GetValue(net) > 100f;
+            }
+            catch (Exception e)
+            {
+                Log.Error($"{LogPrefix}row 499: hub test failed: {e}");
+                return false;
+            }
         }
 
         private static readonly System.Reflection.MethodInfo ObjectGetHashCode =
