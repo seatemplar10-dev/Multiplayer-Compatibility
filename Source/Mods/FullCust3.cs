@@ -79,15 +79,7 @@ namespace Multiplayer.Compat
         static void SetMapsFaction(Faction f)
         {
             if (f == null || Find.Maps == null) return;
-            if (mapCompType == null)
-            {
-                mapCompType = AccessTools.TypeByName("Multiplayer.Client.MultiplayerMapComp");
-                setFactionM = mapCompType == null ? null : AccessTools.Method(mapCompType, "SetFaction", new[] { typeof(Faction) });
-                // MultiplayerMapComp is not a MapComponent: MP keeps it in Multiplayer.game.mapComps and finds it with the
-                // Extensions.MpComp(Map) extension (MP Util/Extensions.cs:49-50). map.GetComponent returns null for it (orchestrator 28 Nov).
-                var ext = AccessTools.TypeByName("Multiplayer.Client.Extensions");
-                mpCompM = ext == null ? null : AccessTools.Method(ext, "MpComp", new[] { typeof(Map) });
-            }
+            EnsureMapRefl();
             if (setFactionM == null || mpCompM == null)
             {
                 if (!mapsMissLogged) { mapsMissLogged = true; Log.Error("[MPCompat - Simple Warrants] SetMapsFaction: MP MultiplayerMapComp.SetFaction or Extensions.MpComp not found, map faction not switched"); }
@@ -102,22 +94,105 @@ namespace Multiplayer.Compat
             if (!mapsLogged && n > 0) { mapsLogged = true; Log.Message("[MPCompat - Simple Warrants] SetMapsFaction: switched " + n + " map(s) (row 553)"); }
         }
 
+        static void EnsureMapRefl()
+        {
+            if (mapCompType == null)
+            {
+                mapCompType = AccessTools.TypeByName("Multiplayer.Client.MultiplayerMapComp");
+                setFactionM = mapCompType == null ? null : AccessTools.Method(mapCompType, "SetFaction", new[] { typeof(Faction) });
+                // MultiplayerMapComp is not a MapComponent: MP keeps it in Multiplayer.game.mapComps and finds it with the
+                // Extensions.MpComp(Map) extension (MP Util/Extensions.cs:49-50). map.GetComponent returns null for it (orchestrator 28 Nov).
+                var ext = AccessTools.TypeByName("Multiplayer.Client.Extensions");
+                mpCompM = ext == null ? null : AccessTools.Method(ext, "MpComp", new[] { typeof(Map) });
+            }
+        }
+
         /// <summary>Push f and switch every map's MP faction data (areaManager, zones) to it, like MP's LongEvents does.</summary>
         public static void PushMaps(Faction f)
         {
             if (!MP.IsInMultiplayer || f == null) return;
-            Push(null, f);
+            var saved = new List<KeyValuePair<Map, Faction>>();
+            savedStack.Push(saved);   // pushed before anything can throw, so PopMaps always pairs
+            try
+            {
+                SnapshotMaps(saved);
+                Push(null, f);
+            }
+            catch { PopMaps(); throw; }
             try { SetMapsFaction(f); }
             catch { PopMaps(); throw; }
         }
 
-        /// <summary>Pop the push and restore every map's MP faction data to the faction that is current after the pop.</summary>
+        static readonly Stack<List<KeyValuePair<Map, Faction>>> savedStack = new Stack<List<KeyValuePair<Map, Faction>>>();
+        static MethodInfo getFactionIdM;
+
+        // each map's current MP faction via MultiplayerMapComp.GetFactionId(map.zoneManager) (MP MultiplayerMapComp.cs:229-232)
+        static void SnapshotMaps(List<KeyValuePair<Map, Faction>> saved)
+        {
+            if (Find.Maps == null) return;
+            EnsureMapRefl();
+            if (getFactionIdM == null && mapCompType != null) getFactionIdM = AccessTools.Method(mapCompType, "GetFactionId", new[] { typeof(ZoneManager) });
+            if (getFactionIdM == null || mpCompM == null) return;
+            foreach (var map in Find.Maps)
+            {
+                try
+                {
+                    var comp = mpCompM.Invoke(null, new object[] { map });
+                    if (comp == null) continue;
+                    int id = (int)getFactionIdM.Invoke(comp, new object[] { map.zoneManager });
+                    var fac = Find.FactionManager.AllFactionsListForReading.Find(x => x.loadID == id);
+                    if (fac != null) saved.Add(new KeyValuePair<Map, Faction>(map, fac));
+                }
+                catch { }
+            }
+        }
+
+        /// <summary>Pop the push and restore every still-existing map to the faction it had at PushMaps.</summary>
         public static void PopMaps()
         {
             if (!MP.IsInMultiplayer) return;
+            var saved = savedStack.Count > 0 ? savedStack.Pop() : null;
             try { Pop(null); }
-            finally { SetMapsFaction(Faction.OfPlayer); }
+            finally
+            {
+                if (saved == null || saved.Count == 0) SetMapsFaction(Faction.OfPlayer);
+                else
+                {
+                    foreach (var kv in saved)
+                    {
+                        if (kv.Key == null || Find.Maps == null || !Find.Maps.Contains(kv.Key)) continue;
+                        try
+                        {
+                            var comp = mpCompM.Invoke(null, new object[] { kv.Key });
+                            if (comp != null) setFactionM.Invoke(comp, new object[] { kv.Value });
+                        }
+                        catch (Exception e) { Log.Warning("[MPCompat - Simple Warrants] PopMaps: " + e.GetType().Name); }
+                    }
+                }
+            }
         }
+
+        /// <summary>Positive sim check: Multiplayer.Ticking or Multiplayer.ExecutingCmds, read by reflection. Outside MP: false.</summary>
+        public static bool InSimulation()
+        {
+            if (!MP.IsInMultiplayer) return false;
+            if (!simLooked)
+            {
+                simLooked = true;
+                var t = AccessTools.TypeByName("Multiplayer.Client.Multiplayer");
+                tickingGetter = t == null ? null : AccessTools.PropertyGetter(t, "Ticking");
+                execGetter = t == null ? null : AccessTools.PropertyGetter(t, "ExecutingCmds");
+            }
+            try
+            {
+                if (tickingGetter != null && (bool)tickingGetter.Invoke(null, null)) return true;
+                if (execGetter != null && (bool)execGetter.Invoke(null, null)) return true;
+            }
+            catch { }
+            return false;
+        }
+        static bool simLooked;
+        static MethodInfo tickingGetter, execGetter;
 
         /// <summary>The existing RightPlayerFaction.Resolve(pawnFaction) as a reflection-free call for the transpilers.</summary>
         public static readonly MethodInfo ResolveM = AccessTools.Method(typeof(RightPlayerFaction), nameof(RightPlayerFaction.Resolve));

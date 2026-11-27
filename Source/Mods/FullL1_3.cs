@@ -159,7 +159,7 @@ namespace Multiplayer.Compat
 
         private static List<SwDlg> Dlgs()
         {
-            if (dlgGame != Current.Game) { dlgGame = Current.Game; dlgs = new List<SwDlg>(); windows.Clear(); }
+            if (dlgGame != Current.Game) { dlgGame = Current.Game; dlgs = new List<SwDlg>(); windows.Clear(); clicked.Clear(); }
             return dlgs;
         }
 
@@ -171,7 +171,7 @@ namespace Multiplayer.Compat
             if (Scribe.mode == LoadSaveMode.Saving && list.Count == 0) return;
             var l = Scribe.mode == LoadSaveMode.Saving ? list : null;
             Scribe_Collections.Look(ref l, "mpcSwDialogs", LookMode.Deep);
-            if (Scribe.mode == LoadSaveMode.LoadingVars) { dlgs = l ?? new List<SwDlg>(); windows.Clear(); }
+            if (Scribe.mode == LoadSaveMode.LoadingVars) { dlgs = l ?? new List<SwDlg>(); windows.Clear(); clicked.Clear(); }
         }
 
         private static void PruneDead()
@@ -187,7 +187,7 @@ namespace Multiplayer.Compat
             var c = new MakeCtx();
             __state = c;   // B4: set before any push, so FinMake always sees the context
             var f = PlayerOf(__0);
-            if (f != null && f != Faction.OfPlayer) { FullCust3.PushMaps(f); c.pushed = f; }
+            if (f != null) { FullCust3.PushMaps(f); c.pushed = f; }
             Rand.PushState(GenText.StableStringHash((string)Fld(__0, "loadID") ?? "") ^ 1127);
             c.rand = true;
         }
@@ -261,7 +261,7 @@ namespace Multiplayer.Compat
             if (st == null) return;
             var f = PlayerOf(st.warrant);
             bool push = false;
-            if (f != null && f != Faction.OfPlayer) { FullCust3.PushMaps(f); push = true; }
+            if (f != null) { FullCust3.PushMaps(f); push = true; }
             try
             {
                 makeMode = 2; captured = null;
@@ -272,6 +272,7 @@ namespace Multiplayer.Compat
                 var opt = opts[index];
                 if (opt.disabled) { clicked.Remove(loadID); return; }   // e.g. not enough silver: same answer on every PC, the record stays
                 Dlgs().Remove(st);
+                clicked.Remove(loadID);   // the record left dlgs (also Delay 24 hours): a re-added record must not stay blocked
                 // B3: no close sound (it would run on one PC only, inside the command)
                 if (windows.TryGetValue(loadID, out var w)) { windows.Remove(loadID); if (Find.WindowStack.IsOpen(w)) Find.WindowStack.TryRemove(w, false); }
                 opt.action?.Invoke();

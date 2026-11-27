@@ -262,7 +262,7 @@ namespace Multiplayer.Compat
             if (w == null) return;
             var f = PlayerOf(w);
             bool push = false;
-            if (MP.IsInMultiplayer && f != null && f != Faction.OfPlayer) { FullCust3.PushMaps(f); push = true; }   // B2: maps' Home area of the owner
+            if (MP.IsInMultiplayer && f != null) { FullCust3.PushMaps(f); push = true; }   // B2: maps' Home area of the owner
             try { AccessTools.Method(tWarrant, "DoCompensateAction").Invoke(w, null); }
             finally { if (push) FullCust3.PopMaps(); }
         }
@@ -289,7 +289,7 @@ namespace Multiplayer.Compat
         // in the tick the original runs and fills the cache on every PC.
         static bool PreAcceptChance(object __instance, ref float __result)
         {
-            if (!MP.IsInMultiplayer || !FullCust3.InInterface()) return true;
+            if (!MP.IsInMultiplayer || FullCust3.InSimulation()) return true;   // write the cache only in the simulation (positive check)
             var cached = Fld(__instance, "acceptChanceCached") as float?;
             if (cached.HasValue) { __result = cached.Value; return false; }
             var thing = Fld(__instance, "thing") as Thing;
