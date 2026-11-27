@@ -57,6 +57,68 @@ namespace Multiplayer.Compat
             popM?.Invoke(null, new object[] { map });
         }
 
+        static Type mapCompType;
+        static MethodInfo setFactionM, inInterfaceGetter, mpCompM;
+        static bool mapsMissLogged, mapsLogged;
+        static bool inInterfaceLooked;
+
+        /// <summary>Multiplayer.InInterface (false during a long event, a reload, a tick, executing commands), read by reflection. Outside MP: true.</summary>
+        public static bool InInterface()
+        {
+            if (!MP.IsInMultiplayer) return true;
+            if (!inInterfaceLooked)
+            {
+                inInterfaceLooked = true;
+                var t = AccessTools.TypeByName("Multiplayer.Client.Multiplayer");
+                inInterfaceGetter = t == null ? null : AccessTools.PropertyGetter(t, "InInterface");
+            }
+            if (inInterfaceGetter == null) return false;   // cannot tell: act as not in the interface (no ids handed out)
+            try { return (bool)inInterfaceGetter.Invoke(null, null); } catch { return false; }
+        }
+
+        static void SetMapsFaction(Faction f)
+        {
+            if (f == null || Find.Maps == null) return;
+            if (mapCompType == null)
+            {
+                mapCompType = AccessTools.TypeByName("Multiplayer.Client.MultiplayerMapComp");
+                setFactionM = mapCompType == null ? null : AccessTools.Method(mapCompType, "SetFaction", new[] { typeof(Faction) });
+                // MultiplayerMapComp is not a MapComponent: MP keeps it in Multiplayer.game.mapComps and finds it with the
+                // Extensions.MpComp(Map) extension (MP Util/Extensions.cs:49-50). map.GetComponent returns null for it (orchestrator 28 Nov).
+                var ext = AccessTools.TypeByName("Multiplayer.Client.Extensions");
+                mpCompM = ext == null ? null : AccessTools.Method(ext, "MpComp", new[] { typeof(Map) });
+            }
+            if (setFactionM == null || mpCompM == null)
+            {
+                if (!mapsMissLogged) { mapsMissLogged = true; Log.Error("[MPCompat - Simple Warrants] SetMapsFaction: MP MultiplayerMapComp.SetFaction or Extensions.MpComp not found, map faction not switched"); }
+                return;
+            }
+            int n = 0;
+            foreach (var map in Find.Maps)
+            {
+                var comp = mpCompM.Invoke(null, new object[] { map });
+                if (comp != null) { setFactionM.Invoke(comp, new object[] { f }); n++; }
+            }
+            if (!mapsLogged && n > 0) { mapsLogged = true; Log.Message("[MPCompat - Simple Warrants] SetMapsFaction: switched " + n + " map(s) (row 553)"); }
+        }
+
+        /// <summary>Push f and switch every map's MP faction data (areaManager, zones) to it, like MP's LongEvents does.</summary>
+        public static void PushMaps(Faction f)
+        {
+            if (!MP.IsInMultiplayer || f == null) return;
+            Push(null, f);
+            try { SetMapsFaction(f); }
+            catch { PopMaps(); throw; }
+        }
+
+        /// <summary>Pop the push and restore every map's MP faction data to the faction that is current after the pop.</summary>
+        public static void PopMaps()
+        {
+            if (!MP.IsInMultiplayer) return;
+            try { Pop(null); }
+            finally { SetMapsFaction(Faction.OfPlayer); }
+        }
+
         /// <summary>The existing RightPlayerFaction.Resolve(pawnFaction) as a reflection-free call for the transpilers.</summary>
         public static readonly MethodInfo ResolveM = AccessTools.Method(typeof(RightPlayerFaction), nameof(RightPlayerFaction.Resolve));
         public static readonly MethodInfo OfPlayerGetter = AccessTools.PropertyGetter(typeof(Faction), nameof(Faction.OfPlayer));

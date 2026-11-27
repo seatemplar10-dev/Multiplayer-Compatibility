@@ -81,6 +81,8 @@ namespace Multiplayer.Compat
                 h.Patch(m, prefix: genPre, finalizer: genFin);
             // 4. threat points: no write from the UI getter; filled in the tick
             h.Patch(AccessTools.PropertyGetter(tPawnW, "ThreatPoints"), prefix: new HarmonyMethod(me, nameof(PreThreat)));
+            h.Patch(AccessTools.DeclaredMethod(tPawnW, "AcceptChance"), prefix: new HarmonyMethod(me, nameof(PreAcceptChance)));
+            h.Patch(AccessTools.DeclaredMethod(tArtW, "AcceptChance"), prefix: new HarmonyMethod(me, nameof(PreAcceptChance)));
             h.Patch(AccessTools.DeclaredMethod(manager, "GameComponentTick"), postfix: new HarmonyMethod(me, nameof(PostTickThreat)));
             // 5 + 6. warrant anchored reads in the tick
             var tick = new HarmonyMethod(me, nameof(TrTick));
@@ -257,7 +259,12 @@ namespace Multiplayer.Compat
         static void SyncedCompensate(string loadID)
         {
             var w = FindWarrant(loadID);
-            if (w != null) AccessTools.Method(tWarrant, "DoCompensateAction").Invoke(w, null);
+            if (w == null) return;
+            var f = PlayerOf(w);
+            bool push = false;
+            if (MP.IsInMultiplayer && f != null && f != Faction.OfPlayer) { FullCust3.PushMaps(f); push = true; }   // B2: maps' Home area of the owner
+            try { AccessTools.Method(tWarrant, "DoCompensateAction").Invoke(w, null); }
+            finally { if (push) FullCust3.PopMaps(); }
         }
 
         static void SyncedRemove(string loadID, int listIdx)
@@ -268,7 +275,31 @@ namespace Multiplayer.Compat
         }
 
         // ---------- 2. Create ----------
-        static void PreCreationUi(out bool __state) { __state = inPreview; if (MP.IsInMultiplayer) inPreview = true; }
+        // B1: a preview only when MP is in the interface; during a long event / reload UniqueIds hands out real ids, so nothing is made then
+        static bool PreCreationUi(out bool __state)
+        {
+            __state = inPreview;
+            if (!MP.IsInMultiplayer) return true;
+            if (!FullCust3.InInterface()) return false;
+            inPreview = true;
+            return true;
+        }
+
+        // B5: AcceptChance written the unsaved cache from a UI frame (one PC only). In the interface it is computed without caching;
+        // in the tick the original runs and fills the cache on every PC.
+        static bool PreAcceptChance(object __instance, ref float __result)
+        {
+            if (!MP.IsInMultiplayer || !FullCust3.InInterface()) return true;
+            var cached = Fld(__instance, "acceptChanceCached") as float?;
+            if (cached.HasValue) { __result = cached.Value; return false; }
+            var thing = Fld(__instance, "thing") as Thing;
+            if (thing == null) { __result = 0f; return false; }
+            float reward = tPawnW.IsInstanceOfType(__instance)
+                ? Math.Max((int)Fld(__instance, "rewardForDead"), (int)Fld(__instance, "rewardForLiving"))
+                : Convert.ToSingle(Fld(__instance, "reward"));
+            __result = reward / thing.MarketValue;
+            return false;
+        }
         static void FinCreationUi(bool __state) { inPreview = __state; }
         static void PreCreateUi() { if (MP.IsInMultiplayer) inUiCreate = true; }
         static void FinCreateUi() { inUiCreate = false; }
