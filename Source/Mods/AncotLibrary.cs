@@ -54,6 +54,67 @@ public class AncotLibrary
             Log.Message("[MPCompat - Ancot Library] row 473 switched off by the lab, aerocraft take off / land buttons not synced");
         else
             PatchAerocraftGizmos();
+
+        // FIXES row 474 (27 Nov 2026): mod settings button "Apparel policy Generate" opens a FloatMenu (one entry per ApparelPolicyDef,
+        // ApparelPolicyGenerator.ApparelPolicyMenu). The entry's click lambda runs ApparelPolicyGenerator.GenerateApparelPolicyFromDef(def):
+        // outfitDatabase.MakeNewOutfit() (MP syncs that call and returns null on the clicking PC, so the label write throws),
+        // filter edits, then GameComponent_AncotLibrary.raceApparelPolicy[def.race] = policy (saved state). Only the clicking PC ran it.
+        // The per-def path reads no mod setting (apparelPolicy_GenerateAtStart is only read by the other overload), so the only argument
+        // is the ApparelPolicyDef. The click sends one synced call; the lambda body then runs on every PC inside the command.
+        if (LabOff.Row(474))
+            Log.Message("[MPCompat - Ancot Library] row 474 switched off by the lab, apparel policy generate button not synced");
+        else
+            PatchApparelPolicyGenerate();
+    }
+
+    private static Type apparelPolicyClosureType;
+    private static FieldInfo apparelPolicyDefField;
+    private static MethodInfo apparelPolicyLambda;
+
+    private static void PatchApparelPolicyGenerate()
+    {
+        try
+        {
+            var gen = AccessTools.TypeByName("AncotLibrary.ApparelPolicyGenerator");
+            var closure = gen?.GetNestedTypes(AccessTools.all).FirstOrDefault(t => t.GetMethods(AccessTools.all).Any(m => m.Name.Contains("<ApparelPolicyMenu>b__")));
+            var lambda = closure?.GetMethods(AccessTools.all).FirstOrDefault(m => m.Name.Contains("<ApparelPolicyMenu>b__") && !m.IsStatic && m.GetParameters().Length == 0);
+            var defField = closure?.GetFields(AccessTools.all).FirstOrDefault(f => f.FieldType.Name == "ApparelPolicyDef");
+            if (lambda == null || defField == null)
+            {
+                Log.Error("[MPCompat - Ancot Library] row 474: ApparelPolicyMenu click lambda not found, the apparel policy generate button can desync");
+                return;
+            }
+            apparelPolicyClosureType = closure;
+            apparelPolicyLambda = lambda;
+            apparelPolicyDefField = defField;
+            MP.RegisterSyncMethod(typeof(AncotLibrary), nameof(SyncedGenerateApparelPolicy));
+            MpCompat.harmony.Patch(lambda, prefix: new HarmonyMethod(typeof(AncotLibrary), nameof(PreGenerateApparelPolicy)));
+            Log.Message("[MPCompat - Ancot Library] row 474: apparel policy generate button synced");
+        }
+        catch (Exception e)
+        {
+            Log.Error($"[MPCompat - Ancot Library] row 474: could not sync the apparel policy generate button: {e}");
+        }
+    }
+
+    // The click: in multiplayer write nothing here, send the def; inside the command the original lambda body runs.
+    private static bool PreGenerateApparelPolicy(object __instance)
+    {
+        if (!MP.IsInMultiplayer || MP.IsExecutingSyncCommand)
+            return true;
+        var def = apparelPolicyDefField.GetValue(__instance) as Def;
+        if (def != null)
+            SyncedGenerateApparelPolicy(def);
+        return false;
+    }
+
+    // Runs on every PC: rebuild the click closure for this def and run the original lambda.
+    private static void SyncedGenerateApparelPolicy(Def def)
+    {
+        if (def == null || apparelPolicyClosureType == null) return;
+        var closure = Activator.CreateInstance(apparelPolicyClosureType);
+        apparelPolicyDefField.SetValue(closure, def);
+        apparelPolicyLambda.Invoke(closure, null);
     }
 
     private static void PatchAerocraftGizmos()
