@@ -44,6 +44,39 @@ namespace Multiplayer.Compat
         {
             LongEventHandler.ExecuteWhenFinished(RunConfigSideEffects);
             PatchDelayedArrival();
+            PatchRegenCorpseFaction();
+        }
+
+        // FIXES row 519 (27 Nov 2026): GameComponent_AAT.RegenCorpse (from GameComponentTick) gives the respawned boss an assault lord only if
+        // HostileTo(boss faction, Faction.OfPlayer), which is the spectator faction in multifaction MP. The read (IL_010A) becomes the faction
+        // of the map the boss respawns on (the wealthiest player home map), via PlayerFactionForTick.ForMap. Elsewhere unchanged.
+        private static void PatchRegenCorpseFaction()
+        {
+            if (LabOff.Row(519))
+            {
+                Log.Message(LogPrefix + "row 519 switched off by the lab, RegenCorpse stays on OfPlayer");
+                return;
+            }
+            var type = AccessTools.TypeByName("AncientAmorphousThreat.GameComponent_AAT");
+            var method = type == null ? null : AccessTools.DeclaredMethod(type, "RegenCorpse");
+            if (method == null)
+            {
+                Log.Error(LogPrefix + "row 519: GameComponent_AAT.RegenCorpse not found, the respawned boss stays on OfPlayer");
+                return;
+            }
+            MpCompat.harmony.Patch(method, transpiler: new HarmonyMethod(typeof(AncientAmorphousThreat), nameof(SwapOfPlayerInRegenCorpse)));
+            Log.Message(LogPrefix + "row 519: AAT GameComponent_AAT.RegenCorpse uses the right player faction in multifaction");
+        }
+
+        private static IEnumerable<CodeInstruction> SwapOfPlayerInRegenCorpse(IEnumerable<CodeInstruction> instr, MethodBase __originalMethod)
+        {
+            var local = PlayerFactionForTick.OnlyLocalOfType(__originalMethod, typeof(Map));
+            if (local < 0)
+            {
+                Log.Error(LogPrefix + "row 519: RegenCorpse has no single Map local, the respawned boss stays on OfPlayer");
+                return instr;
+            }
+            return PlayerFactionForTick.SwapOfPlayer(instr, () => new CodeInstruction(OpCodes.Ldloc, local), 1, "AAT RegenCorpse");
         }
 
         private static void PatchDelayedArrival()
