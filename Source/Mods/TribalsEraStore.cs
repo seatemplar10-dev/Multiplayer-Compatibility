@@ -104,6 +104,196 @@ namespace Multiplayer.Compat
             harmony.Patch(change, postfix: new HarmonyMethod(typeof(TribalsEraStore), nameof(ChangePostfix)));
             hooksInstalled = true;
             Log.Message(logPrefix + "row 523: era, points, cornerstones and ethos are kept per player faction in multifaction");
+            InstallSave(harmony, compType);
+        }
+
+        // ================= row 524: save, load, old saves, joiners, SP host =================
+        // Save format: the stock nodes keep the CURRENT faction (the same scheme as MP's own save, MultiplayerWorldComp.cs:131-156). New nodes:
+        //   eraCurrentFactionId  the faction whose values are in the stock nodes (-1 / absent = old save)
+        //   eraStore             every other non-spectator faction: factionId, tech (-1 = null), points, ethos, ethosLocked, fire x2, lastResearch,
+        //                        cornerstones and finishedResearchProjects as lists of defNames (strings, so loading needs no Def lookup)
+
+        /// <summary>What LoadingVars read: raw values only. Turned into records at the first Swap (see GetOrCreate).</summary>
+        sealed class Pending
+        {
+            public int currentId = -1;
+            public List<TribalsEraRecordData> list;
+        }
+        static readonly ConditionalWeakTable<object, Pending> pendings = new ConditionalWeakTable<object, Pending>();
+
+        // def.techLevel of the player faction before the stock PostLoadInit write (step 4)
+        static FactionDef suppressDef;
+        static TechLevel suppressLevel;
+
+        static void InstallSave(Harmony harmony, Type compType)
+        {
+            if (LabOff.Row(524))
+            {
+                Log.Message(logPrefix + "row 524 switched off by the lab, era store is not saved");
+                return;
+            }
+            var expose = AccessTools.DeclaredMethod(compType, "ExposeData");
+            if (expose == null) { Log.Error(logPrefix + "row 524: GameComponent_Tribals.ExposeData not found, era store not saved"); return; }
+            harmony.Patch(expose, prefix: new HarmonyMethod(typeof(TribalsEraStore), nameof(ExposePrefix)),
+                postfix: new HarmonyMethod(typeof(TribalsEraStore), nameof(ExposePostfix)));
+            var unload = AccessTools.DeclaredMethod("Verse.Profile.MemoryUtility:UnloadUnusedUnityAssets");
+            if (unload != null)
+                harmony.Patch(unload, postfix: new HarmonyMethod(typeof(TribalsEraStore), nameof(UnloadPostfix)) { priority = Priority.Last });
+            else Log.Warning(logPrefix + "row 524: MemoryUtility.UnloadUnusedUnityAssets not found, defs are not re-mirrored after it");
+            Log.Message(logPrefix + "row 524: the per-faction era store is saved and loaded");
+        }
+
+        static void ExposePrefix(object __instance)
+        {
+            suppressDef = null;
+            try
+            {
+                if (Scribe.mode == LoadSaveMode.Saving)
+                {
+                    // 1. before the stock nodes are written: the live fields become store[current]
+                    if (!IsActive() || !stores.TryGetValue(__instance, out var store) || store.eraCurrentFactionId == -1) return;
+                    if (!IsSpectatorId(store.eraCurrentFactionId, Spectator())) store.records[store.eraCurrentFactionId] = Snapshot(__instance, null);
+                }
+                else if (Scribe.mode == LoadSaveMode.PostLoadInit && IsActive())
+                {
+                    // 4. the stock load write Faction.OfPlayer.def.techLevel = playerTechLevel (GameComponent_Tribals.cs:281) must not run in multifaction
+                    var of = Faction.OfPlayer;
+                    if (of?.def != null) { suppressDef = of.def; suppressLevel = of.def.techLevel; }
+                }
+            }
+            catch (Exception e) { LogOnce("row 524: save/load prefix failed (logged once): " + e); }
+        }
+
+        static void ExposePostfix(object __instance)
+        {
+            try
+            {
+                if (suppressDef != null) { suppressDef.techLevel = suppressLevel; suppressDef = null; }
+                var mode = Scribe.mode;
+                if (mode == LoadSaveMode.Saving)
+                {
+                    if (!stores.TryGetValue(__instance, out var store) || store.eraCurrentFactionId == -1 || !IsActive()) return;
+                    int cur = store.eraCurrentFactionId;
+                    var list = new List<TribalsEraRecordData>();
+                    foreach (var kv in store.records) if (kv.Key != cur) list.Add(ToData(kv.Key, kv.Value));
+                    Scribe_Values.Look(ref cur, "eraCurrentFactionId", -1);
+                    Scribe_Collections.Look(ref list, "eraStore", LookMode.Deep);
+                }
+                else if (mode == LoadSaveMode.LoadingVars)
+                {
+                    stores.Remove(__instance);          // a loaded game never keeps the store of an earlier instance
+                    pendings.Remove(__instance);
+                    var p = new Pending();
+                    Scribe_Values.Look(ref p.currentId, "eraCurrentFactionId", -1);
+                    Scribe_Collections.Look(ref p.list, "eraStore", LookMode.Deep);
+                    if (p.currentId == -1) p.list = null;
+                    pendings.Add(__instance, p);
+                }
+            }
+            catch (Exception e) { LogOnce("row 524: save/load failed (logged once): " + e); }
+        }
+
+        static void UnloadPostfix()
+        {
+            try
+            {
+                if (Current.Game == null || !fieldsBound || !IsActive()) return;
+                var comp = CompInstance();
+                if (comp == null || !stores.TryGetValue(comp, out var store) || store.eraCurrentFactionId == -1) return;
+                store.mirrored = false;      // the mod restores every def to its pristine era here; mirror again for the current faction
+                SafeSwap();
+            }
+            catch (Exception e) { LogOnce("row 524: re-mirror after unload failed (logged once): " + e); }
+        }
+
+        static void LogOnce(string text)
+        {
+            if (errorLogged) return;
+            errorLogged = true;
+            Log.Error(logPrefix + text);
+        }
+
+        static TribalsEraRecordData ToData(int id, Record r)
+        {
+            var d = new TribalsEraRecordData
+            {
+                factionId = id, tech = r.playerTechLevel.HasValue ? (int)r.playerTechLevel.Value : -1, points = r.availableCornerstonePoints,
+                ethos = r.ethos, ethosLocked = r.ethosLocked, fireTicks = r.largeFireActiveTicks, fireUpdate = r.lastLargeFireUpdate,
+                lastResearch = r.lastTickResearchFinished,
+            };
+            foreach (var c in r.cornerstones) if (c != null) d.cornerstones.Add(c.defName);
+            foreach (var f in r.finishedResearchProjects) if (f != null) d.finished.Add(f.defName);
+            return d;
+        }
+
+        static Record FromData(TribalsEraRecordData d)
+        {
+            var r = new Record
+            {
+                playerTechLevel = d.tech >= 0 ? (TechLevel?)(TechLevel)d.tech : null, availableCornerstonePoints = d.points, ethos = d.ethos,
+                ethosLocked = d.ethosLocked, largeFireActiveTicks = d.fireTicks, lastLargeFireUpdate = d.fireUpdate, lastTickResearchFinished = d.lastResearch,
+            };
+            var cornerType = fCorner.FieldType.IsGenericType ? fCorner.FieldType.GetGenericArguments()[0] : typeof(Def);
+            foreach (var n in d.cornerstones)
+            {
+                var def = ResolveDef(cornerType, n);
+                if (def != null) r.cornerstones.Add(def);
+            }
+            foreach (var n in d.finished) if (ResolveDef(typeof(ResearchProjectDef), n) is ResearchProjectDef rp) r.finishedResearchProjects.Add(rp);
+            return r;
+        }
+
+        static Def ResolveDef(Type defType, string name)
+        {
+            try
+            {
+                var db = typeof(DefDatabase<>).MakeGenericType(defType);
+                return db.GetMethod("GetNamedSilentFail", BindingFlags.Public | BindingFlags.Static, null, new[] { typeof(string) }, null)?.Invoke(null, new object[] { name }) as Def;
+            }
+            catch (Exception) { return null; }
+        }
+
+        static Record CopyRecord(Record s)
+        {
+            var r = new Record
+            {
+                playerTechLevel = s.playerTechLevel, availableCornerstonePoints = s.availableCornerstonePoints, ethos = s.ethos, ethosLocked = s.ethosLocked,
+                largeFireActiveTicks = s.largeFireActiveTicks, lastLargeFireUpdate = s.lastLargeFireUpdate, lastTickResearchFinished = s.lastTickResearchFinished,
+            };
+            r.cornerstones.AddRange(s.cornerstones);
+            r.finishedResearchProjects = new HashSet<ResearchProjectDef>(s.finishedResearchProjects);
+            return r;
+        }
+
+        /// <summary>Row 524 step 3, run by the first Swap after a load (not FinalizeInit: Faction objects and the spectator exist at the first Swap, and
+        /// the first Swap is the first reader of the store; the FinalizeInit loop is part 3). Returns false when no load data is waiting (new game, SP host).</summary>
+        static bool SeedFromLoad(object comp, Store store, Faction spectator)
+        {
+            if (!pendings.TryGetValue(comp, out var pend)) return false;
+            pendings.Remove(comp);
+            var stock = Snapshot(comp, null);          // the stock nodes: the current faction's values
+            if (pend.currentId != -1 && pend.list != null)
+            {
+                foreach (var d in pend.list)
+                    if (d.factionId != pend.currentId && !IsSpectatorId(d.factionId, spectator)) store.records[d.factionId] = FromData(d);
+                if (!IsSpectatorId(pend.currentId, spectator)) store.records[pend.currentId] = stock;
+                store.eraCurrentFactionId = pend.currentId;    // the live fields ARE store[currentId] already (same values on every PC)
+                store.seedFactionId = pend.currentId;
+            }
+            else
+            {
+                // old save: every non-spectator player faction gets its own deep copy of the stock values; no faction owns the live fields
+                var factions = Find.FactionManager.AllFactionsListForReading;
+                for (var i = 0; i < factions.Count; i++)
+                {
+                    var f = factions[i];
+                    if (f == null || f.def == null || !f.IsPlayer || IsSpectator(f, spectator) || store.records.ContainsKey(f.loadID)) continue;
+                    var copy = CopyRecord(stock);
+                    if (copy.playerTechLevel == null) copy.playerTechLevel = Pristine(f.def) ?? f.def.techLevel;
+                    store.records[f.loadID] = copy;
+                }
+            }
+            return true;
         }
 
         static bool BindFields(Type t)
@@ -197,6 +387,10 @@ namespace Multiplayer.Compat
         {
             if (stores.TryGetValue(comp, out var existing)) return existing;
             var store = new Store();
+            // Row 524 (5b): after a load the seed comes from the SAVE (eraCurrentFactionId, or the old-save copy rule), the same on every PC.
+            // RealPlayer() below is the LOCAL faction of each PC and differs between PCs, so it is only used when no load data is waiting
+            // (new game, or an SP save hosted by HostUtil.cs:83: one player faction).
+            if (SeedFromLoad(comp, store, spectator)) { stores.Add(comp, store); return store; }
             // The live fields belong to the faction that was current when the store is first created: the local player faction (HostUtil.cs:83
             // hosts a single player save: that colony keeps its era). Falls back to the new faction when it is not the spectator.
             Faction owner = null;
@@ -327,6 +521,31 @@ namespace Multiplayer.Compat
         {
             if (def == null || originalTechLevelsField == null) return null;
             return originalTechLevelsField.GetValue(null) is Dictionary<FactionDef, TechLevel> table && table.TryGetValue(def, out var level) ? level : (TechLevel?)null;
+        }
+    }
+
+    /// <summary>Row 524: save record of one faction (top-level so Scribe finds it by name in any assembly scan).</summary>
+    public sealed class TribalsEraRecordData : IExposable
+    {
+        public int factionId, tech = -1, points, fireTicks, fireUpdate, lastResearch;
+        public string ethos;
+        public bool ethosLocked;
+        public List<string> cornerstones = new List<string>();
+        public List<string> finished = new List<string>();
+        public void ExposeData()
+        {
+            Scribe_Values.Look(ref factionId, "factionId", 0);
+            Scribe_Values.Look(ref tech, "tech", -1);
+            Scribe_Values.Look(ref points, "points", 0);
+            Scribe_Values.Look(ref ethos, "ethos");
+            Scribe_Values.Look(ref ethosLocked, "ethosLocked", false);
+            Scribe_Values.Look(ref fireTicks, "fireTicks", 0);
+            Scribe_Values.Look(ref fireUpdate, "fireUpdate", 0);
+            Scribe_Values.Look(ref lastResearch, "lastResearch", 0);
+            Scribe_Collections.Look(ref cornerstones, "cornerstones", LookMode.Value);
+            Scribe_Collections.Look(ref finished, "finished", LookMode.Value);
+            if (cornerstones == null) cornerstones = new List<string>();
+            if (finished == null) finished = new List<string>();
         }
     }
 }
