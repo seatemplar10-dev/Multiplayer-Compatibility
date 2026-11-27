@@ -2,6 +2,8 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Reflection;
+using System.Reflection.Emit;
+using System.Runtime.CompilerServices;
 using HarmonyLib;
 using Multiplayer.API;
 using RimWorld;
@@ -102,6 +104,9 @@ namespace Multiplayer.Compat
 
             // lab switch row 209 (wave 2, 17 Nov): off = old behaviour
             if (!LabOff.Row(209)) SetupSexInteractionResolved();
+
+            // lab switch row 510 (27 Nov): off = old behaviour
+            if (!LabOff.Row(510)) PatchInsectEggHatchKind();
         }
 
         private static void PatchPermissionFlags()
@@ -227,6 +232,124 @@ namespace Multiplayer.Compat
         private const byte NoPart = 0, RjwPart = 1, VanillaPart = 2;
         // Penetration ends on the wire: an index into one of the two part lists, or the part itself (Sex_Sixtynine picks mouths that are in neither list)
         private const byte NoRef = 0, InitiatorRef = 1, RecipientRef = 2, InlineRef = 3;
+
+        #region Insect egg hatch kind (FIXES row 510)
+
+        // rjw.Hediff_InsectEgg.BirthFertilizedAnimalEgg wrote the hatched PawnKindDef into CompHatcher.Props (shared by every egg of the ThingDef),
+        // so every egg hatched the last kind written, and a PC that joined or reloaded had the XML default. Now: the kind is kept per comp
+        // (saved, key hatchKindRow510), Hatch swaps it into Props for the call and restores Props afterwards. Stack merge: a split-off egg
+        // gets the kind of its source; absorbing an egg without a kind takes the other egg's kind (eggs stack to 1 in RJW's defs, so rare).
+        private static readonly ConditionalWeakTable<CompHatcher, PawnKindDef> hatchKindRow510 = new();
+        [ThreadStatic] private static CompHatcher pendingHatcher510;
+        private static readonly FieldInfo hatcherPawnField510 = AccessTools.Field(typeof(CompProperties_Hatcher), nameof(CompProperties_Hatcher.hatcherPawn));
+        private static readonly MethodInfo propsGetter510 = AccessTools.PropertyGetter(typeof(CompHatcher), "Props");
+
+        private static void PatchInsectEggHatchKind()
+        {
+            var egg = AccessTools.TypeByName("rjw.Hediff_InsectEgg")
+                ?? throw new TypeLoadException($"{LogPrefix}type rjw.Hediff_InsectEgg not found");
+            var birth = AccessTools.DeclaredMethod(egg, "BirthFertilizedAnimalEgg")
+                ?? throw new MissingMethodException(egg.FullName, "BirthFertilizedAnimalEgg");
+            var harmony = MpCompat.harmony;
+            harmony.Patch(birth, transpiler: new HarmonyMethod(typeof(RimJobWorld), nameof(InsectEggBirthTranspiler510)));
+            harmony.Patch(AccessTools.DeclaredMethod(typeof(CompHatcher), nameof(CompHatcher.PostExposeData)),
+                postfix: new HarmonyMethod(typeof(RimJobWorld), nameof(HatcherExposePostfix510)));
+            harmony.Patch(AccessTools.DeclaredMethod(typeof(CompHatcher), nameof(CompHatcher.Hatch)),
+                prefix: new HarmonyMethod(typeof(RimJobWorld), nameof(HatchPrefix510)),
+                finalizer: new HarmonyMethod(typeof(RimJobWorld), nameof(HatchFinalizer510)));
+            var split = AccessTools.DeclaredMethod(typeof(CompHatcher), "PostSplitOff", [typeof(Thing)]);
+            if (split != null)
+                harmony.Patch(split, postfix: new HarmonyMethod(typeof(RimJobWorld), nameof(SplitOffPostfix510)));
+            var absorb = AccessTools.DeclaredMethod(typeof(CompHatcher), "PreAbsorbStack", [typeof(Thing), typeof(int)]);
+            if (absorb != null)
+                harmony.Patch(absorb, prefix: new HarmonyMethod(typeof(RimJobWorld), nameof(AbsorbPrefix510)));
+            Log.Message(LogPrefix + "row 510: RJW insect egg hatch kind kept per egg");
+        }
+
+        private static IEnumerable<CodeInstruction> InsectEggBirthTranspiler510(IEnumerable<CodeInstruction> instructions)
+        {
+            var stash = AccessTools.DeclaredMethod(typeof(RimJobWorld), nameof(StashHatcher510));
+            var store = AccessTools.DeclaredMethod(typeof(RimJobWorld), nameof(StoreHatchKind510));
+            int swapped = 0;
+            foreach (var ci in instructions)
+            {
+                if ((ci.opcode == OpCodes.Callvirt || ci.opcode == OpCodes.Call) && ci.operand is MethodInfo mi && mi == propsGetter510)
+                {
+                    swapped++;
+                    yield return new CodeInstruction(OpCodes.Call, stash) { labels = ci.labels, blocks = ci.blocks };
+                }
+                else if (ci.opcode == OpCodes.Stfld && ci.operand is FieldInfo f && f == hatcherPawnField510)
+                {
+                    swapped++;
+                    yield return new CodeInstruction(OpCodes.Call, store) { labels = ci.labels, blocks = ci.blocks };
+                }
+                else yield return ci;
+            }
+            if (swapped != 2) Log.Error($"{LogPrefix}row 510: expected 2 instructions to swap in BirthFertilizedAnimalEgg, found {swapped}");
+        }
+
+        // Replaces CompHatcher.get_Props: remembers which comp is being filled, returns the shared Props unchanged (nothing is written to it).
+        public static CompProperties_Hatcher StashHatcher510(CompHatcher comp)
+        {
+            pendingHatcher510 = comp;
+            return comp.Props;
+        }
+
+        // Replaces stfld CompProperties_Hatcher::hatcherPawn: the kind goes to the comp remembered by StashHatcher510.
+        public static void StoreHatchKind510(CompProperties_Hatcher props, PawnKindDef kind)
+        {
+            var comp = pendingHatcher510;
+            pendingHatcher510 = null;
+            if (comp == null) return;
+            hatchKindRow510.Remove(comp);
+            if (kind != null) hatchKindRow510.Add(comp, kind);
+        }
+
+        private static void HatcherExposePostfix510(CompHatcher __instance)
+        {
+            hatchKindRow510.TryGetValue(__instance, out var kind);
+            Scribe_Defs.Look(ref kind, "hatchKindRow510");
+            if (Scribe.mode == LoadSaveMode.LoadingVars && kind != null)
+            {
+                hatchKindRow510.Remove(__instance);
+                hatchKindRow510.Add(__instance, kind);
+            }
+        }
+
+        private static void HatchPrefix510(CompHatcher __instance, out PawnKindDef __state)
+        {
+            __state = null;
+            if (!hatchKindRow510.TryGetValue(__instance, out var kind)) return;
+            var props = __instance.Props;
+            __state = props.hatcherPawn;
+            props.hatcherPawn = kind;
+        }
+
+        private static Exception HatchFinalizer510(CompHatcher __instance, PawnKindDef __state, Exception __exception)
+        {
+            if (hatchKindRow510.TryGetValue(__instance, out _))
+                __instance.Props.hatcherPawn = __state;
+            return __exception;
+        }
+
+        private static void SplitOffPostfix510(CompHatcher __instance, Thing piece)
+        {
+            if (!hatchKindRow510.TryGetValue(__instance, out var kind)) return;
+            var other = piece is ThingWithComps twc ? twc.GetComp<CompHatcher>() : null;
+            if (other == null) return;
+            hatchKindRow510.Remove(other);
+            hatchKindRow510.Add(other, kind);
+        }
+
+        private static void AbsorbPrefix510(CompHatcher __instance, Thing otherStack)
+        {
+            if (hatchKindRow510.TryGetValue(__instance, out _)) return;
+            var other = otherStack is ThingWithComps twc ? twc.GetComp<CompHatcher>() : null;
+            if (other != null && hatchKindRow510.TryGetValue(other, out var kind))
+                hatchKindRow510.Add(__instance, kind);
+        }
+
+        #endregion
 
         private static void SetupSexInteractionResolved()
         {
