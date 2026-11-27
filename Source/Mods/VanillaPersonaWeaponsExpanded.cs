@@ -188,6 +188,12 @@ public class VanillaPersonaWeaponsExpanded
 
     #endregion
 
+    // FIXES row 516: IsAllowedToGetWeapon (called from GameComponentTick) compares pawn.Faction with Faction.OfPlayer = spectator in
+    // multifaction, so the letter of every real player faction pawn was dropped as NotPlayerFaction.
+    [MpCompatTranspiler("VanillaPersonaWeaponsExpanded.GameComponent_PersonaWeapons", "IsAllowedToGetWeapon")]
+    private static IEnumerable<CodeInstruction> AllowedFaction(IEnumerable<CodeInstruction> instr)
+        => RightPlayerFaction.Swap(instr, 516, "Vanilla Persona Weapons Expanded GameComponent_PersonaWeapons.IsAllowedToGetWeapon");
+
     #region Letter removing patches
 
     // The postpone button removes the dialog for 7 days. This is a bit disruptive
