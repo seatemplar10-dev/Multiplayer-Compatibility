@@ -43,8 +43,8 @@ namespace Multiplayer.Compat
             }
             canWearField = AccessTools.Field(dialogType, "canWearAllowed");
             loadFilter = AccessTools.Method(dialogType, "LoadFilter");
-            selectedPolicyProp = AccessTools.Property(dialogType, "SelectedPolicy");
-            selectedPawnProp = AccessTools.Property(dialogType, "SelectedPawn");
+            selectedPolicyProp = dialogType.GetProperty("SelectedPolicy", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly);
+            selectedPawnProp = dialogType.GetProperty("SelectedPawn", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly);
 
             var enter = new HarmonyMethod(typeof(ChooseYourOutfit), nameof(Enter));
             var exit = new HarmonyMethod(typeof(ChooseYourOutfit), nameof(Exit));
@@ -54,7 +54,15 @@ namespace Multiplayer.Compat
             foreach (var name in new[] { "<GenerateContextMenu>b__0", "<GenerateContextMenu>b__3" })
                 sites += Scope(ctx?.GetMethod(name, AccessTools.all), enter, exit);
             sites += Scope(AccessTools.Method(dialogType, "ApplyFilter"), enter, exit);                 // 3,4
-            sites += Scope(AccessTools.Method(worn, "DoWindowContents"), enter, exit);                  // 5,6
+            // 5,6: the worn apparel list. Its DoWindowContents body is not patched directly (it references UnityEngine members
+            // missing from the 1.7 stubs); Window.InnerWindowOnGUI calls it, so scope on that window type instead.
+            wornType = worn;
+            var inner = AccessTools.Method(typeof(Window), "InnerWindowOnGUI");
+            if (inner != null)
+            {
+                MpCompat.harmony.Patch(inner, prefix: new HarmonyMethod(typeof(ChooseYourOutfit), nameof(EnterWorn)), finalizer: new HarmonyMethod(typeof(ChooseYourOutfit), nameof(ExitWorn)));
+                sites++;
+            }
             sites += Scope(floatClosure.GetMethod("<GetOptionsFor>b__0", AccessTools.all), enter, exit); // 7
             if (sites != 5)
             {
@@ -78,6 +86,9 @@ namespace Multiplayer.Compat
             return 1;
         }
 
+        static Type wornType;
+        static void EnterWorn(Window __instance, ref bool __state) { __state = __instance.GetType() == wornType; if (__state) scope++; }
+        static void ExitWorn(bool __state) { if (__state && scope > 0) scope--; }
         static void Enter() => scope++;
         static void Exit() { if (scope > 0) scope--; }
 
