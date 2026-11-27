@@ -142,7 +142,11 @@ namespace Multiplayer.Compat
             "ForceDoJob.WorldComp:WorldComponentTick",
             "ForceDoJob.Patch_FloatMenuMakerMap_ChoicesAtFor:Prefix",
         };
-        public FullForceDoJob(ModContentPack mod) => FullKE.PatchTranspiler("Force Do Job", Methods, nameof(FullKE.DateTimeTicksTranspiler));
+        public FullForceDoJob(ModContentPack mod)
+        {
+            FullKE.PatchTranspiler("Force Do Job", Methods, nameof(FullKE.DateTimeTicksTranspiler));
+            FullCust2.PatchForceDoJob(); // P3CUST: ChoicesForPawn static + synced self-tend write
+        }
     }
 
     /// <summary>Cash Register by Orion: IsActive and HasToWork cached on Time.realtimeSinceStartup.</summary>
