@@ -587,6 +587,17 @@ namespace Multiplayer.Compat
 
         private static void PatchDrafting()
         {
+            // Newer Achtung syncs drafting itself (Tools.SetDraftStatus(Pawn, bool, bool localOnly) routes to
+            // MultiplayerSupport.SetDraftStatus / CancelDrafting, both [SyncMethod]). Nothing to add then.
+            var nativeSupport = AccessTools.TypeByName("AchtungMod.MultiplayerSupport");
+            if (nativeSupport != null
+                && AccessTools.DeclaredMethod(nativeSupport, "SetDraftStatus", new[] { typeof(Pawn), typeof(bool) }) != null
+                && AccessTools.DeclaredMethod(nativeSupport, "CancelDrafting", new[] { typeof(List<Pawn>), typeof(List<bool>) }) != null)
+            {
+                Log.Message($"{LogPrefix}drafting sync is built into this Achtung (MultiplayerSupport.SetDraftStatus/CancelDrafting), compat drafting patches skipped, registered.");
+                return;
+            }
+
             var toolsType = FindType("AchtungMod.Tools");
             var colonistType = FindType("AchtungMod.Colonist");
             var multiActionsType = FindType("AchtungMod.MultiActions");
