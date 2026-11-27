@@ -67,7 +67,10 @@ namespace Multiplayer.Compat
     [MpCompatFor("forti.rimtoll")]
     class FullRimToll
     {
-        public FullRimToll(ModContentPack mod) =>
+        public FullRimToll(ModContentPack mod)
+        {
             FullQ12.PatchResolve("RimToll", new[] { "RimToll.GameComponent_TollState:ReleaseWorker" });
+            FullRimTollCu3.Init();
+        }
     }
 }

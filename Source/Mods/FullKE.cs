@@ -108,7 +108,11 @@ namespace Multiplayer.Compat
     class FullVisitSettlements
     {
         private static readonly string[] CurrentMapMethods = { "VS_PenalizeForBuilding:Postfix" };
-        public FullVisitSettlements(ModContentPack mod) => FullKE.PatchCurrentMap("Visit Settlements", CurrentMapMethods);
+        public FullVisitSettlements(ModContentPack mod)
+        {
+            FullKE.PatchCurrentMap("Visit Settlements", CurrentMapMethods);
+            FullVisitRaidCu3.Init();
+        }
     }
 
     /// <summary>Invader Mechanoids (EL_IM): time-seeded System.Random field used to pick the cast target.</summary>
@@ -167,5 +171,15 @@ namespace Multiplayer.Compat
     {
         private static readonly string[] Methods = { "MojaveMask.State:DoSwap" };
         public FullMojaveMask(ModContentPack mod) => FullKE.PatchTranspiler("Mojave Mask", Methods, nameof(FullKE.DropWindowDeferralTranspiler));
+    }
+}
+
+namespace Multiplayer.Compat
+{
+    /// <summary>Worksites Expanded (godsfathermixtape.worksitesexpanded): see FullMiningOutpostCu3.</summary>
+    [MpCompatFor("godsfathermixtape.worksitesexpanded")]
+    class FullMiningOutpost
+    {
+        public FullMiningOutpost(ModContentPack mod) => FullMiningOutpostCu3.Init();
     }
 }
