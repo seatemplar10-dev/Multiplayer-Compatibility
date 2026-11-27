@@ -7,6 +7,7 @@ using Multiplayer.API;
 using RimWorld;
 using UnityEngine;
 using Verse;
+using Verse.AI;
 
 namespace Multiplayer.Compat
 {
@@ -67,6 +68,35 @@ namespace Multiplayer.Compat
                 totalDyeRequiredField = AccessTools.DeclaredField(dialogType, "totalDyeRequired");
             }
 
+            // Newer build (Nov 2026): ApplyColors only writes Apparel.DesiredColor and orders a dye job (no TryApplyToSelected, no
+            // totalDyeRequired). One extra branch; the older build keeps the code path below.
+            if (dialogType != null && applyColors != null && tryApply == null && totalDyeRequiredField == null && pawnField != null
+                && colorChangerField != null && apparelColorsField != null && typeof(IDictionary).IsAssignableFrom(apparelColorsField.FieldType)
+                && pawnField.FieldType == typeof(Pawn) && typeof(Thing).IsAssignableFrom(colorChangerField.FieldType))
+            {
+                needsDyeMethod = AccessTools.DeclaredMethod(dialogType, "NeedsDye");
+                canEditMethod = AccessTools.DeclaredMethod(dialogType, "CanEditApparel", [typeof(Apparel)]);
+                commitLiveEditMethod = AccessTools.DeclaredMethod(dialogType, "CommitLiveEdit", Type.EmptyTypes);
+                var utilType = AccessTools.TypeByName("MIM40kFactions.ApparelDyeingUtility");
+                canUseStationMethod = utilType == null ? null : AccessTools.DeclaredMethod(utilType, "CanUseStation", [typeof(Pawn), typeof(Thing)]);
+                makeDyeJobMethod = utilType == null ? null : AccessTools.DeclaredMethod(utilType, "TryMakeDyeJob");
+                applyColorMethod = utilType == null ? null : AccessTools.DeclaredMethod(utilType, "ApplyColor", [typeof(Apparel), typeof(Color)]);
+                if (needsDyeMethod == null || canEditMethod == null || commitLiveEditMethod == null || canUseStationMethod == null
+                    || makeDyeJobMethod == null || applyColorMethod == null
+                    || needsDyeMethod.GetParameters().Length != 2 || makeDyeJobMethod.GetParameters().Length != 3)
+                {
+                    Log.Error($"{LogPrefix}this MIM - WH40k Core build has Dialog_ApparelColorCustomizer.ApplyColors but not NeedsDye / CanEditApparel / " +
+                              "CommitLiveEdit / ApparelDyeingUtility.CanUseStation, TryMakeDyeJob, ApplyColor: nothing patched.");
+                    throw new InvalidOperationException($"{LogPrefix}unsupported MIM - WH40k Core build");
+                }
+
+                MP.RegisterSyncMethod(typeof(MimApparelColorCustomizer), nameof(SyncApplyDesiredColors));
+                MpCompat.harmony.Patch(applyColors, prefix: new HarmonyMethod(typeof(MimApparelColorCustomizer), nameof(PreApplyColorsDesired)));
+                active = true;
+                Log.Message($"{LogPrefix}DesiredColor build: 1 sync method registered, 1 patch installed, active={active}.");
+                return;
+            }
+
             if (dialogType == null || applyColors == null || tryApply == null || pawnField == null || colorChangerField == null
                 || apparelColorsField == null || originalColorsField == null || totalDyeRequiredField == null
                 || !typeof(IDictionary).IsAssignableFrom(apparelColorsField.FieldType)
@@ -85,6 +115,101 @@ namespace Multiplayer.Compat
             MpCompat.harmony.Patch(tryApply, prefix: new HarmonyMethod(typeof(MimApparelColorCustomizer), nameof(PreTryApplyToSelected)));
             active = true;
             Log.Message($"{LogPrefix}1 sync method registered, 2 patches installed, active={active}.");
+        }
+
+        private static MethodInfo needsDyeMethod, canEditMethod, commitLiveEditMethod, canUseStationMethod, makeDyeJobMethod, applyColorMethod;
+
+        // Newer build, UI time ("Apply all"): the mod's ApplyColors would write Apparel.DesiredColor and take a dye job on this PC only.
+        // Collect what it would write (through the dialog's own NeedsDye / CanEditApparel), send one command, skip the original.
+        private static bool PreApplyColorsDesired(Window __instance)
+        {
+            if (!active || !MP.IsInMultiplayer || !MP.InInterface || MP.IsExecutingSyncCommand)
+                return true;
+            try
+            {
+                commitLiveEditMethod.Invoke(__instance, null);
+                var pawn = pawnField.GetValue(__instance) as Pawn;
+                if (pawn == null || pawn.Destroyed || pawn.apparel == null)
+                    return false;
+
+                var editable = new List<int>();
+                var needIds = new List<int>();
+                var colors = new List<Color>();
+                foreach (var apparel in pawn.apparel.WornApparel)
+                {
+                    if (!(bool)canEditMethod.Invoke(__instance, new object[] { apparel }))
+                        continue;
+                    editable.Add(apparel.thingIDNumber);
+                    var args = new object[] { apparel, Color.white };
+                    if ((bool)needsDyeMethod.Invoke(__instance, args))
+                    {
+                        needIds.Add(apparel.thingIDNumber);
+                        colors.Add((Color)args[1]);
+                    }
+                }
+
+                SyncApplyDesiredColors(pawn, editable.ToArray(), needIds.ToArray(), colors.ToArray(), colorChangerField.GetValue(__instance) as Thing, DebugSettings.godMode);
+            }
+            catch (Exception e)
+            {
+                // never fall back to the local writes: that is the desync this module removes
+                Log.Error($"{LogPrefix}could not send the colour change, nothing applied: {e}");
+            }
+            return false;
+        }
+
+        // Runs on every PC: the mod's ApplyColors body with the same decisions, apparel found on the pawn by thingIDNumber.
+        private static void SyncApplyDesiredColors(Pawn pawn, int[] editableIds, int[] needIds, Color[] colors, Thing station, bool godMode)
+        {
+            if (pawn?.apparel == null || editableIds == null || needIds == null || colors == null || needIds.Length != colors.Length)
+            {
+                Log.Warning($"{LogPrefix}SyncApplyDesiredColors: bad arguments (pawn {pawn?.ThingID ?? "null"}), nothing applied.");
+                return;
+            }
+
+            var queued = 0;
+            foreach (var apparel in pawn.apparel.WornApparel)
+            {
+                if (System.Array.IndexOf(editableIds, apparel.thingIDNumber) < 0)
+                    continue;
+                var index = System.Array.IndexOf(needIds, apparel.thingIDNumber);
+                if (index < 0)
+                {
+                    apparel.DesiredColor = null;
+                    continue;
+                }
+
+                if (godMode)
+                {
+                    applyColorMethod.Invoke(null, new object[] { apparel, colors[index] });
+                    continue;
+                }
+
+                apparel.DesiredColor = colors[index];
+                queued++;
+            }
+
+            pawn.mindState?.Notify_OutfitChanged();
+            var jobOrdered = false;
+            if (queued > 0)
+            {
+                var report = (AcceptanceReport)canUseStationMethod.Invoke(null, new object[] { pawn, station });
+                if (!report.Accepted)
+                {
+                    if (MP.IsExecutingSyncCommandIssuedBySelf)
+                        Messages.Message("EMWH_ApparelColorCustomizer_DyeWaitsForStation".Translate(pawn.Named("PAWN"), report.Reason.TrimEnd('.').Named("REASON")),
+                            pawn, MessageTypeDefOf.CautionInput, false);
+                }
+                else
+                {
+                    var args = new object[] { pawn, station, 0 };
+                    var job = makeDyeJobMethod.Invoke(null, args) as Job;
+                    if (job != null)
+                        jobOrdered = pawn.jobs.TryTakeOrderedJob(job, JobTag.Misc, false);
+                }
+            }
+
+            Log.Message($"{LogPrefix}pawn {pawn.ThingID}: {needIds.Length} colour(s) set, {queued} queued for dye, job ordered={jobOrdered}, tick={Find.TickManager.TicksGame}.");
         }
 
         // UI time with the window open (the "Apply all" button): collect, check the dye like the mod does, send one command.

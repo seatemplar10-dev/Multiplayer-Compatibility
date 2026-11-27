@@ -69,7 +69,10 @@ namespace Multiplayer.Compat
             Gate(assemblies, "BlueprintLoader", "LoadWholeBlueprintAtPath", nameof(PreNullObject));
             Gate(assemblies, "BlueprintLoader", "LoadRandomBlueprintPartAtPath", nameof(PreNullObject));
             Gate(assemblies, "GenStep_ScatterRealRuins", "Generate", nameof(PreScatterRealRuins));
-            Gate(assemblies, "GenStep_ScatterPOIRuins", "Generate", nameof(PreSkipGenStep));
+            // Older build: GenStep_ScatterPOIRuins declares Generate. Newer build: it inherits GenStep_RealRuinsSite.Generate (Large / Medium
+            // ruins share it), so that one is patched and the prefix skips only instances of the POI class.
+            if (GatePoi(assemblies) == 0)
+                Gate(assemblies, "GenStep_ScatterPOIRuins", "Generate", nameof(PreSkipGenStep));
             Gate(assemblies, "QuestNode_FindBlueprint", "TestRunInt", nameof(PreQuestTestRun));
 
             RedirectFactionSelectorRng(mod);
@@ -212,6 +215,36 @@ namespace Multiplayer.Compat
         }
 
         private static bool PreSkipGenStep() => !MP.IsInMultiplayer;
+
+        private static int GatePoi(List<Assembly> assemblies)
+        {
+            var count = 0;
+            foreach (var asm in assemblies)
+            {
+                var poi = asm.GetType(ns + "GenStep_ScatterPOIRuins", false);
+                var site = asm.GetType(ns + "GenStep_RealRuinsSite", false);
+                if (poi == null || site == null || AccessTools.DeclaredMethod(poi, "Generate") != null)
+                    continue;
+                var method = AccessTools.DeclaredMethod(site, "Generate", [typeof(Map), typeof(GenStepParams)]);
+                if (method == null)
+                    continue;
+                try
+                {
+                    MpCompat.harmony.Patch(method, prefix: new HarmonyMethod(typeof(RealRuinsPerPcFiles), nameof(PreSkipPoiSite)));
+                    count++;
+                    Log.Message($"MPCompat :: Real Ruins: GenStep_ScatterPOIRuins gate registered on inherited {site.Name}.Generate in {asm.GetName().Name}.");
+                }
+                catch (Exception e)
+                {
+                    Log.Warning($"MPCompat :: Real Ruins: could not patch {asm.GetName().Name}.{site.Name}:Generate ({e.GetType().Name}: {e.Message})");
+                }
+            }
+
+            return count;
+        }
+
+        private static bool PreSkipPoiSite(GenStep __instance)
+            => !MP.IsInMultiplayer || __instance.GetType().Name != "GenStep_ScatterPOIRuins";
 
         private static bool PreQuestTestRun(ref bool __result)
         {

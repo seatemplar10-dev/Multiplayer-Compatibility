@@ -231,8 +231,12 @@ namespace Multiplayer.Compat
             {
                 // lab switch row 271 (wave H, 17 Nov): SITE gate in PrePawnMassUsageInVehicle; off = old behaviour
                 // F.80 row 271: the fork has the null pawn guard in PawnMassUsageInVehicle itself
-                var massMethod = GetDeclaredMethod(FindType("Vehicles.Patch_CaravanHandling"), "PawnMassUsageInVehicle", [typeof(float), typeof(Pawn)]);
-                if (!forkLoaded)
+                var massMethod = GetDeclaredMethod(FindType("Vehicles.Patch_CaravanHandling"), "PawnMassUsageInVehicle");
+                var massParams = massMethod.GetParameters();
+                if (massParams.Length == 2 && massParams[1].ParameterType == typeof(Thing))
+                    // Newer build: PawnMassUsageInVehicle(float, Thing thing) resolves a Corpse to its InnerPawn and returns 0 for none, no NRE.
+                    Log.Message("MPCompat :: Vehicle Framework step 10 (null pawn in caravan mass, FIXES row 271) not needed: this build's PawnMassUsageInVehicle(float, Thing) handles a null pawn itself, registered.");
+                else if (!forkLoaded)
                     MpCompat.harmony.Patch(massMethod, prefix: new HarmonyMethod(typeof(VehicleFramework), nameof(PrePawnMassUsageInVehicle)));
             }
             catch (Exception e)

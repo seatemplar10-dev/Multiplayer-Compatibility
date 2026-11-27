@@ -68,6 +68,10 @@ namespace Multiplayer.Compat
             var autumnCheck = AccessTools.DeclaredMethod(AccessTools.TypeByName("ReGrowthCore.CompAutumnLeavesSpawner"), "CheckShouldSpawn");
             if (fallColorFactorField != null && autumnCheck != null)
                 MpCompat.harmony.Patch(autumnCheck, prefix: new HarmonyMethod(typeof(ReGrowthCore), nameof(PreAutumnLeavesCheck)));
+            else if (fallColorFactorField == null && autumnCheck != null)
+                // Newer build: CheckShouldSpawn calls PlantFallColors.GetFallColorFactor(latitude, DayOfYear(map)) of the tree's own map
+                // itself and the static is gone, so the fix has nothing to do.
+                Log.Message("MPCompat :: ReGrowth autumn leaves fall-color fix not needed (this build computes it from the tree's own map), registered.");
             else
                 Log.Warning("MPCompat :: ReGrowth autumn leaves fall-color fix not applied (field " + (fallColorFactorField != null) + ", method " + (autumnCheck != null) + ")");
         }
