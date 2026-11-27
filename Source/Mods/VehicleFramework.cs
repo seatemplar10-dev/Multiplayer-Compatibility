@@ -249,6 +249,56 @@ namespace Multiplayer.Compat
             {
                 Log.Error("MPCompat :: Vehicle Framework step 11 (sendable pawns aboard vehicles, FIXES rows 361/360) not installed: " + e);
             }
+
+            // 12. Row 493: Vehicles.CellFinderExtended.mapEdgeCells reset on game load.
+            PatchMapEdgeCellsReset();
+        }
+
+        // Row 493 (27 Nov 2026): Vehicles.CellFinderExtended keeps a static List<IntVec3> mapEdgeCells (+ mapEdgeCellsSize).
+        // CacheAndShuffleMapEdgeCells builds it only when empty or the map size changed, then shuffles it in place with Rand;
+        // TryFindRandomEdgeCellWith returns the first valid cell in that order. Nothing saves or resets it, so a PC that has shuffled
+        // N times and a PC that just loaded pick different vehicle edge cells from the same Rand draws. Multiplayer resets only the
+        // vanilla twin (MultiplayerGame.cs:44 CellFinder.mapEdgeCells = null). Fix: same reset for the Vehicles one in a Game.LoadGame
+        // prefix, in MP only (single player is unchanged). Every PC reloads at snapshot points (SaveAndReload / ReloadGame).
+        // Decompile: Vehicles.CellFinderExtended.cs:18,20,510-520,543,766-777. LabOff row 493 = old behaviour.
+        private static FieldInfo mapEdgeCellsField, mapEdgeCellsSizeField;
+
+        private static void PatchMapEdgeCellsReset()
+        {
+            if (LabOff.Row(493))
+            {
+                Log.Message(LogPrefix + "row 493: LabOff, CellFinderExtended.mapEdgeCells reset NOT installed");
+                return;
+            }
+
+            try
+            {
+                var type = AccessTools.TypeByName("Vehicles.CellFinderExtended");
+                mapEdgeCellsField = type == null ? null : AccessTools.DeclaredField(type, "mapEdgeCells");
+                mapEdgeCellsSizeField = type == null ? null : AccessTools.DeclaredField(type, "mapEdgeCellsSize");
+                if (mapEdgeCellsField == null || mapEdgeCellsSizeField == null)
+                {
+                    Log.Error(LogPrefix + "row 493: Vehicles.CellFinderExtended.mapEdgeCells / mapEdgeCellsSize not found, reset not installed");
+                    return;
+                }
+
+                MpCompat.harmony.Patch(AccessTools.DeclaredMethod(typeof(Game), nameof(Game.LoadGame)),
+                    prefix: new HarmonyMethod(typeof(VehicleFramework), nameof(PreLoadGameMapEdgeCells)));
+                Log.Message(LogPrefix + "row 493: CellFinderExtended.mapEdgeCells reset on game load");
+            }
+            catch (Exception e)
+            {
+                Log.Error(LogPrefix + "row 493: reset not installed: " + e);
+            }
+        }
+
+        private static void PreLoadGameMapEdgeCells()
+        {
+            if (!MP.IsInMultiplayer)
+                return;
+
+            mapEdgeCellsField.SetValue(null, null);
+            mapEdgeCellsSizeField.SetValue(null, Activator.CreateInstance(mapEdgeCellsSizeField.FieldType));
         }
 
         // Step 11: Vehicles.Ext_Vehicles.GetVehicle(this Pawn) (static, null = not aboard a vehicle)
