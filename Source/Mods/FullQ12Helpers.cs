@@ -8,7 +8,7 @@ using Verse;
 
 namespace Multiplayer.Compat
 {
-    /// <summary>FULL1127 class Q12, the 4 helper rows: Faction.OfPlayer read inside a world/game component tick replaced by the right player faction.</summary>
+    /// <summary>FULL1127 class Q12, helper rows (3 Resolve rows built; VisitSettlements ForMap row NOT BUILT: its OfPlayer read sits in a closure lambda with no Map): Faction.OfPlayer read inside a world/game component tick replaced by the right player faction.</summary>
     internal static class FullQ12
     {
         private static readonly MethodInfo ofPlayerGetter = AccessTools.PropertyGetter(typeof(Faction), nameof(Faction.OfPlayer));
@@ -48,29 +48,6 @@ namespace Multiplayer.Compat
             if (n == 0) Log.Warning($"[MPCompat - FULL1127 Q12] {__originalMethod.Name}: no pawn.Faction then Faction.OfPlayer read found, nothing patched");
             return list;
         }
-
-        /// <summary>Row with PlayerFactionForTick.ForMap: every OfPlayer read of the method becomes ForMap(the Map argument).</summary>
-        public static void PatchForMap(string mod, string method, int expected)
-        {
-            var m = AccessTools.DeclaredMethod(method) ?? AccessTools.Method(method);
-            if (m == null) { Log.Error($"[MPCompat - FULL1127 Q12] {mod}: method {method} not found"); return; }
-            int idx = m.GetParameters().ToList().FindIndex(p => p.ParameterType == typeof(Map));
-            if (idx < 0) { Log.Error($"[MPCompat - FULL1127 Q12] {mod}: {method} has no Map parameter"); return; }
-            expectedFor[m] = (idx + (m.IsStatic ? 0 : 1), expected);
-            MpCompat.harmony.Patch(m, transpiler: new HarmonyMethod(typeof(FullQ12), nameof(ForMapTranspiler)));
-            Log.Message($"[MPCompat - FULL1127 Q12] {mod}: 1 of 1 methods patched");
-        }
-
-        private static readonly Dictionary<MethodBase, (int arg, int expected)> expectedFor = new Dictionary<MethodBase, (int, int)>();
-
-        private static IEnumerable<CodeInstruction> ForMapTranspiler(IEnumerable<CodeInstruction> instr, MethodBase __originalMethod)
-        {
-            var (arg, expected) = expectedFor[__originalMethod];
-            var result = PlayerFactionForTick.SwapOfPlayer(instr, () => new CodeInstruction(OpCodes.Ldarg, arg), expected, "FULL1127 Q12 " + __originalMethod.Name).ToList();
-            var forMap = AccessTools.Method(typeof(PlayerFactionForTick), nameof(PlayerFactionForTick.ForMap));
-            Swapped[__originalMethod.DeclaringType.Name + ":" + __originalMethod.Name] = result.Count(c => c.Calls(forMap));
-            return result;
-        }
     }
 
     [MpCompatFor("pribovich.memorialstele")]
@@ -92,12 +69,5 @@ namespace Multiplayer.Compat
     {
         public FullRimToll(ModContentPack mod) =>
             FullQ12.PatchResolve("RimToll", new[] { "RimToll.GameComponent_TollState:ReleaseWorker" });
-    }
-
-    [MpCompatFor("ninagoblin.visitsettlements")]
-    class FullVisitSettlements
-    {
-        public FullVisitSettlements(ModContentPack mod) =>
-            FullQ12.PatchForMap("VisitSettlements", "VS_WorldComponent_SettlementEvents:TriggerRaidEvent", 1);
     }
 }
