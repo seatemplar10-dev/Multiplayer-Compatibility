@@ -209,7 +209,8 @@ namespace Multiplayer.Compat
         public FullPerspectiveShift(ModContentPack mod)
         {
             var methods = FullCust2.PatchAvatar("PerspectiveShift.Avatar");
-            MP.RegisterSyncMethod(typeof(FullCust2), nameof(FullCust2.SyncedStartJob));
+            // orchestrator review: MP has no sync worker for Job; it serializes it only as an exposed (IExposable) parameter, like TryTakeOrderedJob
+            MP.RegisterSyncMethod(typeof(FullCust2), nameof(FullCust2.SyncedStartJob)).ExposeParameter(1);
             MP.RegisterSyncMethod(typeof(FullCust2), nameof(FullCust2.SyncedEndJob));
             Log.Message($"[MPCompat - FULL1127 CU] Perspective Shift: {methods} Avatar methods patched, StartJob/EndCurrentJob shims registered");
         }
