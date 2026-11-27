@@ -34,9 +34,10 @@ namespace Multiplayer.Compat
 
         public AlphaMemes(ModContentPack mod)
         {
-            LongEventHandler.ExecuteWhenFinished(LatePatch);
             // FULL1127 KE: CompRandomRaidSpawner.SpawnHostileRaid (Find.CurrentMap -> parent map)
             FullKE.PatchCurrentMap("Alpha Memes", new[] { "AlphaMemes.CompRandomRaidSpawner:SpawnHostileRaid" });
+
+            LongEventHandler.ExecuteWhenFinished(LatePatch);
             MpCompatPatchLoader.LoadPatch(this);
 
             #region Gizmos

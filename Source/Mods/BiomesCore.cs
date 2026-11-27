@@ -13,6 +13,9 @@ namespace Multiplayer.Compat
     {
         public BiomesCore(ModContentPack mod)
         {
+            // FULL1127 KE: JobGiver_StealPlayerFood.NearestFoodToSteal (Find.CurrentMap -> pawn.Map)
+            FullKE.PatchCurrentMap("Biomes! Core", new[] { "BiomesCore.JobGiver_StealPlayerFood:NearestFoodToSteal" });
+
             // Gizmos (only dev mode gizmos)
             {
                 var typeNames = new[]
@@ -36,9 +39,6 @@ namespace Multiplayer.Compat
                 foreach (var method in methodNames)
                     MP.RegisterSyncMethod(AccessTools.DeclaredMethod(method)).SetDebugOnly();
             }
-
-            // FULL1127 KE: JobGiver_StealPlayerFood.NearestFoodToSteal (Find.CurrentMap -> pawn.Map)
-            FullKE.PatchCurrentMap("Biomes! Core", new[] { "BiomesCore.JobGiver_StealPlayerFood:NearestFoodToSteal" });
 
             // Current map usage
             {

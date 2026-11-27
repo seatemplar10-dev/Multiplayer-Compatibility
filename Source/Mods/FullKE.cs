@@ -115,19 +115,21 @@ namespace Multiplayer.Compat
     [MpCompatFor("el.invmech")]
     class FullInvaderMechanoids
     {
-        private static readonly string[] RandMethods = { "EL_IM.JobGiver_AICastAbilityOnFactionMembers:GetTarget" };
+        // The 'new Random()' is the field initializer, so it lives in the constructor; GetTarget only calls rand.Next, which the RandRedirector then routes to Rand.Range.
+        private static readonly string[] RandCtorTypes = { "EL_IM.JobGiver_AICastAbilityOnFactionMembers" };
 
         public FullInvaderMechanoids(ModContentPack mod)
         {
             var found = 0;
-            foreach (var name in RandMethods)
+            foreach (var name in RandCtorTypes)
             {
-                var m = AccessTools.DeclaredMethod(name) ?? AccessTools.Method(name);
-                if (m == null) { Log.Error($"[MPCompat - FULL1127 KE] Invader Mechanoids: method {name} not found"); continue; }
-                PatchingUtilities.PatchSystemRand(m);
+                var type = AccessTools.TypeByName(name);
+                var ctor = type == null ? null : AccessTools.DeclaredConstructor(type) ?? AccessTools.Constructor(type);
+                if (ctor == null) { Log.Error($"[MPCompat - FULL1127 KE] Invader Mechanoids: constructor of {name} not found"); continue; }
+                PatchingUtilities.PatchSystemRand(ctor, false);
                 found++;
             }
-            Log.Message($"[MPCompat - FULL1127 KE] Invader Mechanoids: {found} of {RandMethods.Length} methods patched");
+            Log.Message($"[MPCompat - FULL1127 KE] Invader Mechanoids: {found} of {RandCtorTypes.Length} methods patched");
         }
     }
 
