@@ -45,10 +45,16 @@ namespace Multiplayer.Compat
                 transpiler: new HarmonyMethod(typeof(GravshipFleetCust1), nameof(Transpile)));
             MpCompat.harmony.Patch(AccessTools.DeclaredMethod(typeof(TickManager), nameof(TickManager.DoSingleTick)),
                 postfix: new HarmonyMethod(typeof(GravshipFleetCust1), nameof(TickPostfix)));
+            // Cutscene speed (Patch_VanillaClock / Patch_FleetClock) subtracts Time.deltaTime * (speed - 1) from the vanilla
+            // WorldComponent_GravshipController.timeLeft (ends takeoff/landing) and FleetLaunch.timeLeft: skipped in multiplayer, no extra speed.
+            var skip = new HarmonyMethod(typeof(GravshipFleetCust1), nameof(SkipInMp));
+            foreach (var n in new[] { "GravshipFleet.CutsceneSpeed.Patch_VanillaClock", "GravshipFleet.CutsceneSpeed.Patch_FleetClock" })
+                MpCompat.harmony.Patch(AccessTools.DeclaredMethod(AccessTools.TypeByName(n), "Postfix"), prefix: skip);
             Log.Message("[MPCompat - FULL1127 CU] Gravship Fleet: cutscene timer per game tick registered (deltaTime x" + replaced + ")");
         }
 
         public static int wrapped;
+        public static bool SkipInMp() => !MP.IsInMultiplayer;
         public static void FrameDepart(object launcher, object launch) { if (!MP.IsInMultiplayer) departM.Invoke(launcher, new[] { launch }); }
         public static void FrameSetStage(object launcher, object launch, int stage) { if (!MP.IsInMultiplayer) setStageM.Invoke(launcher, new[] { launch, Enum.ToObject(setStageM.GetParameters()[1].ParameterType, stage) }); }
 
