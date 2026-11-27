@@ -17,6 +17,10 @@ namespace Multiplayer.Compat
     /// button sends SyncedMapDecision(mapId, seq, choice); the command runs that PC's own local function and closes the dialog on every PC.
     /// First command wins, later commands and later clicks on a decided dialog do nothing. The key is the map id, not the tick: the dialog
     /// opens from a frame update, not a tick. The prefix's direct AbandonTile() call (no dialog) is not recorded: unchanged.
+    /// Row 483b: the dialog opens from WorldComponentUpdate per PC frame, so a command can arrive on a PC whose dialog is not open yet.
+    /// Such a command is kept as a pending decision under the same key (map id, order) with the tick it arrived; when that PC's dialog
+    /// with the key is built, the pending choice is applied once like a command and the dialog is closed when it is added to the window
+    /// stack. First command still wins. A pending decision older than 2500 ticks is dropped with one warning; the lists clear on a new game.
     /// Status: [unverified] - zero-boot D2 test only, not run in game.
     /// </remarks>
     [MpCompatFor("vanillaexpanded.gravship")]
@@ -33,9 +37,23 @@ namespace Multiplayer.Compat
             public int seq;
             public object closure;
             public bool resolved;
+            public Dialog_MessageBox box;
+            public bool closeOnOpen;
         }
 
+        private sealed class PendingDecision
+        {
+            public Game game;
+            public int mapId;
+            public int seq;
+            public int choice;
+            public int tick;
+        }
+
+        private const int PendingMaxAgeTicks = 2500;
         private static readonly List<DecisionEntry> entries = new List<DecisionEntry>();
+        private static readonly List<PendingDecision> pending = new List<PendingDecision>();
+        private static bool applyingPending;
         private static MethodInfo abandonTile;
         private static MethodInfo settleTile;
         private static FieldInfo mapField;
@@ -72,31 +90,80 @@ namespace Multiplayer.Compat
                 typeof(TaggedString), typeof(string), typeof(Action), typeof(string), typeof(Action), typeof(string), typeof(bool),
                 typeof(Action), typeof(Action), typeof(WindowLayer),
             });
-            if (abandonTile == null || settleTile == null || mapField == null || ctor == null)
+            var windowAdd = AccessTools.DeclaredMethod(typeof(WindowStack), nameof(WindowStack.Add), new[] { typeof(Window) });
+            if (abandonTile == null || settleTile == null || mapField == null || ctor == null || windowAdd == null)
             {
-                Log.Error(LogPrefix + "row 483: TakeoffEnded_Patch AbandonTile/SettleTile closure, its Map field or the Dialog_MessageBox constructor not found, the takeoff map decision can desync");
+                Log.Error(LogPrefix + "row 483: TakeoffEnded_Patch AbandonTile/SettleTile closure, its Map field, the Dialog_MessageBox constructor or WindowStack.Add not found, the takeoff map decision can desync");
                 return;
             }
+            entries.Clear();
+            pending.Clear();
             Multiplayer.API.MP.RegisterSyncMethod(typeof(VanillaGravshipExpanded), nameof(SyncedMapDecision));
             MpCompat.harmony.Patch(ctor, prefix: new HarmonyMethod(typeof(VanillaGravshipExpanded), nameof(PreMessageBoxCtor)));
             MpCompat.harmony.Patch(abandonTile, prefix: new HarmonyMethod(typeof(VanillaGravshipExpanded), nameof(PreAbandonTile)));
             MpCompat.harmony.Patch(settleTile, prefix: new HarmonyMethod(typeof(VanillaGravshipExpanded), nameof(PreSettleTile)));
-            Log.Message(LogPrefix + "row 483: takeoff map decision dialog (keep / discard / settle) synced");
+            MpCompat.harmony.Patch(windowAdd, postfix: new HarmonyMethod(typeof(VanillaGravshipExpanded), nameof(PostWindowAdd)));
+            Log.Message(LogPrefix + "row 483: takeoff map decision dialog (keep / discard / settle) synced, a command that arrives before this PC's dialog opens is kept until it opens");
         }
 
         private static bool IsOurs(Action a) => a != null && (a.Method == abandonTile || a.Method == settleTile);
 
-        internal static void PreMessageBoxCtor(Action buttonAAction, Action buttonBAction)
+        private static int TicksNow() => Current.Game?.tickManager?.TicksGame ?? 0;
+
+        // Drops entries and pending decisions of another game, and pending decisions older than PendingMaxAgeTicks (one warning each).
+        private static void Prune(Game game)
+        {
+            entries.RemoveAll(e => !ReferenceEquals(e.game, game));
+            pending.RemoveAll(p => !ReferenceEquals(p.game, game));
+            var now = TicksNow();
+            for (var i = pending.Count - 1; i >= 0; i--)
+            {
+                var p = pending[i];
+                if (now - p.tick <= PendingMaxAgeTicks) continue;
+                pending.RemoveAt(i);
+                Log.Warning(LogPrefix + $"row 483: takeoff map decision for map {p.mapId} #{p.seq} (choice {p.choice}, tick {p.tick}) dropped, this PC's dialog did not open within {PendingMaxAgeTicks} ticks");
+            }
+        }
+
+        internal static void PreMessageBoxCtor(Dialog_MessageBox __instance, Action buttonAAction, Action buttonBAction)
         {
             if (!Multiplayer.API.MP.IsInMultiplayer) return;
             var closure = IsOurs(buttonAAction) ? buttonAAction.Target : IsOurs(buttonBAction) ? buttonBAction.Target : null;
             if (closure == null) return;
             var game = Current.Game;
-            entries.RemoveAll(e => !ReferenceEquals(e.game, game));
+            Prune(game);
             if (entries.Exists(e => ReferenceEquals(e.closure, closure))) return;
             var mapId = (mapField.GetValue(closure) as Map)?.uniqueID ?? -1;
             var seq = entries.FindAll(e => e.mapId == mapId).Count;
-            entries.Add(new DecisionEntry { game = game, mapId = mapId, seq = seq, closure = closure });
+            var entry = new DecisionEntry { game = game, mapId = mapId, seq = seq, closure = closure, box = __instance };
+            entries.Add(entry);
+            var late = pending.Find(p => p.mapId == mapId && p.seq == seq);
+            if (late == null) return;
+            pending.Remove(late);
+            entry.closeOnOpen = true;
+            applyingPending = true;
+            try
+            {
+                Apply(entry, late.choice);
+            }
+            catch (Exception e)
+            {
+                Log.Error(LogPrefix + $"row 483: applying the pending takeoff map decision for map {mapId} #{seq} failed: {e}");
+            }
+            finally
+            {
+                applyingPending = false;
+            }
+        }
+
+        // The dialog whose pending decision was applied while it was being built is closed as soon as it is on the window stack.
+        internal static void PostWindowAdd(Window window)
+        {
+            if (!(window is Dialog_MessageBox box)) return;
+            var entry = entries.Find(e => e.closeOnOpen && ReferenceEquals(e.box, box));
+            if (entry == null) return;
+            entry.closeOnOpen = false;
+            box.Close(false);
         }
 
         internal static bool PreAbandonTile(object __instance) => PreChoice(__instance, 0);
@@ -105,7 +172,7 @@ namespace Multiplayer.Compat
 
         private static bool PreChoice(object closure, int choice)
         {
-            if (!Multiplayer.API.MP.IsInMultiplayer || Multiplayer.API.MP.IsExecutingSyncCommand) return true;
+            if (!Multiplayer.API.MP.IsInMultiplayer || Multiplayer.API.MP.IsExecutingSyncCommand || applyingPending) return true;
             var entry = entries.Find(e => ReferenceEquals(e.closure, closure) && ReferenceEquals(e.game, Current.Game));
             if (entry == null) return true;          // direct AbandonTile() from the prefix (no dialog): unchanged
             if (!entry.resolved) SyncedMapDecision(entry.mapId, entry.seq, choice);
@@ -114,13 +181,23 @@ namespace Multiplayer.Compat
 
         internal static void SyncedMapDecision(int mapId, int seq, int choice)
         {
-            var entry = entries.Find(e => e.mapId == mapId && e.seq == seq && ReferenceEquals(e.game, Current.Game));
+            if (choice != 0 && choice != 1) return;
+            var game = Current.Game;
+            Prune(game);
+            var entry = entries.Find(e => e.mapId == mapId && e.seq == seq);
             if (entry == null)
             {
-                Log.Warning(LogPrefix + $"row 483: no takeoff map decision dialog for map {mapId} #{seq} on this PC, choice {choice} not applied");
+                // This PC's dialog is not open yet (it opens from a frame update): keep the first command until it opens.
+                if (!pending.Exists(p => p.mapId == mapId && p.seq == seq))
+                    pending.Add(new PendingDecision { game = game, mapId = mapId, seq = seq, choice = choice, tick = TicksNow() });
                 return;
             }
-            if (entry.resolved || (choice != 0 && choice != 1)) return;
+            Apply(entry, choice);
+        }
+
+        private static void Apply(DecisionEntry entry, int choice)
+        {
+            if (entry.resolved) return;
             entry.resolved = true;
             (choice == 0 ? abandonTile : settleTile).Invoke(entry.closure, null);
             var windows = Current.Root?.uiRoot?.windows?.Windows;
