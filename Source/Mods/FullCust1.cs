@@ -14,14 +14,16 @@ namespace Multiplayer.Compat
     /// <summary>Gravship Fleet (asunib.gravshipfleet). FleetLauncher.AdvanceAirborne (Postfix after the map draw, once per frame) does
     /// launch.timeLeft -= Time.deltaTime, so the cutscene timer that decides when Depart() runs (a sim change) follows each PC's frame
     /// rate. In multiplayer the per-frame subtraction is replaced by one fixed step per game tick (TickManager.DoSingleTick postfix).
-    /// Residual: Depart still runs from the frame loop, on the first frame that sees timeLeft &lt;= 0 (the value itself is tick-exact).</summary>
+    /// Depart() and SetStage() calls inside AdvanceAirborne are no-ops in multiplayer (frame path draws only); the same stage decision
+    /// (no gravship -> Failed, resumed or timeLeft &lt;= 0 -> Depart) runs in the DoSingleTick postfix, so every PC launches at the same tick.</summary>
     [MpCompatFor("asunib.gravshipfleet")]
     public class GravshipFleetCust1
     {
         private const float Step = 1f / 60f;
         private static FieldInfo launchesField, stageField, resumedField, timeLeftField;
-        private static MethodInfo liveGetter;
-        private static object airborne;
+        private static MethodInfo liveGetter, departM, setStageM;
+        private static FieldInfo gravshipField;
+        private static object airborne, failed;
         public static int replaced;
 
         public GravshipFleetCust1(ModContentPack mod)
@@ -34,6 +36,10 @@ namespace Multiplayer.Compat
             stageField = AccessTools.DeclaredField(launch, "stage");
             resumedField = AccessTools.DeclaredField(launch, "resumed");
             timeLeftField = AccessTools.DeclaredField(launch, "timeLeft");
+            gravshipField = AccessTools.DeclaredField(launch, "gravship");
+            departM = AccessTools.DeclaredMethod(launcher, "Depart", new[] { launch });
+            setStageM = AccessTools.DeclaredMethod(launcher, "SetStage", new[] { launch, stage });
+            failed = Enum.Parse(stage, "Failed");
             airborne = Enum.Parse(stage, "Airborne");
             MpCompat.harmony.Patch(AccessTools.DeclaredMethod(launcher, "AdvanceAirborne"),
                 transpiler: new HarmonyMethod(typeof(GravshipFleetCust1), nameof(Transpile)));
@@ -41,6 +47,10 @@ namespace Multiplayer.Compat
                 postfix: new HarmonyMethod(typeof(GravshipFleetCust1), nameof(TickPostfix)));
             Log.Message("[MPCompat - FULL1127 CU] Gravship Fleet: cutscene timer per game tick registered (deltaTime x" + replaced + ")");
         }
+
+        public static int wrapped;
+        public static void FrameDepart(object launcher, object launch) { if (!MP.IsInMultiplayer) departM.Invoke(launcher, new[] { launch }); }
+        public static void FrameSetStage(object launcher, object launch, int stage) { if (!MP.IsInMultiplayer) setStageM.Invoke(launcher, new[] { launch, Enum.ToObject(setStageM.GetParameters()[1].ParameterType, stage) }); }
 
         public static float FrameDelta() => MP.IsInMultiplayer ? 0f : Time.deltaTime;
 
@@ -54,6 +64,16 @@ namespace Multiplayer.Compat
                     replaced++;
                     yield return new CodeInstruction(OpCodes.Call, AccessTools.Method(typeof(GravshipFleetCust1), nameof(FrameDelta))) { labels = ins.labels, blocks = ins.blocks };
                 }
+                else if (ins.Calls(departM))
+                {
+                    wrapped++;
+                    yield return new CodeInstruction(OpCodes.Call, AccessTools.Method(typeof(GravshipFleetCust1), nameof(FrameDepart))) { labels = ins.labels, blocks = ins.blocks };
+                }
+                else if (ins.Calls(setStageM))
+                {
+                    wrapped++;
+                    yield return new CodeInstruction(OpCodes.Call, AccessTools.Method(typeof(GravshipFleetCust1), nameof(FrameSetStage))) { labels = ins.labels, blocks = ins.blocks };
+                }
                 else yield return ins;
             }
         }
@@ -64,10 +84,15 @@ namespace Multiplayer.Compat
             var live = liveGetter.Invoke(null, null);
             if (live == null) return;
             if (!(launchesField.GetValue(live) is IEnumerable list)) return;
-            foreach (var l in list)
+            var snapshot = new List<object>();
+            foreach (var l in list) snapshot.Add(l);
+            foreach (var l in snapshot)
             {
-                if (l == null || !Equals(stageField.GetValue(l), airborne) || (bool)resumedField.GetValue(l)) continue;
-                timeLeftField.SetValue(l, (float)timeLeftField.GetValue(l) - Step);
+                if (l == null || !Equals(stageField.GetValue(l), airborne)) continue;
+                if (gravshipField.GetValue(l) == null) { setStageM.Invoke(live, new[] { l, failed }); continue; }
+                var resumed = (bool)resumedField.GetValue(l);
+                if (!resumed) timeLeftField.SetValue(l, (float)timeLeftField.GetValue(l) - Step);
+                if (resumed || (float)timeLeftField.GetValue(l) <= 0f) departM.Invoke(live, new[] { l });
             }
         }
     }
