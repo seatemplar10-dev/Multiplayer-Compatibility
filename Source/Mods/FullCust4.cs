@@ -26,6 +26,10 @@ namespace Multiplayer.Compat
         static bool inPreview, inUiCreate;
         static readonly HashSet<Thing> previews = new HashSet<Thing>();
         public static int uiReplaced, tickReplaced;
+        /// <summary>Transpiler sites replaced per patched method (D2 compares exact numbers).</summary>
+        public static readonly Dictionary<string, int> sites = new Dictionary<string, int>();
+        static int genDepth;
+        static void Site(MethodBase orig) { string k = orig?.Name ?? "?"; sites[k] = (sites.TryGetValue(k, out var n) ? n : 0) + 1; }
 
         static void RegisterCu4(Type manager)
         {
@@ -49,14 +53,32 @@ namespace Multiplayer.Compat
                 h.Patch(AccessTools.DeclaredMethod(tWarrant, n), transpiler: ui);
             // 2. Create: the warrant is made in the synced call
             h.Patch(AccessTools.DeclaredMethod(tTab, "TryAddWarrant"), prefix: new HarmonyMethod(me, nameof(PreTryAdd)));
-            h.Patch(AccessTools.DeclaredMethod(tTab, "DoWarrantCreation"), prefix: new HarmonyMethod(me, nameof(PreCreationUi)), finalizer: new HarmonyMethod(me, nameof(FinCreationUi)));
+            var prev = new HarmonyMethod(me, nameof(PreCreationUi));
+            var prevFin = new HarmonyMethod(me, nameof(FinCreationUi));
+            h.Patch(AccessTools.DeclaredMethod(tTab, "DoWarrantCreation"), prefix: prev, finalizer: prevFin);
+            // B2: the animal and artifact pickers make preview things outside DoWarrantCreation: they are previews too
+            h.Patch(AccessTools.DeclaredMethod(AccessTools.TypeByName("SimpleWarrants.Dialog_SelectAnimal"), "DoWindowContents"), prefix: prev, finalizer: prevFin);
+            h.Patch(AccessTools.DeclaredMethod(AccessTools.TypeByName("SimpleWarrants.Dialog_SelectArtifact"), "SelectArtifact"), prefix: prev, finalizer: prevFin);
+            // B1: a preview pawn makes no relatives, redresses no world pawn, and passes nothing to the world
+            h.Patch(AccessTools.DeclaredMethod(typeof(PawnGenerator), nameof(PawnGenerator.GeneratePawn), new[] { typeof(PawnGenerationRequest) }), prefix: new HarmonyMethod(me, nameof(PreGenRequest)));
+            h.Patch(AccessTools.DeclaredMethod(typeof(RimWorld.Planet.WorldPawns), nameof(RimWorld.Planet.WorldPawns.PassToWorld)), prefix: new HarmonyMethod(me, nameof(PrePassToWorld)));
+            // B5: the anchor faction (warrant owner, victim, or lowest real player) is pushed around the tick / world-tick sites
+            var pushDlg = new HarmonyMethod(me, nameof(PrePushLowest));
+            var pushVictim = new HarmonyMethod(me, nameof(PrePushVictim));
+            var pushReturn = new HarmonyMethod(me, nameof(PrePushReturn));
+            var popFin = new HarmonyMethod(me, nameof(FinPush));
+            h.Patch(AccessTools.DeclaredMethod(manager, "GenerateRandomWarrant"), prefix: pushDlg, finalizer: popFin);
+            h.Patch(AccessTools.DeclaredMethod(manager, "HandleAvailableWarrants"), prefix: pushDlg, finalizer: popFin);
+            h.Patch(AccessTools.DeclaredMethod(manager, "PutWarrantOn"), prefix: pushVictim, finalizer: popFin);
+            h.Patch(AccessTools.DeclaredMethod(AccessTools.TypeByName("SimpleWarrants.TransportersArrivalAction_ReturnWarrant"), "Arrived"), prefix: pushReturn, finalizer: popFin);
             h.Patch(AccessTools.DeclaredMethod(tTab, "CreateWarrant"), prefix: new HarmonyMethod(me, nameof(PreCreateUi)), finalizer: new HarmonyMethod(me, nameof(FinCreateUi)));
             h.Patch(AccessTools.DeclaredMethod(manager, "GetWarrantID"), prefix: new HarmonyMethod(me, nameof(PreGetId)));
-            var preview = new HarmonyMethod(me, nameof(PostPreviewMade));
+            var genPre = new HarmonyMethod(me, nameof(PreGen));
+            var genFin = new HarmonyMethod(me, nameof(FinGen));
             foreach (var m in typeof(PawnGenerator).GetMethods(BindingFlags.Static | BindingFlags.Public).Where(m => m.Name == nameof(PawnGenerator.GeneratePawn) && m.GetParameters().Length > 0 && m.GetParameters()[0].ParameterType == typeof(PawnKindDef)))
-                h.Patch(m, postfix: preview);
+                h.Patch(m, prefix: genPre, finalizer: genFin);
             foreach (var m in typeof(ThingMaker).GetMethods(BindingFlags.Static | BindingFlags.Public).Where(m => m.Name == nameof(ThingMaker.MakeThing) && m.GetParameters().Length > 0 && m.GetParameters()[0].ParameterType == typeof(ThingDef)))
-                h.Patch(m, postfix: preview);
+                h.Patch(m, prefix: genPre, finalizer: genFin);
             // 4. threat points: no write from the UI getter; filled in the tick
             h.Patch(AccessTools.PropertyGetter(tPawnW, "ThreatPoints"), prefix: new HarmonyMethod(me, nameof(PreThreat)));
             h.Patch(AccessTools.DeclaredMethod(manager, "GameComponentTick"), postfix: new HarmonyMethod(me, nameof(PostTickThreat)));
@@ -91,7 +113,7 @@ namespace Multiplayer.Compat
 
         static Faction LocalRealPlayer()
         {
-            try { return Traverse.CreateWithType("Multiplayer.Client.Multiplayer").Property("RealPlayerFaction").GetValue<Faction>(); } catch { return null; }
+            try { return MP.RealPlayerFaction; } catch { return null; }
         }
 
         static Map HomeMapOfFaction(Faction f)
@@ -120,7 +142,7 @@ namespace Multiplayer.Compat
         static readonly MethodInfo ofPlayer = AccessTools.PropertyGetter(typeof(Faction), nameof(Faction.OfPlayer));
         static readonly MethodInfo anyHome = AccessTools.PropertyGetter(typeof(Find), nameof(Find.AnyPlayerHomeMap));
 
-        static IEnumerable<CodeInstruction> TrUi(IEnumerable<CodeInstruction> ins)
+        static IEnumerable<CodeInstruction> TrUi(IEnumerable<CodeInstruction> ins, MethodBase orig)
         {
             var mAccept = AccessTools.Method(typeof(SimpleWarrantsFull1127), nameof(UiAccept));
             var mComp = AccessTools.Method(typeof(SimpleWarrantsFull1127), nameof(UiCompensate));
@@ -130,10 +152,10 @@ namespace Multiplayer.Compat
                 var m = i.operand as MethodInfo;
                 if ((i.opcode == OpCodes.Callvirt || i.opcode == OpCodes.Call) && m != null)
                 {
-                    if (m.Name == "DoAcceptAction" && tWarrant.IsAssignableFrom(m.DeclaringType)) { uiReplaced++; yield return new CodeInstruction(OpCodes.Call, mAccept) { labels = i.labels, blocks = i.blocks }; continue; }
-                    if (m.Name == "DoCompensateAction" && tWarrant.IsAssignableFrom(m.DeclaringType)) { uiReplaced++; yield return new CodeInstruction(OpCodes.Call, mComp) { labels = i.labels, blocks = i.blocks }; continue; }
+                    if (m.Name == "DoAcceptAction" && tWarrant.IsAssignableFrom(m.DeclaringType)) { uiReplaced++; Site(orig); yield return new CodeInstruction(OpCodes.Call, mAccept) { labels = i.labels, blocks = i.blocks }; continue; }
+                    if (m.Name == "DoCompensateAction" && tWarrant.IsAssignableFrom(m.DeclaringType)) { uiReplaced++; Site(orig); yield return new CodeInstruction(OpCodes.Call, mComp) { labels = i.labels, blocks = i.blocks }; continue; }
                     if (m.Name == "Remove" && m.DeclaringType.IsGenericType && m.DeclaringType.GetGenericTypeDefinition() == typeof(List<>)
-                        && m.DeclaringType.GetGenericArguments()[0] == tWarrant) { uiReplaced++; yield return new CodeInstruction(OpCodes.Call, mRem) { labels = i.labels, blocks = i.blocks }; continue; }
+                        && m.DeclaringType.GetGenericArguments()[0] == tWarrant) { uiReplaced++; Site(orig); yield return new CodeInstruction(OpCodes.Call, mRem) { labels = i.labels, blocks = i.blocks }; continue; }
                 }
                 yield return i;
             }
@@ -143,21 +165,32 @@ namespace Multiplayer.Compat
         {
             var mPlayer = AccessTools.Method(typeof(SimpleWarrantsFull1127), nameof(PlayerOf));
             var mHome = AccessTools.Method(typeof(SimpleWarrantsFull1127), nameof(HomeMapOf));
-            int local = -1;
+            int local = -1; FieldInfo viaField = null;
             if (useLocal)
             {
-                var lv = orig.GetMethodBody().LocalVariables.FirstOrDefault(v => tWarrant.IsAssignableFrom(v.LocalType));
+                var locals = orig.GetMethodBody().LocalVariables;
+                var lv = locals.FirstOrDefault(v => tWarrant.IsAssignableFrom(v.LocalType));
                 if (lv != null) local = lv.LocalIndex;
+                else
+                {
+                    // B4: a lambda captures the warrant, so the compiler hoists it into a closure display class: Ldloc closure, Ldfld warrant
+                    foreach (var v in locals)
+                    {
+                        var fld = v.LocalType.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance).FirstOrDefault(x => tWarrant.IsAssignableFrom(x.FieldType));
+                        if (fld != null && v.LocalType.IsNested) { local = v.LocalIndex; viaField = fld; break; }
+                    }
+                }
             }
             foreach (var i in ins)
             {
                 bool p = ofPlayerToo && i.Calls(ofPlayer), hm = homeToo && i.Calls(anyHome);
                 if ((p || hm) && (useLocal ? local >= 0 : true))
                 {
-                    tickReplaced++;
+                    tickReplaced++; Site(orig);
                     var load = useLocal ? new CodeInstruction(OpCodes.Ldloc, local) : new CodeInstruction(arg == 0 ? OpCodes.Ldarg_0 : OpCodes.Ldarg_1);
                     load.labels = i.labels; load.blocks = i.blocks;
                     yield return load;
+                    if (viaField != null) yield return new CodeInstruction(OpCodes.Ldfld, viaField);
                     yield return new CodeInstruction(OpCodes.Call, p ? mPlayer : mHome);
                     continue;
                 }
@@ -169,12 +202,12 @@ namespace Multiplayer.Compat
         static IEnumerable<CodeInstruction> TrArg0(IEnumerable<CodeInstruction> ins, MethodBase orig) => Replace(ins, 0, orig, true, true, false);
         static IEnumerable<CodeInstruction> TrArg1(IEnumerable<CodeInstruction> ins, MethodBase orig) => Replace(ins, 1, orig, false, true, false);
 
-        static IEnumerable<CodeInstruction> TrAvailable(IEnumerable<CodeInstruction> ins)
+        static IEnumerable<CodeInstruction> TrAvailable(IEnumerable<CodeInstruction> ins, MethodBase orig)
         {
             var mLow = AccessTools.Method(typeof(SimpleWarrantsFull1127), nameof(HomeMapLowest));
             foreach (var i in ins)
             {
-                if (i.Calls(anyHome)) { tickReplaced++; yield return new CodeInstruction(OpCodes.Call, mLow) { labels = i.labels, blocks = i.blocks }; }
+                if (i.Calls(anyHome)) { tickReplaced++; Site(orig); yield return new CodeInstruction(OpCodes.Call, mLow) { labels = i.labels, blocks = i.blocks }; }
                 else yield return i;
             }
         }
@@ -235,8 +268,8 @@ namespace Multiplayer.Compat
         }
 
         // ---------- 2. Create ----------
-        static void PreCreationUi() { if (MP.IsInMultiplayer) inPreview = true; }
-        static void FinCreationUi() { inPreview = false; }
+        static void PreCreationUi(out bool __state) { __state = inPreview; if (MP.IsInMultiplayer) inPreview = true; }
+        static void FinCreationUi(bool __state) { inPreview = __state; }
         static void PreCreateUi() { if (MP.IsInMultiplayer) inUiCreate = true; }
         static void FinCreateUi() { inUiCreate = false; }
         static bool PreGetId(ref string __result)
@@ -245,7 +278,39 @@ namespace Multiplayer.Compat
             __result = "UI_PREVIEW";
             return false;
         }
-        static void PostPreviewMade(object __result) { if (inPreview && __result is Thing t) previews.Add(t); }
+        // only the top-level preview thing is listed (not the apparel and weapons made inside GeneratePawn)
+        static void PreGen(out bool __state) { __state = inPreview; if (inPreview) genDepth++; }
+        static void FinGen(bool __state, object __result)
+        {
+            if (!__state) return;
+            genDepth--;
+            if (genDepth == 0 && __result is Thing t) { if (previews.Count > 256) previews.Clear(); previews.Add(t); }
+        }
+
+        // B1: a preview pawn (one PC, UI frame) must leave nothing in synced state
+        static void PreGenRequest(ref PawnGenerationRequest request)
+        {
+            if (!inPreview) return;
+            request.CanGeneratePawnRelations = false;   // no generated relatives (they are passed to the world pawns)
+            request.ForceGenerateNewPawn = true;         // never pull a world pawn out of the world to redress it
+        }
+        static bool PrePassToWorld() => !inPreview;
+
+        // B5: push the anchor faction (force) around a body, pop in a finalizer
+        static void PushFor(Faction f, out Faction state)
+        {
+            state = null;
+            if (!MP.IsInMultiplayer || f == null || f == Faction.OfPlayer) return;
+            FullCust3.Push(null, f);
+            state = f;
+        }
+        // no anchor on the warrant: the lowest loadID real player, the same one HomeMapLowest uses
+        static void PrePushLowest(out Faction __state) => PushFor(FullCust3.LowestRealPlayer(), out __state);
+        // the victim of a new warrant is the player pawn's faction
+        static void PrePushVictim(Pawn __0, out Faction __state) => PushFor(Real(__0?.Faction) ? __0.Faction : null, out __state);
+        // the returning player is the warrant's accepteer
+        static void PrePushReturn(object __instance, out Faction __state) => PushFor(PlayerOf(Fld(__instance, "warrant")), out __state);
+        static void FinPush(Faction __state) { if (__state != null) FullCust3.Pop(null); }
 
         static bool PreTryAdd(object __instance, object __0, string __1)
         {

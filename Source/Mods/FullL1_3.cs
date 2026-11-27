@@ -112,58 +112,156 @@ namespace Multiplayer.Compat
         }
     }
 
-    /// <summary>Simple Warrants (pb3n.simplewarrants). The warrant settings are class A (same files on both PCs). The dialog that
-    /// MakeWarrantDialog opens (from the game component tick, on every PC) has option actions that destroy silver, kill the target,
-    /// start a raid or spawn visitors on the clicking PC only. After the original builds the dialog, every option action is replaced by
-    /// a call to a synced method that runs the original action on every PC and closes the dialog elsewhere.</summary>
+    /// <summary>Simple Warrants (pb3n.simplewarrants). The warrant settings are class A (same files on both PCs). MakeWarrantDialog (called
+    /// from the game component tick, on every PC) builds a dialog whose option actions destroy silver, kill the target, start a raid or
+    /// spawn visitors. P3SW2 (B3): the open dialog is a saved record (SwDlg: the taken warrant, scribed in the manager's ExposeData),
+    /// keyed by the warrant loadID. Every PC records it in the tick and closes the mod's window. The warrant OWNER's PC (issuer, else the
+    /// lowest real player) opens the dialog from the UI frame, also after a join or reload. A click sends SyncedChoice(loadID, index);
+    /// every PC rebuilds the options by running the original MakeWarrantDialog again under the same Rand seed (same Dead / reward roll)
+    /// and the owner faction, and runs the chosen action. Owner offline: the record stays in the save, no PC resolves it, the dialog
+    /// opens when the owner is back. The same on every PC, nothing is dropped.</summary>
     [MpCompatFor("pb3n.simplewarrants")]
     public partial class SimpleWarrantsFull1127
     {
-        private static readonly Dictionary<int, Action[]> pending = new Dictionary<int, Action[]>();
-        private static readonly Dictionary<int, Window> windows = new Dictionary<int, Window>();
-        private static int nextId;
+        public class SwDlg : IExposable
+        {
+            public IExposable warrant;
+            public void ExposeData() { Scribe_Deep.Look(ref warrant, "warrant"); }
+            public string LoadID => warrant == null ? null : (string)Fld(warrant, "loadID");
+        }
+
+        private sealed class MakeCtx { public Faction pushed; public bool rand; }
+
+        private static readonly Dictionary<string, Window> windows = new Dictionary<string, Window>();
+        private static List<SwDlg> dlgs = new List<SwDlg>();
+        private static Game dlgGame;
+        private static int makeMode;   // 0 tick (the real dialog), 1 UI show, 2 capture for a synced choice
+        private static List<DiaOption> captured;
         private static FieldInfo curNodeField;
+        private static MethodInfo miMake;
 
         public SimpleWarrantsFull1127(ModContentPack mod)
         {
             curNodeField = AccessTools.Field(typeof(Dialog_NodeTree), "curNode");
             var type = AccessTools.TypeByName("SimpleWarrants.WarrantsManager");
+            miMake = AccessTools.DeclaredMethod(type, "MakeWarrantDialog");
             MP.RegisterSyncMethod(typeof(SimpleWarrantsFull1127), nameof(SyncedChoice));
-            MpCompat.harmony.Patch(AccessTools.DeclaredMethod(type, "MakeWarrantDialog"),
-                postfix: new HarmonyMethod(typeof(SimpleWarrantsFull1127), nameof(PostMakeDialog)));
-            Log.Message("[MPCompat - FULL1127 L1] Simple Warrants: MakeWarrantDialog option actions synced");
+            var me = typeof(SimpleWarrantsFull1127);
+            MpCompat.harmony.Patch(miMake, prefix: new HarmonyMethod(me, nameof(PreMake)),
+                postfix: new HarmonyMethod(me, nameof(PostMakeDialog)), finalizer: new HarmonyMethod(me, nameof(FinMake)));
+            MpCompat.harmony.Patch(AccessTools.DeclaredMethod(type, "ExposeData"), postfix: new HarmonyMethod(me, nameof(PostExpose)));
+            MpCompat.harmony.Patch(AccessTools.DeclaredMethod(typeof(UIRoot_Play), nameof(UIRoot_Play.UIRootOnGUI)), postfix: new HarmonyMethod(me, nameof(PostUiRoot)));
+            Log.Message("[MPCompat - FULL1127 L1] Simple Warrants: MakeWarrantDialog is a saved record, choices synced by warrant loadID");
             RegisterCu4(type);
+        }
+
+        private static List<SwDlg> Dlgs()
+        {
+            if (dlgGame != Current.Game) { dlgGame = Current.Game; dlgs = new List<SwDlg>(); windows.Clear(); }
+            return dlgs;
+        }
+
+        private static void PostExpose()
+        {
+            var list = Dlgs();
+            if (Scribe.mode == LoadSaveMode.Saving && list.Count == 0) return;
+            var l = Scribe.mode == LoadSaveMode.Saving ? list : null;
+            Scribe_Collections.Look(ref l, "mpcSwDialogs", LookMode.Deep);
+            if (Scribe.mode == LoadSaveMode.LoadingVars) { dlgs = l ?? new List<SwDlg>(); windows.Clear(); }
+        }
+
+        private static void PreMake(object __0, out MakeCtx __state)
+        {
+            __state = null;
+            if (!MP.IsInMultiplayer || __0 == null) return;
+            var c = new MakeCtx();
+            var f = PlayerOf(__0);
+            if (f != null && f != Faction.OfPlayer) { FullCust3.Push(null, f); c.pushed = f; }
+            Rand.PushState(GenText.StableStringHash((string)Fld(__0, "loadID") ?? "") ^ 1127);
+            c.rand = true;
+            __state = c;
+        }
+
+        private static void FinMake(MakeCtx __state)
+        {
+            if (__state == null) return;
+            if (__state.rand) Rand.PopState();
+            if (__state.pushed != null) FullCust3.Pop(null);
         }
 
         private static void PostMakeDialog(object __0)
         {
-            if (!MP.IsInMultiplayer) return;
+            if (!MP.IsInMultiplayer || __0 == null) return;
             var win = Find.WindowStack.Windows.LastOrDefault(w => w is Dialog_NodeTree);
             if (win == null) return;
             var node = curNodeField.GetValue(win) as DiaNode;
             if (node == null) return;
-            int id = nextId++;
-            var originals = node.options.Select(o => o.action).ToArray();
-            pending[id] = originals;
-            // The dialog belongs to the warrant owner (issuer). Other PCs keep the pending actions (so the synced choice still finds
-            // them) but never show the dialog. Opening or closing a window is UI only.
-            var owner = OwnerOf(__0);
-            var local = LocalRealPlayer();
-            if (owner != null && local != null && owner != local) { win.Close(false); }
-            else windows[id] = win;
-            for (int i = 0; i < node.options.Count; i++)
+            string id = (string)Fld(__0, "loadID");
+            if (makeMode == 2) { captured = node.options.ToList(); Find.WindowStack.TryRemove(win, false); return; }
+            if (makeMode == 1)
             {
-                int idx = i;
-                if (originals[idx] != null) node.options[idx].action = () => SyncedChoice(id, idx);
+                for (int i = 0; i < node.options.Count; i++)
+                {
+                    int idx = i;
+                    if (node.options[idx].action != null) node.options[idx].action = () => SyncedChoice(id, idx);
+                }
+                windows[id] = win;
+                return;
+            }
+            // tick, every PC: record the open dialog, the owner's PC shows it from the UI frame
+            var list = Dlgs();
+            list.RemoveAll(d => d.LoadID == id);
+            list.Add(new SwDlg { warrant = (IExposable)__0 });
+            win.Close(false);
+        }
+
+        private static void WithArchiveTrim(Action a)
+        {
+            var arch = Find.Archive.ArchivablesListForReading;
+            int n = arch.Count;
+            try { a(); }
+            finally { while (arch.Count > n) arch.RemoveAt(arch.Count - 1); }
+        }
+
+        private static void PostUiRoot()
+        {
+            if (!MP.IsInMultiplayer || dlgs == null || dlgs.Count == 0 || Current.ProgramState != ProgramState.Playing) return;
+            if (UnityEngine.Event.current == null || UnityEngine.Event.current.type != UnityEngine.EventType.Repaint || UnityEngine.Time.frameCount % 20 != 0) return;
+            var local = LocalRealPlayer();
+            if (local == null) return;
+            foreach (var st in Dlgs().ToList())
+            {
+                string id = st.LoadID;
+                if (id == null || PlayerOf(st.warrant) != local) continue;
+                if (windows.TryGetValue(id, out var w) && Find.WindowStack.IsOpen(w)) continue;
+                makeMode = 1;
+                try { WithArchiveTrim(() => miMake.Invoke(fInstance.GetValue(null), new object[] { st.warrant })); }
+                catch (Exception e) { Log.Warning("[MPCompat - FULL1127 L1] Simple Warrants: could not open the dialog for " + id + ": " + e.GetType().Name); }
+                finally { makeMode = 0; }
             }
         }
 
-        private static void SyncedChoice(int id, int index)
+        private static void SyncedChoice(string loadID, int index)
         {
-            if (!pending.TryGetValue(id, out var actions)) return;
-            pending.Remove(id);
-            if (windows.TryGetValue(id, out var w)) { windows.Remove(id); if (Find.WindowStack.IsOpen(w)) w.Close(); }
-            if (index >= 0 && index < actions.Length) actions[index]?.Invoke();
+            var st = Dlgs().FirstOrDefault(d => d.LoadID == loadID);
+            if (st == null) return;
+            var f = PlayerOf(st.warrant);
+            bool push = f != null && f != Faction.OfPlayer;
+            if (push) FullCust3.Push(null, f);
+            try
+            {
+                makeMode = 2; captured = null;
+                try { WithArchiveTrim(() => miMake.Invoke(fInstance.GetValue(null), new object[] { st.warrant })); }
+                finally { makeMode = 0; }
+                var opts = captured; captured = null;
+                if (opts == null || index < 0 || index >= opts.Count) return;
+                var opt = opts[index];
+                if (opt.disabled) return;   // e.g. not enough silver: same answer on every PC, the record stays
+                Dlgs().Remove(st);
+                if (windows.TryGetValue(loadID, out var w)) { windows.Remove(loadID); if (Find.WindowStack.IsOpen(w)) w.Close(); }
+                opt.action?.Invoke();
+            }
+            finally { if (push) FullCust3.Pop(null); }
         }
     }
 
