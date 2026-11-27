@@ -421,7 +421,7 @@ namespace Multiplayer.Compat
             var students = ((IEnumerable)sgStudentsField.GetValue(g)).Cast<Pawn>().ToList();
             SyncedCreate((Pawn)sgTeacherField.GetValue(g), students, (string)sgNameField.GetValue(g), (int)sgGoalField.GetValue(g), (int)sgStartField.GetValue(g),
                 (int)sgEndField.GetValue(g), ClassroomId(sgClassroomField.GetValue(g)), logic.GetType().FullName,
-                FieldDefName(skillFocusField, logic), FieldDefName(trackField, logic), FieldDefName(tierField, logic));
+                FieldDefName(skillFocusField, logic) + "|" + FieldDefName(trackField, logic) + "|" + FieldDefName(tierField, logic));
             return false;
         }
         private static string FieldDefName(FieldInfo f, object logic) =>
@@ -495,8 +495,12 @@ namespace Multiplayer.Compat
         }
         [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
         internal static void SyncedCreate(Pawn teacher, List<Pawn> students, string className, int semesterGoal, int startHour, int endHour, int classroomId,
-            string subjectType, string skillDef, string trackDef, string tierDef)
+            string subjectType, string defNames)
         {
+            // Harmony's MethodInvoker.EmitFastInt cannot emit an argument index above 8 (Cecil Create(OpCode, byte) rejects Ldc_I4_S),
+            // so a synced method may have at most 9 parameters (index 0..8): the 3 def names travel as one "skill|track|tier" string.
+            var defParts = (defNames ?? "||").Split('|');
+            string skillDef = defParts.Length > 0 ? defParts[0] : "", trackDef = defParts.Length > 1 ? defParts[1] : "", tierDef = defParts.Length > 2 ? defParts[2] : "";
             var logicType = AccessTools.TypeByName(subjectType);
             if (logicType == null)
             {
