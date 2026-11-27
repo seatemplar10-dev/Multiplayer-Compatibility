@@ -487,14 +487,24 @@ namespace Multiplayer.Compat
             if (__state) FullCust3.Pop(null);
         }
 
-        static void AssaultPre(object session, out bool __state)
+        [ThreadStatic] static bool randPushed;
+
+        // cu9 (M6 Rand): the long event runs outside the tick, so Rand there is not the synced state. Seed it from saved ids so both PCs draw the same values.
+        static void AssaultPre(object session, List<Pawn> assaulted, out bool __state)
         {
             PushPre(session, out __state);
             assaultOwner = MP.IsInMultiplayer ? SessionOwner(session) : null;
+            randPushed = false;
+            if (!MP.IsInMultiplayer) return;
+            int seed = (sCaravan.GetValue(session) as Caravan)?.ID ?? 0;
+            if (assaulted != null) foreach (var p in assaulted) if (p != null) seed = seed * 31 + p.thingIDNumber;
+            Rand.PushState(seed);
+            randPushed = true;
         }
 
         static void AssaultFin(bool __state)
         {
+            if (randPushed) { randPushed = false; Rand.PopState(); }
             assaultOwner = null;
             PopFin(__state);
         }
