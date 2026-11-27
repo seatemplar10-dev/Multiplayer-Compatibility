@@ -100,6 +100,7 @@ namespace Multiplayer.Compat
             LongEventHandler.ExecuteWhenFinished(() => MpCompatPatchLoader.LoadPatch(this));
 
             WildMenFaction520();
+            TribalsEraStore.Install(MpCompat.harmony);   // row 523: one era per player faction
 
             #region Gizmos
 
@@ -154,16 +155,22 @@ namespace Multiplayer.Compat
         private static FastInvokeHandler fillCornerstoneDefsMethod;
 
         [MpCompatPrefix("VFETribals.GameComponent_Tribals", "AddCornerstone")]
-        private static bool PreAddCornerstone(Def def, int ___availableCornerstonePoints, IList ___cornerstones)
+        private static bool PreAddCornerstone(object __instance, Def def)
         {
             if (!MP.IsInMultiplayer || !MP.IsExecutingSyncCommand)
                 return true;
+
+            // Row 523: the command runs under the acting faction; make sure the live fields are that faction's before they are read.
+            // (Fields are read here, after Ensure, not injected: injected values would be read before this method runs.)
+            TribalsEraStore.Ensure();
+            var points = (int)AccessTools.Field(__instance.GetType(), "availableCornerstonePoints").GetValue(__instance);
+            var cornerstones = (IList)AccessTools.Field(__instance.GetType(), "cornerstones").GetValue(__instance);
 
             // Make sure that after syncing the cornerstone selection we're not in a situation where
             // either two players pick a cornerstone at a similar time, or a repeated sync happened,
             // by ensuring that there's still free points to select a cornerstone, and that it
             // wasn't selected by the player yet.
-            return ___availableCornerstonePoints > 0 && !___cornerstones.Contains(def);
+            return points > 0 && !cornerstones.Contains(def);
         }
 
         private static void PostAddCornerstone(object instance, object[] args)
@@ -183,6 +190,7 @@ namespace Multiplayer.Compat
             if (!MP.IsInMultiplayer)
                 return;
 
+            TribalsEraStore.Ensure();   // row 523
             var gameComp = tribalsGameCompInstance();
             MP.WatchBegin();
             tribalsGameCompEthosField.Watch(gameComp);
