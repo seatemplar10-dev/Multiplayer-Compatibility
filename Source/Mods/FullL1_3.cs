@@ -219,19 +219,32 @@ namespace Multiplayer.Compat
         private static Map lastMap;
         private static int lastTick = -1;
         private static AccessTools.FieldRef<int> lastCache, lastEnemy;
-        public static int replacedCurrentMap;
+        public static int replacedCurrentMap, patchedMethods;
 
         public AlliesAreHelpfulFull1127(ModContentPack mod)
         {
             var type = AccessTools.TypeByName("PawnTendAndRescuePatch");
             lastCache = AccessTools.StaticFieldRefAccess<int>(AccessTools.DeclaredField(type, "_lastCacheUpdateTick"));
             lastEnemy = AccessTools.StaticFieldRefAccess<int>(AccessTools.DeclaredField(type, "_lastEnemyCacheUpdateTick"));
-            MpCompat.harmony.Patch(AccessTools.DeclaredMethod(type, "UpdateCache"),
-                transpiler: new HarmonyMethod(typeof(AlliesAreHelpfulFull1127), nameof(Transpile)));
+            // CU1 (27 Nov): UpdateCache calls GetTendTargets / GetRescueTargets, which read Find.CurrentMap themselves (and in lambdas):
+            // transpile every method of the patch class and its nested closure classes that reads CurrentMap.
+            var curGetter = AccessTools.PropertyGetter(typeof(Find), "CurrentMap");
+            var types = new List<Type> { type };
+            types.AddRange(type.GetNestedTypes(BindingFlags.Public | BindingFlags.NonPublic));
+            foreach (var t in types)
+                foreach (var m in t.GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.Instance | BindingFlags.DeclaredOnly))
+                {
+                    if (m.IsAbstract || m.Name == "Postfix") continue;
+                    bool reads = false;
+                    foreach (var ins in PatchProcessor.GetOriginalInstructions(m)) if (ins.Calls(curGetter)) { reads = true; break; }
+                    if (!reads) continue;
+                    MpCompat.harmony.Patch(m, transpiler: new HarmonyMethod(typeof(AlliesAreHelpfulFull1127), nameof(Transpile)));
+                    patchedMethods++;
+                }
             MpCompat.harmony.Patch(AccessTools.DeclaredMethod(type, "Postfix"),
                 prefix: new HarmonyMethod(typeof(AlliesAreHelpfulFull1127), nameof(PrePostfix)),
                 finalizer: new HarmonyMethod(typeof(AlliesAreHelpfulFull1127), nameof(Fin)));
-            Log.Message("[MPCompat - FULL1127 L1] Allies Are Helpful: cache built per ticking pawn map (CurrentMap x" + replacedCurrentMap + ")");
+            Log.Message("[MPCompat - FULL1127 L1] Allies Are Helpful: cache built per ticking pawn map (methods " + patchedMethods + ")");
         }
 
         private static void PrePostfix(Pawn __0)
