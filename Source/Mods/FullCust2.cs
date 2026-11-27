@@ -32,6 +32,18 @@ namespace Multiplayer.Compat
             }
         }
 
+        // Find.CurrentMap -> the thing's own map (a view-independent value): the zipline projectile always ticks at rate 1, the same on every PC.
+        public static Map OwnMap(Thing t) => t?.Map;
+        public static IEnumerable<CodeInstruction> ThisMapTranspiler(IEnumerable<CodeInstruction> instr)
+        {
+            var repl = AccessTools.Method(typeof(FullCust2), nameof(OwnMap));
+            foreach (var ci in instr)
+            {
+                if (ci.Calls(CurrentMapGetter)) { yield return new CodeInstruction(OpCodes.Ldarg_0).WithLabels(ci.labels); ci.labels = new List<Label>(); ci.opcode = OpCodes.Call; ci.operand = repl; }
+                yield return ci;
+            }
+        }
+
         public static int PatchVehicleMap(string typeName)
         {
             var type = AccessTools.TypeByName(typeName);
@@ -43,7 +55,16 @@ namespace Multiplayer.Compat
                 MpCompat.harmony.Patch(m, transpiler: new HarmonyMethod(typeof(FullCust2), nameof(NoViewMapTranspiler)));
                 found++;
             }
-            Log.Message($"{Tag} Vehicle Map Framework: view-independent draw position, {found} of 3 methods patched");
+            // cu9: the hover subclass DrawPos (feeds the same cache) and the zipline projectile tick rate (sim) read Find.CurrentMap too
+            var hover = AccessTools.TypeByName(typeName + "_Hover");
+            var hoverGet = hover == null ? null : AccessTools.DeclaredPropertyGetter(hover, "DrawPos");
+            if (hoverGet != null) { MpCompat.harmony.Patch(hoverGet, transpiler: new HarmonyMethod(typeof(FullCust2), nameof(NoViewMapTranspiler))); found++; }
+            else Log.Error($"{Tag} Vehicle Map Framework: hover DrawPos not found");
+            var zip = AccessTools.TypeByName("VehicleMapFramework.Bullet_ZiplineBase");
+            var zipGet = zip == null ? null : AccessTools.DeclaredPropertyGetter(zip, "UpdateRateTicks");
+            if (zipGet != null) { MpCompat.harmony.Patch(zipGet, transpiler: new HarmonyMethod(typeof(FullCust2), nameof(ThisMapTranspiler))); found++; }
+            else Log.Error($"{Tag} Vehicle Map Framework: zipline UpdateRateTicks not found");
+            Log.Message($"{Tag} Vehicle Map Framework: view-independent draw position and zipline rate, {found} of 5 methods patched");
             return found;
         }
 
@@ -188,6 +209,18 @@ namespace Multiplayer.Compat
             return found;
         }
 
+        // cu9: Avatar.Tick runs from State.Tick only on the PC that has the avatar active, and writes sim state (needs, drafter, carried thing, doors, stance, pather, job expiry).
+        // A per-PC sim write desyncs, so in MP the tick body is skipped; the synced job paths above still work.
+        public static bool SkipAvatarTick() => !MP.IsInMultiplayer;
+
+        public static void PatchAvatarTick(string typeName)
+        {
+            var m = AccessTools.DeclaredMethod(AccessTools.TypeByName(typeName), "Tick");
+            if (m == null) { Log.Error($"{Tag} Perspective Shift: Avatar.Tick not found"); return; }
+            MpCompat.harmony.Patch(m, prefix: new HarmonyMethod(typeof(FullCust2), nameof(SkipAvatarTick)) { priority = Priority.First });
+            Log.Message($"{Tag} Perspective Shift: Avatar.Tick skipped in multiplayer");
+        }
+
         private static bool CallsJobTracker(MethodBase m)
         {
             try { return PatchProcessor.ReadMethodBody(m).Any(p => p.Key == OpCodes.Callvirt && p.Value is MethodInfo mi && (mi == StartJobM || mi == EndJobM)); }
@@ -209,6 +242,7 @@ namespace Multiplayer.Compat
         public FullPerspectiveShift(ModContentPack mod)
         {
             var methods = FullCust2.PatchAvatar("PerspectiveShift.Avatar");
+            FullCust2.PatchAvatarTick("PerspectiveShift.Avatar");
             // orchestrator review: MP has no sync worker for Job; it serializes it only as an exposed (IExposable) parameter, like TryTakeOrderedJob
             MP.RegisterSyncMethod(typeof(FullCust2), nameof(FullCust2.SyncedStartJob)).ExposeParameter(1);
             MP.RegisterSyncMethod(typeof(FullCust2), nameof(FullCust2.SyncedEndJob));
