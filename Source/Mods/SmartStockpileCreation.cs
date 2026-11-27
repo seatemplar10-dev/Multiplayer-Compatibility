@@ -34,7 +34,7 @@ namespace Multiplayer.Compat
             {
                 designatorType = AccessTools.TypeByName("SmartStockpileCreation.RimObjs.SmartStockpile.SmartStockpileDesignator");
                 
-                allowedThingsGetter = MethodInvoker.GetHandler(AccessTools.PropertyGetter(designatorType, "AllowedThings"));
+                allowedThingsGetter = MethodInvoker.GetHandler(AccessTools.PropertyGetter(designatorType, "AllowedThingsDefs"));
                 specialThingFilterDefLabel = AccessTools.FieldRefAccess<SpecialThingFilterDef>(designatorType, "_specialThingFilterDef");
                 priorityLabel = AccessTools.FieldRefAccess<StoragePriority>(designatorType, "_priority");
                 contentsLabel = AccessTools.FieldRefAccess<string>(designatorType, "_stockpileContentsLabel");
