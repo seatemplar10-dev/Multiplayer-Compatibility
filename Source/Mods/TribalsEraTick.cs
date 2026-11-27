@@ -27,6 +27,7 @@ namespace Multiplayer.Compat
         internal static Action<Faction> PushF = DefaultPush;
         internal static Action PopF = DefaultPop;
         internal static Func<int> MpClock = DefaultClock;
+        static bool clockLogged;
         /// <summary>Known-false switch for the D2 only: the loop also runs the body for the spectator (the 525 arm must FAIL with it). Never set in the game.</summary>
         internal static bool testIncludeSpectator;
         /// <summary>Row 528: the component tick resets the fire counter only when the last fire tick is more than this many world ticks old.</summary>
@@ -257,6 +258,11 @@ namespace Multiplayer.Compat
             var f = w == null ? null : (AccessTools.Field("Multiplayer.Client.AsyncTime.AsyncWorldTimeComp:worldTicks")
                                         ?? AccessTools.Field("Multiplayer.Client.AsyncWorldTimeComp:worldTicks"));
             if (w != null && f == null) LogOnce("row 528: AsyncWorldTimeComp.worldTicks not found, the large fire counter uses TicksGame");
+            if (f != null && !clockLogged)
+            {
+                clockLogged = true;   // 27 Nov: proof line for Player.log, once per session
+                Log.Message(logPrefix + "row 528: ACTIVE in this game: the large fire counter reads AsyncWorldTimeComp.worldTicks");
+            }
             return f == null ? Find.TickManager.TicksGame : (int)f.GetValue(w);
         }
 

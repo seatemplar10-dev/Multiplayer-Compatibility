@@ -68,6 +68,7 @@ namespace Multiplayer.Compat
         static FieldInfo fPoints, fTech, fEthos, fEthosLocked, fCorner, fFireTicks, fFireUpdate, fLastResearch, fFinished;
         static bool fieldsBound, hooksInstalled, errorLogged;
         static FieldInfo multifactionField, spectatorField;
+        static int activeLogged = -1;
         static Func<object> gameCompGetter, worldCompGetter;
         static Func<Faction> realPlayerGetter;
         static FieldInfo instanceField;
@@ -493,7 +494,15 @@ namespace Multiplayer.Compat
                                         ?? AccessTools.Field("Multiplayer.Client.MultiplayerGameComp:multifaction");
                     gameCompGetter = (Func<object>)Delegate.CreateDelegate(typeof(Func<object>), AccessTools.PropertyGetter("Multiplayer.Client.Multiplayer:GameComp"));
                 }
-                return (bool)multifactionField.GetValue(gameCompGetter());
+                var on = (bool)multifactionField.GetValue(gameCompGetter());
+                // 27 Nov: one line each time the value changes, so Player.log shows whether the era store really runs (the start lines print either way)
+                if ((on ? 1 : 0) != activeLogged)
+                {
+                    activeLogged = on ? 1 : 0;
+                    Log.Message(logPrefix + (on ? "row 523: ACTIVE in this game: multifaction is on, each player faction keeps its own era"
+                                                : "row 523: multifaction is off in this game, one era for all players (stock)"));
+                }
+                return on;
             }
             catch (Exception e)
             {
