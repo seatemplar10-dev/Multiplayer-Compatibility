@@ -1,3 +1,5 @@
+using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
@@ -33,6 +35,11 @@ namespace Multiplayer.Compat
                 Log.Message(LogPrefix + "row 532 switched off by the lab, class lord and learning board checks stay on OfPlayer");
             else
                 PatchRow532();
+
+            if (LabOff.Row(533))
+                Log.Message("[MPCompat - Progression: Education] row 533 switched off by the lab, the class dialogs stay local to the clicking PC");
+            else
+                PatchRow533();
 
             if (LabOff.Row(534))
                 Log.Message(LogPrefix + "row 534 switched off by the lab, the research proficiency settings and dialog stay local to each PC");
@@ -197,6 +204,351 @@ namespace Multiplayer.Compat
             synced.captured = true;
             Messages.Message(LogPrefix + "settings changed by a player: proficiency system " + enable + ", research proficiency to all pawns " + bestow,
                 MessageTypeDefOf.NeutralEvent, false);
+        }
+
+        // ---- Row 533 (27 Nov 2026) ----
+        // Class UI writes. The classroom rename dialog opens from CompLearningBoard.InitializeClassroom (reached from the SetFaction postfix in the
+        // simulation) on every PC; the dialogs write Classroom / StudyGroup / EducationManager state and pawn timetables on the clicking PC only.
+        // Fix, multiplayer only: the rename dialog opens only on the PC of the board owner's faction; each write below goes through one synced call
+        // with plain arguments (ids, strings, ints, pawns) so every PC applies the same write: rename, classroom settings, colour, class create,
+        // class edit, class delete, class suspend. In single player nothing changes.
+        internal static Type classroomType, studyGroupType, managerType, renameDialogType;
+        internal static FieldInfo classroomIdField, classroomColorField, sgIdField, sgTeacherField, sgStudentsField, sgNameField, sgStartField, sgEndField, sgClassroomField, sgGoalField, sgSuspendedField, sgSubjectField;
+        internal static FieldInfo skillFocusField, trackField, tierField, settingsClassroomField, editRefField;
+        internal static MethodInfo mgrInstance, mgrClassrooms, mgrStudyGroups, mgrAdd, mgrRemove, mgrNotify, mgrApply, genDef, sgRemoveStudent, sgCancel, sgSuspend, clearSchedule, mgrNextId;
+        internal static bool inInit, inCreate, inEdit, UiActive;
+        internal static Faction initOwner;
+        internal static Dictionary<FieldInfo, object> editSnapshot;
+
+        internal static bool UiWrite => MP.IsInMultiplayer && MP.InInterface && !MP.IsExecutingSyncCommand;
+
+        private static void PatchRow533()
+        {
+            classroomType = AccessTools.TypeByName("ProgressionEducation.Classroom");
+            studyGroupType = AccessTools.TypeByName("ProgressionEducation.StudyGroup");
+            managerType = AccessTools.TypeByName("ProgressionEducation.EducationManager");
+            renameDialogType = AccessTools.TypeByName("ProgressionEducation.Dialog_RenameClassroom");
+            var settingsDialog = AccessTools.TypeByName("ProgressionEducation.Dialog_ClassroomSettings");
+            var createDialog = AccessTools.TypeByName("ProgressionEducation.Dialog_CreateClass");
+            var editDialog = AccessTools.TypeByName("ProgressionEducation.Dialog_EditClass");
+            var mainTab = AccessTools.TypeByName("ProgressionEducation.MainTabWindow_Education");
+            var timeUtil = AccessTools.TypeByName("ProgressionEducation.TimeAssignmentUtility");
+            var board = AccessTools.TypeByName("ProgressionEducation.CompLearningBoard");
+            var skillLogic = AccessTools.TypeByName("ProgressionEducation.SkillClassLogic");
+            var profLogic = AccessTools.TypeByName("ProgressionEducation.ProficiencyClassLogic");
+            if (classroomType == null || studyGroupType == null || managerType == null || renameDialogType == null || settingsDialog == null || createDialog == null
+                || editDialog == null || mainTab == null || timeUtil == null || board == null || skillLogic == null || profLogic == null)
+            {
+                Log.Error(LogPrefix + "row 533: types not found, the class dialogs stay local");
+                return;
+            }
+            classroomIdField = AccessTools.Field(classroomType, "id");
+            classroomColorField = AccessTools.Field(classroomType, "color");
+            sgIdField = AccessTools.Field(studyGroupType, "id");
+            sgTeacherField = AccessTools.Field(studyGroupType, "teacher");
+            sgStudentsField = AccessTools.Field(studyGroupType, "students");
+            sgNameField = AccessTools.Field(studyGroupType, "className");
+            sgStartField = AccessTools.Field(studyGroupType, "startHour");
+            sgEndField = AccessTools.Field(studyGroupType, "endHour");
+            sgClassroomField = AccessTools.Field(studyGroupType, "classroom");
+            sgGoalField = AccessTools.Field(studyGroupType, "semesterGoal");
+            sgSuspendedField = AccessTools.Field(studyGroupType, "suspended");
+            sgSubjectField = AccessTools.Field(studyGroupType, "subjectLogic");
+            skillFocusField = AccessTools.Field(skillLogic, "skillFocus");
+            trackField = AccessTools.Field(profLogic, "proficiencyTrack");
+            tierField = AccessTools.Field(profLogic, "targetTier");
+            settingsClassroomField = AccessTools.Field(settingsDialog, "classroom");
+            editRefField = AccessTools.Field(editDialog, "referenceStudyGroup");
+            mgrInstance = AccessTools.PropertyGetter(managerType, "Instance");
+            mgrClassrooms = AccessTools.PropertyGetter(managerType, "Classrooms");
+            mgrStudyGroups = AccessTools.PropertyGetter(managerType, "StudyGroups");
+            mgrAdd = AccessTools.Method(managerType, "AddStudyGroup");
+            mgrRemove = AccessTools.Method(managerType, "RemoveStudyGroup");
+            mgrNotify = AccessTools.Method(managerType, "Notify_ClassInvalidated");
+            mgrApply = AccessTools.Method(managerType, "ApplyScheduleToPawns");
+            mgrNextId = AccessTools.Method(managerType, "GetNextStudyGroupId");
+            genDef = AccessTools.Method(timeUtil, "GenerateTimeAssignmentDef");
+            clearSchedule = AccessTools.Method(timeUtil, "ClearScheduleFromPawns");
+            sgRemoveStudent = AccessTools.Method(studyGroupType, "RemoveStudent");
+            sgCancel = AccessTools.Method(studyGroupType, "CancelClass");
+            sgSuspend = AccessTools.Method(studyGroupType, "Suspend");
+            var renameSetter = AccessTools.PropertySetter(classroomType, "RenamableLabel");
+            var startCreate = AccessTools.Method(createDialog, "StartClassCreation");
+            var startEdit = AccessTools.Method(editDialog, "StartClassEditing");
+            var settingsDraw = AccessTools.Method(settingsDialog, "DoWindowContents");
+            var initClass = AccessTools.Method(board, "InitializeClassroom");
+            var windowAdd = AccessTools.Method(typeof(WindowStack), nameof(WindowStack.Add), new[] { typeof(Window) });
+            var missing = new List<string>();
+            if (classroomIdField == null || classroomColorField == null) missing.Add("Classroom fields");
+            if (sgIdField == null || sgTeacherField == null || sgStudentsField == null || sgNameField == null || sgStartField == null || sgEndField == null
+                || sgClassroomField == null || sgGoalField == null || sgSuspendedField == null || sgSubjectField == null) missing.Add("StudyGroup fields");
+            if (skillFocusField == null || trackField == null || tierField == null) missing.Add("subject fields");
+            if (settingsClassroomField == null || editRefField == null) missing.Add("dialog fields");
+            if (mgrInstance == null || mgrClassrooms == null || mgrStudyGroups == null || mgrAdd == null || mgrRemove == null || mgrNotify == null || mgrApply == null || mgrNextId == null) missing.Add("manager members");
+            if (genDef == null || clearSchedule == null || sgRemoveStudent == null || sgCancel == null || sgSuspend == null) missing.Add("schedule methods");
+            if (renameSetter == null || startCreate == null || startEdit == null || settingsDraw == null || initClass == null || windowAdd == null) missing.Add("dialog methods");
+            if (missing.Count > 0)
+            {
+                Log.Error(LogPrefix + "row 533: members not found (" + string.Join(", ", missing) + "), the class dialogs stay local");
+                return;
+            }
+            var t = typeof(ProgressionEducationCompat);
+            MpCompat.harmony.Patch(initClass, prefix: new HarmonyMethod(t, nameof(InitPrefix)), finalizer: new HarmonyMethod(t, nameof(InitFinalizer)));
+            MpCompat.harmony.Patch(windowAdd, prefix: new HarmonyMethod(t, nameof(WindowAddPrefix)));
+            MpCompat.harmony.Patch(renameSetter, prefix: new HarmonyMethod(t, nameof(RenamePrefix)));
+            MpCompat.harmony.Patch(settingsDraw, prefix: new HarmonyMethod(t, nameof(SettingsPrefix)), postfix: new HarmonyMethod(t, nameof(SettingsPostfix)));
+            MpCompat.harmony.Patch(startCreate, prefix: new HarmonyMethod(t, nameof(CreateStartPrefix)), finalizer: new HarmonyMethod(t, nameof(CreateEndFinalizer)));
+            MpCompat.harmony.Patch(startEdit, prefix: new HarmonyMethod(t, nameof(EditStartPrefix)), finalizer: new HarmonyMethod(t, nameof(EditEndFinalizer)));
+            MpCompat.harmony.Patch(mgrNextId, prefix: new HarmonyMethod(t, nameof(NextIdPrefix)));
+            MpCompat.harmony.Patch(mgrAdd, prefix: new HarmonyMethod(t, nameof(AddGroupPrefix)));
+            foreach (var m in new[] { genDef, mgrApply, clearSchedule, sgRemoveStudent, sgCancel })
+                MpCompat.harmony.Patch(m, prefix: new HarmonyMethod(t, nameof(SkipWhileDialogPrefix)));
+            MpCompat.harmony.Patch(sgSuspend, prefix: new HarmonyMethod(t, nameof(SuspendPrefix)));
+            MpCompat.harmony.Patch(mgrNotify, prefix: new HarmonyMethod(t, nameof(NotifyPrefix)));
+            MpCompat.harmony.Patch(mgrRemove, prefix: new HarmonyMethod(t, nameof(RemoveGroupPrefix)));
+            var colorWrites = 0;
+            var tabTypes = new List<Type> { mainTab };
+            tabTypes.AddRange(mainTab.GetNestedTypes(BindingFlags.Public | BindingFlags.NonPublic));
+            foreach (var type in tabTypes)
+                foreach (var m in AccessTools.GetDeclaredMethods(type))
+                {
+                    if (m.IsAbstract || !PatchProcessor.GetOriginalInstructions(m).Any(ci => ci.opcode == OpCodes.Stfld && ci.operand as FieldInfo == classroomColorField))
+                        continue;
+                    MpCompat.harmony.Patch(m, transpiler: new HarmonyMethod(t, nameof(ColorTranspiler)));
+                    colorWrites++;
+                }
+            MP.RegisterSyncMethod(t, nameof(SyncedRename));
+            MP.RegisterSyncMethod(t, nameof(SyncedClassroomSettings));
+            MP.RegisterSyncMethod(t, nameof(SyncedColor));
+            MP.RegisterSyncMethod(t, nameof(SyncedCreate));
+            MP.RegisterSyncMethod(t, nameof(SyncedEdit));
+            MP.RegisterSyncMethod(t, nameof(SyncedRemoveGroup));
+            MP.RegisterSyncMethod(t, nameof(SyncedSuspend));
+            UiActive = true;
+            Log.Message("[MPCompat - Progression: Education] row 533: the rename dialog opens on the board owner's PC only; rename, classroom settings, colour (" + colorWrites
+                        + " write sites), class create, edit, delete and suspend are synced calls");
+        }
+
+        private static object Mgr => mgrInstance.Invoke(null, null);
+        private static object FindClassroom(int id)
+        {
+            foreach (var c in (IEnumerable)mgrClassrooms.Invoke(Mgr, null))
+                if ((int)classroomIdField.GetValue(c) == id) return c;
+            return null;
+        }
+        private static object FindGroup(int id)
+        {
+            foreach (var g in (IEnumerable)mgrStudyGroups.Invoke(Mgr, null))
+                if ((int)sgIdField.GetValue(g) == id) return g;
+            return null;
+        }
+        private static int ClassroomId(object c) => c == null ? -1 : (int)classroomIdField.GetValue(c);
+
+        // The rename dialog: only while InitializeClassroom runs, only on the owner faction's PC.
+        internal static void InitPrefix(ThingComp __instance)
+        {
+            inInit = true;
+            initOwner = __instance.parent?.Faction;
+        }
+        internal static void InitFinalizer() { inInit = false; initOwner = null; }
+        internal static bool WindowAddPrefix(Window window)
+        {
+            if (!inInit || !UiActive || !MP.IsInMultiplayer || window == null || window.GetType() != renameDialogType)
+                return true;
+            return initOwner != null && initOwner == MP.RealPlayerFaction;
+        }
+
+        internal static bool RenamePrefix(object __instance, string value)
+        {
+            if (!UiWrite) return true;
+            SyncedRename(ClassroomId(__instance), value);
+            return false;
+        }
+
+        internal static void SettingsPrefix(Window __instance, out bool[] __state)
+        {
+            __state = null;
+            if (!UiActive || !UiWrite) return;
+            var c = settingsClassroomField.GetValue(__instance);
+            __state = new[] { (bool)AccessTools.Field(classroomType, "restrictReservationsDuringClass").GetValue(c), (bool)AccessTools.Field(classroomType, "interruptJobs").GetValue(c), (bool)AccessTools.Field(classroomType, "addKids").GetValue(c) };
+        }
+        internal static void SettingsPostfix(Window __instance, bool[] __state)
+        {
+            if (__state == null) return;
+            var c = settingsClassroomField.GetValue(__instance);
+            var f = new[] { AccessTools.Field(classroomType, "restrictReservationsDuringClass"), AccessTools.Field(classroomType, "interruptJobs"), AccessTools.Field(classroomType, "addKids") };
+            var now = f.Select(x => (bool)x.GetValue(c)).ToArray();
+            if (now.SequenceEqual(__state)) return;
+            for (var i = 0; i < 3; i++) f[i].SetValue(c, __state[i]);
+            SyncedClassroomSettings(ClassroomId(c), now[0], now[1], now[2]);
+        }
+
+        // Colour picker lambdas: `classroom.color = c` becomes SetColor(classroom, c).
+        private static IEnumerable<CodeInstruction> ColorTranspiler(IEnumerable<CodeInstruction> instr)
+        {
+            var setColor = AccessTools.Method(typeof(ProgressionEducationCompat), nameof(SetColor));
+            foreach (var ci in instr)
+            {
+                if (ci.opcode == OpCodes.Stfld && ci.operand as FieldInfo == classroomColorField)
+                {
+                    var call = new CodeInstruction(OpCodes.Call, setColor);
+                    call.labels.AddRange(ci.labels);
+                    yield return call;
+                }
+                else yield return ci;
+            }
+        }
+        public static void SetColor(object classroom, UnityEngine.Color color)
+        {
+            if (UiWrite) SyncedColor(ClassroomId(classroom), color.r, color.g, color.b, color.a);
+            else classroomColorField.SetValue(classroom, color);
+        }
+
+        // Create: the draft group in the dialog takes no id from the shared counter on the clicking PC; the add + def + timetable writes run once, synced.
+        internal static bool NextIdPrefix(ref int __result)
+        {
+            if (!UiActive || !UiWrite) return true;
+            __result = -1;
+            return false;
+        }
+        internal static void CreateStartPrefix() { inCreate = UiWrite; }
+        internal static void CreateEndFinalizer() { inCreate = false; }
+        internal static bool AddGroupPrefix(object studyGroup)
+        {
+            if (!inCreate || !UiWrite) return true;
+            var g = studyGroup;
+            var logic = sgSubjectField.GetValue(g);
+            var students = ((IEnumerable)sgStudentsField.GetValue(g)).Cast<Pawn>().ToList();
+            SyncedCreate((Pawn)sgTeacherField.GetValue(g), students, (string)sgNameField.GetValue(g), (int)sgGoalField.GetValue(g), (int)sgStartField.GetValue(g),
+                (int)sgEndField.GetValue(g), ClassroomId(sgClassroomField.GetValue(g)), logic.GetType().FullName,
+                FieldDefName(skillFocusField, logic), FieldDefName(trackField, logic), FieldDefName(tierField, logic));
+            return false;
+        }
+        private static string FieldDefName(FieldInfo f, object logic) =>
+            f.DeclaringType.IsInstanceOfType(logic) ? ((f.GetValue(logic) as Def)?.defName ?? "") : "";
+
+        // Edit: the original runs its checks; its global writes are skipped and the field writes it makes on the reference group are
+        // captured and undone at the Notify_ClassInvalidated call, which then becomes the one synced edit.
+        internal static void EditStartPrefix(Window __instance)
+        {
+            inEdit = UiWrite;
+            editSnapshot = null;
+            if (!inEdit) return;
+            var g = editRefField.GetValue(__instance);
+            editSnapshot = new Dictionary<FieldInfo, object>();
+            foreach (var f in new[] { sgTeacherField, sgStudentsField, sgNameField, sgStartField, sgEndField, sgClassroomField, sgGoalField })
+                editSnapshot[f] = f.GetValue(g);
+        }
+        internal static void EditEndFinalizer() { inEdit = false; editSnapshot = null; }
+        internal static bool SkipWhileDialogPrefix() => !(UiWrite && (inCreate || inEdit));
+        internal static bool SuspendPrefix(object __instance, bool suspend)
+        {
+            if (!UiWrite) return true;
+            if (inCreate || inEdit) return false;
+            SyncedSuspend((int)sgIdField.GetValue(__instance), suspend);
+            return false;
+        }
+        internal static bool NotifyPrefix(object studyGroup)
+        {
+            if (!inEdit || !UiWrite || editSnapshot == null) return true;
+            var g = studyGroup;
+            var students = ((IEnumerable)sgStudentsField.GetValue(g)).Cast<Pawn>().ToList();
+            var teacher = (Pawn)sgTeacherField.GetValue(g);
+            var name = (string)sgNameField.GetValue(g);
+            var start = (int)sgStartField.GetValue(g);
+            var end = (int)sgEndField.GetValue(g);
+            var goal = (int)sgGoalField.GetValue(g);
+            var classroomId = ClassroomId(sgClassroomField.GetValue(g));
+            var id = (int)sgIdField.GetValue(g);
+            foreach (var kv in editSnapshot) kv.Key.SetValue(g, kv.Value);
+            SyncedEdit(id, teacher, students, name, start, end, classroomId, goal);
+            return false;
+        }
+        internal static bool RemoveGroupPrefix(object studyGroup)
+        {
+            if (!UiWrite || inCreate || inEdit) return true;
+            SyncedRemoveGroup((int)sgIdField.GetValue(studyGroup));
+            return false;
+        }
+
+        // ---- the synced calls, run on every PC from the same arguments ----
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+        internal static void SyncedRename(int classroomId, string name)
+        {
+            var c = FindClassroom(classroomId);
+            if (c != null) AccessTools.Property(classroomType, "RenamableLabel").SetValue(c, name);
+        }
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+        internal static void SyncedClassroomSettings(int classroomId, bool restrictReservations, bool interruptJobs, bool addKids)
+        {
+            var c = FindClassroom(classroomId);
+            if (c == null) return;
+            AccessTools.Field(classroomType, "restrictReservationsDuringClass").SetValue(c, restrictReservations);
+            AccessTools.Field(classroomType, "interruptJobs").SetValue(c, interruptJobs);
+            AccessTools.Field(classroomType, "addKids").SetValue(c, addKids);
+        }
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+        internal static void SyncedColor(int classroomId, float r, float g, float b, float a)
+        {
+            var c = FindClassroom(classroomId);
+            if (c != null) classroomColorField.SetValue(c, new UnityEngine.Color(r, g, b, a));
+        }
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+        internal static void SyncedCreate(Pawn teacher, List<Pawn> students, string className, int semesterGoal, int startHour, int endHour, int classroomId,
+            string subjectType, string skillDef, string trackDef, string tierDef)
+        {
+            var logicType = AccessTools.TypeByName(subjectType);
+            if (logicType == null)
+            {
+                Log.Error(LogPrefix + "row 533: unknown class subject type " + subjectType + ", class not created");
+                return;
+            }
+            var g = Activator.CreateInstance(studyGroupType, teacher, new List<Pawn>(students), className, semesterGoal, startHour, endHour);
+            sgClassroomField.SetValue(g, FindClassroom(classroomId));
+            var logic = Activator.CreateInstance(logicType, g);
+            if (skillDef != "") skillFocusField.SetValue(logic, DefDatabase<SkillDef>.GetNamedSilentFail(skillDef));
+            if (trackDef != "") trackField.SetValue(logic, DefByName(trackField.FieldType, trackDef));
+            if (tierDef != "") tierField.SetValue(logic, DefByName(tierField.FieldType, tierDef));
+            sgSubjectField.SetValue(g, logic);
+            mgrAdd.Invoke(Mgr, new[] { g });
+            genDef.Invoke(null, new[] { g });
+            mgrApply.Invoke(null, new[] { g });
+            if (students.Count < 1) sgSuspend.Invoke(g, new object[] { true });
+        }
+        private static object DefByName(Type defType, string name) =>
+            typeof(DefDatabase<>).MakeGenericType(defType).GetMethod("GetNamedSilentFail", BindingFlags.Public | BindingFlags.Static).Invoke(null, new object[] { name });
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+        internal static void SyncedEdit(int groupId, Pawn teacher, List<Pawn> students, string className, int startHour, int endHour, int classroomId, int semesterGoal)
+        {
+            var g = FindGroup(groupId);
+            if (g == null) return;
+            var oldStudents = ((IEnumerable)sgStudentsField.GetValue(g)).Cast<Pawn>().ToList();
+            foreach (var p in oldStudents.Except(students).ToList()) sgRemoveStudent.Invoke(g, new object[] { p });
+            sgCancel.Invoke(g, null);
+            var all = ((IEnumerable)AccessTools.PropertyGetter(studyGroupType, "AllParticipants").Invoke(g, null)).Cast<Pawn>().ToList();
+            clearSchedule.Invoke(null, new object[] { g, all });
+            sgTeacherField.SetValue(g, teacher);
+            sgStudentsField.SetValue(g, new List<Pawn>(students));
+            sgNameField.SetValue(g, className);
+            sgStartField.SetValue(g, startHour);
+            sgEndField.SetValue(g, endHour);
+            sgClassroomField.SetValue(g, FindClassroom(classroomId));
+            sgGoalField.SetValue(g, semesterGoal);
+            sgSuspend.Invoke(g, new object[] { (bool)sgSuspendedField.GetValue(g) || students.Count == 0 });
+            mgrNotify.Invoke(Mgr, new[] { g });
+            mgrApply.Invoke(null, new[] { g });
+        }
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+        internal static void SyncedRemoveGroup(int groupId)
+        {
+            var g = FindGroup(groupId);
+            if (g != null) mgrRemove.Invoke(Mgr, new[] { g });
+        }
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+        internal static void SyncedSuspend(int groupId, bool suspend)
+        {
+            var g = FindGroup(groupId);
+            if (g != null) sgSuspend.Invoke(g, new object[] { suspend });
         }
 
         private static void PatchRow532()
