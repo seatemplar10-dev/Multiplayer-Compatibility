@@ -67,6 +67,8 @@ namespace Multiplayer.Compat
 
         private static void LatePatch()
         {
+            MpCompatPatchLoader.LoadPatch<VanillaTraitsExpanded>();
+
             // Stop doing stuff with absent minded/rebel/submissive pawns outside of synced context
             {
                 // Basically, this method adds/removes slow work speed hediff to/from rebel/submissive pawns.
@@ -76,6 +78,12 @@ namespace Multiplayer.Compat
                 PatchingUtilities.PatchCancelInInterface(AccessTools.DeclaredMethod("VanillaTraitsExpanded.TryTakeOrderedJob_Patch:Postfix"));
             }
         }
+
+        // FIXES row 515: TraitsManager.TryForceFleeCowards (GameComponentTick) compares pawn.Faction with Faction.OfPlayer, which is the
+        // spectator faction in multifaction, so a colonist coward of any real player faction left the map instead of fleeing.
+        [MpCompatTranspiler("VanillaTraitsExpanded.TraitsManager", "TryForceFleeCowards")]
+        private static IEnumerable<CodeInstruction> FleeCowardsFaction(IEnumerable<CodeInstruction> instr)
+            => RightPlayerFaction.Swap(instr, 515, "Vanilla Traits Expanded TraitsManager.TryForceFleeCowards");
 
         private static void ClearCache() => mapPawnsAnimalListField().Clear();
 
