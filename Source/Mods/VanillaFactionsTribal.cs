@@ -117,8 +117,10 @@ namespace Multiplayer.Compat
                 // Neither of the choice letters has a timeout, so we don't need to deal with that.
                 // Accept (0), reject with a chance of raid (1)
                 var type = AccessTools.TypeByName("VFETribals.ChoiceLetter_WildMenJoin");
-                foreach (var method in MpMethodUtil.GetLambda(type, "Choices", MethodType.Getter, null, 0, 1))
-                    MP.RegisterSyncMethod(method);
+                // cu22: ordinal 0 is the static Where predicate in <>c (not serializable, not an action); accept and reject
+                // are ordinals 1 and 2 and live in a closure (this + targetMap), so they need delegate syncing.
+                MpCompat.RegisterLambdaDelegate(type, "Choices", MethodType.Getter, 1, 2);
+                Log.Message("[MPCompat - FULL1127 V] VFETribals: ChoiceLetter_WildMenJoin accept/reject registered as closure delegates");
             }
 
             #endregion

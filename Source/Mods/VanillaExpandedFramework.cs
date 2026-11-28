@@ -1544,14 +1544,57 @@ namespace Multiplayer.Compat
         private static AccessTools.FieldRef<object, Map> pipeNetMapField;
         private static AccessTools.FieldRef<object, Def> pipeNetDefField;
 
+        private static FieldInfo pipeProcResultIndex, pipeProcNextProcessTick, pipeResultEachTicks;
+        private static MethodInfo pipeProcSetupForChoice;
+        private static PropertyInfo pipeProcChoosedResult, pipeProcProps;
+        private static FieldInfo pipeProcPropsResults;
+        private static AccessTools.FieldRef<object, object> pipeChooseClosureRes;
+        private static AccessTools.FieldRef<object, ThingComp> pipeChooseClosureThis;
+
+        private static void PatchPipeChooseOutput()
+        {
+            var type = AccessTools.TypeByName("PipeSystem.CompResourceProcessor");
+            var lambda = MpMethodUtil.GetLambda(type, "PostSpawnSetup", lambdaOrdinal: 1);
+            pipeProcResultIndex = AccessTools.DeclaredField(type, "resultIndex");
+            pipeProcNextProcessTick = AccessTools.DeclaredField(type, "nextProcessTick");
+            pipeProcSetupForChoice = AccessTools.DeclaredMethod(type, "SetupForChoice");
+            pipeProcChoosedResult = AccessTools.DeclaredProperty(type, "ChoosedResult");
+            pipeProcProps = AccessTools.DeclaredProperty(type, "Props");
+            var propsType = AccessTools.TypeByName("PipeSystem.CompProperties_ResourceProcessor");
+            pipeProcPropsResults = AccessTools.DeclaredField(propsType, "results");
+            pipeResultEachTicks = AccessTools.DeclaredField(AccessTools.TypeByName("PipeSystem.CompProperties_ResourceProcessor+Result"), "eachTicks");
+            pipeChooseClosureRes = AccessTools.FieldRefAccess<object, object>(AccessTools.DeclaredField(lambda.DeclaringType, "res"));
+            pipeChooseClosureThis = AccessTools.FieldRefAccess<object, ThingComp>(AccessTools.DeclaredField(lambda.DeclaringType, "<>4__this"));
+            MpCompat.harmony.Patch(lambda, prefix: new HarmonyMethod(typeof(VanillaExpandedFramework), nameof(PrePipeChooseOutput)));
+            MP.RegisterSyncMethod(typeof(VanillaExpandedFramework), nameof(SyncPipeChooseOutput));
+            Log.Message("[MPCompat - FULL1127 V] PipeSystem: choose output synced through SyncPipeChooseOutput");
+        }
+
+        private static bool PrePipeChooseOutput(object __instance)
+        {
+            if (!MP.IsInMultiplayer || MP.IsExecutingSyncCommand) return true;
+            var comp = pipeChooseClosureThis(__instance);
+            var results = (IList)pipeProcPropsResults.GetValue(pipeProcProps.GetValue(comp));
+            SyncPipeChooseOutput(comp, results.IndexOf(pipeChooseClosureRes(__instance)));
+            return false;
+        }
+
+        private static void SyncPipeChooseOutput(ThingComp comp, int index)
+        {
+            pipeProcResultIndex.SetValue(comp, index);
+            pipeProcSetupForChoice.Invoke(comp, null);
+            pipeProcNextProcessTick.SetValue(comp, Find.TickManager.TicksGame + (int)pipeResultEachTicks.GetValue(pipeProcChoosedResult.GetValue(comp)));
+        }
+
         private static void PatchPipeSystem()
         {
             // Increase/decrease by 1/10
             MpCompat.RegisterLambdaMethod("PipeSystem.CompConvertToThing", "PostSpawnSetup", 0, 1, 2, 3);
             // (Dev) trigger countdown
             MpCompat.RegisterLambdaMethod("PipeSystem.CompExplosiveContent", "CompGetGizmosExtra", 0).SetDebugOnly();
-            // Choose output
-            MpCompat.RegisterLambdaMethod("PipeSystem.CompResourceProcessor", "PostSpawnSetup", 1);
+            // Choose output (float menu option, closure DisplayClass24_0: res + this). cu22: the closure is not serializable (MP
+            // validation failed on it), so patch the lambda and sync (comp, index) through our own method instead.
+            PatchPipeChooseOutput();
             // Extract resource (0), toggle allow manual refill (2), transfer to other containers (3)
             MpCompat.RegisterLambdaMethod("PipeSystem.CompResourceStorage", "PostSpawnSetup", 0, 2, 3);
             // (Dev) fill/add 5/empty

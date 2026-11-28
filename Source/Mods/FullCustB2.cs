@@ -195,7 +195,11 @@ namespace Multiplayer.Compat
             var t = AccessTools.TypeByName("SM_MechTab.SM_MainTabWindow_MechsWork");
             var m = t == null ? null : AccessTools.Method(t, "DoManualPrioritiesCheckbox");
             if (m == null) { Log.Error(FullCustB2.LogB2 + "mechtab: DoManualPrioritiesCheckbox not found"); return; }
-            useField = MP.RegisterSyncField(typeof(PlaySettings), "useWorkPriorities");
+            // cu22: MP itself syncs PlaySettings.useWorkPriorities (Multiplayer.Client.SyncFields.SyncUseWorkPriorities, path
+            // Verse.Current/Game/playSettings). A path-less RegisterSyncField(typeof(PlaySettings), ...) failed validation
+            // (non-serializable type RimWorld.PlaySettings) and threw on Watch from the UI, so reuse MP's field.
+            useField = AccessTools.Field(AccessTools.TypeByName("Multiplayer.Client.SyncFields"), "SyncUseWorkPriorities")?.GetValue(null) as ISyncField;
+            if (useField == null) { Log.Error(FullCustB2.LogB2 + "mechtab: MP SyncUseWorkPriorities not found"); return; }
             FullCustB2.Patch(m, nameof(Pre), nameof(Post), typeof(FullCuMechTabManual), "mechtab");
             Log.Message(FullCustB2.LogB2 + "MechTab: useWorkPriorities watch registered");
         }
@@ -204,7 +208,7 @@ namespace Multiplayer.Compat
         {
             if (!MP.IsInMultiplayer || Current.Game?.playSettings == null) return;
             MP.WatchBegin();
-            useField.Watch(Current.Game.playSettings);
+            useField.Watch();
         }
 
         static void Post() => FullCustB2.WatchEnd();

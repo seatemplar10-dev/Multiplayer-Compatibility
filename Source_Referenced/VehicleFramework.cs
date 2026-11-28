@@ -38,7 +38,6 @@ namespace Multiplayer.Compat
         private static ISyncField targetFuelPercentField;
 
         // VehiclePawn.<>c__DisplayClass250_0
-        private static AccessTools.FieldRef<object, VehiclePawn> vehiclePawnInnerClassParentField;
         
         // Designator_AreaRoad
         private static Designator_AreaRoad.RoadType localRoadType = Designator_AreaRoad.RoadType.Prioritize;
@@ -124,33 +123,32 @@ namespace Multiplayer.Compat
 
                 // Vehicle pawn
 
-                // Ordinals verified from compiled DLL IL (release build):
-                // Cancel load cargo (5), fish toggle (8),
-                // force leave caravan (14), cancel forming caravan (15)
-                // DisembarkAll is a method reference (no ordinal).
-                // Load cargo (6) opens dialog, handled by LoadVehicleCargoSession.
-                // Fish isActive (7) is a getter, doesn't need syncing.
-                // Disembark all — method reference (no ordinal), sync directly
+                // cu22: ordinals re-derived from the CURRENT Vehicles.dll (lab 3014915404, 1.7, 27 Nov 2026); the old list had
+                // shifted (load cargo and haul became method references, so every later ordinal moved down), which made MP
+                // validation fail on b__290_17 / b__15 and made two registrations and one prefix hit the wrong lambdas.
+                // Current GetGizmos lambdas: 5 = cancel load cargo, 7 = disembark single pawn (closure currentPawn),
+                // 8 = force leave caravan, 9 = cancel forming caravan. 1/3/4/6 are targeter UI, 21 = flash rect (visual).
+                // DisembarkAll, OpenLoadCargoDialog and StartHaulTargeting are method references (handled below).
+                MpCompat.RegisterLambdaDelegate(typeof(VehiclePawn), nameof(VehiclePawn.GetGizmos), 5, 8, 9);
                 MP.RegisterSyncMethod(typeof(VehiclePawn), nameof(VehiclePawn.DisembarkAll));
-                // Disembark single (13) — synced via wrapper SyncedDisembarkPawn instead of lambda
-                //   or direct method (pawns inside vehicles are despawned, MP can't serialize them)
-                // Haul pawn target callback (10) — called when player selects a pawn in HaulTargeter
-                MpCompat.RegisterLambdaDelegate(typeof(VehiclePawn), nameof(VehiclePawn.GetGizmos), 5, 8, 10, 14, 15);
+                // Haul pawn target callback: local function OnConfirm inside StartHaulTargeting (was ordinal 10).
+                var haulConfirm = AccessTools.GetDeclaredMethods(typeof(VehiclePawn)).FirstOrDefault(m => m.Name.StartsWith("<StartHaulTargeting>g__OnConfirm|"));
+                if (haulConfirm != null)
+                    MP.RegisterSyncMethod(haulConfirm);
+                else
+                    Log.Warning("[MPCompat - FULL1127 V] Vehicles: StartHaulTargeting OnConfirm local function not found, haul callback not synced");
+                // Disembark single (7) - synced via wrapper SyncedDisembarkPawn instead of lambda
+                //   (pawns inside vehicles are despawned, MP can't serialize them)
                 MpCompat.harmony.Patch(
-                    MpMethodUtil.GetLambda(typeof(VehiclePawn), nameof(VehiclePawn.GetGizmos), lambdaOrdinal: 13),
+                    MpMethodUtil.GetLambda(typeof(VehiclePawn), nameof(VehiclePawn.GetGizmos), lambdaOrdinal: 7),
                     prefix: new HarmonyMethod(typeof(VehicleFramework), nameof(PreDisembarkSinglePawn)));
                 MP.RegisterSyncMethod(typeof(VehicleFramework), nameof(SyncedDisembarkPawn));
-                // (Dev) 9 more state-mutating GetGizmos action lambdas, all behind
-                // DebugSettings.ShowDevGizmos and none registered anywhere: 2=Teleport,
-                // 17=DestroyComponent, 19=DamageComponent (also consumes Rand),
-                // 21=ExplodeComponent, 22=HealAllComponents, 24=GiveRandomPawnMentalState (Rand),
-                // 25=DownRandomPawn (Rand), 26=KillRandomPawn (Rand), 28=ToggleLoitering. Each runs
-                // on the clicking peer only if unregistered - an instant desync in dev mode.
-                // Verified against the currently Workshop-live build (3014915404); if a newer
-                // Vehicle Framework build renumbers GetGizmos (as it evidently has before - see the
-                // ordinal 0/1 note on CompVehicleTurrets.CompGetGizmosExtra above), this registration
-                // should throw/no-op harmlessly on the wrong lambdas rather than break anything.
-                MpCompat.RegisterLambdaDelegate(typeof(VehiclePawn), nameof(VehiclePawn.GetGizmos), 2, 17, 19, 21, 22, 24, 25, 26, 28).SetDebugOnly();
+                // (Dev) state-mutating GetGizmos action lambdas: 2 = Teleport confirm, 16 = Heal All Components,
+                // 18 = Give Random Pawn MentalState (Rand), 19 = Down Random Pawn (Rand), 20 = Kill Random Pawn (Rand),
+                // 22 = Toggle Loitering. Destroy / Damage / Explode Component (inner lambdas 11, 13, 15) capture a VehicleComponent
+                // (and a Reactor_Explosive), which MP cannot serialize: left unsynced (OPEN, dev gizmos only).
+                MpCompat.RegisterLambdaDelegate(typeof(VehiclePawn), nameof(VehiclePawn.GetGizmos), 2, 16, 18, 19, 20, 22).SetDebugOnly();
+                Log.Message("[MPCompat - FULL1127 V] Vehicles: GetGizmos ordinals re-registered against the current Vehicles build");
 
                 // Toggle drafted or (if moving) engage brakes.
                 MpCompat.RegisterLambdaMethod(typeof(VehicleIgnitionController), nameof(VehicleIgnitionController.GetGizmos), 1);
@@ -402,10 +400,9 @@ namespace Multiplayer.Compat
                     transpiler: new HarmonyMethod(typeof(VehicleFramework), nameof(ReplaceButtonsTranspiler)));
 
                 // Catch load cargo dialog gizmo to open session dialog tied to it or create session if there's none
-                // Ordinal 6 = open Dialog_LoadCargo (verified from compiled DLL IL)
-                method = MpMethodUtil.GetLambda(typeof(VehiclePawn), nameof(VehiclePawn.GetGizmos), lambdaOrdinal: 6);
-                vehiclePawnInnerClassParentField = AccessTools.FieldRefAccess<VehiclePawn>(method.DeclaringType, "<>4__this");
-                MpCompat.harmony.Patch(method, prefix: new HarmonyMethod(typeof(VehicleFramework), nameof(PreLoadCargoDialog)));
+                // cu22: the gizmo action is now the method reference VehiclePawn.OpenLoadCargoDialog (was GetGizmos lambda 6).
+                MpCompat.harmony.Patch(AccessTools.DeclaredMethod(typeof(VehiclePawn), "OpenLoadCargoDialog"),
+                    prefix: new HarmonyMethod(typeof(VehicleFramework), nameof(PreLoadCargoDialog)));
 
                 // Prevent the call in MP, as it'll mess with transferables if re-opening the window.
                 MpCompat.harmony.Patch(AccessTools.DeclaredMethod(typeof(Dialog_LoadCargo), "CalculateAndRecacheTransferables"),
@@ -1889,12 +1886,12 @@ namespace Multiplayer.Compat
 
         #region Gizmo patches
 
-        private static bool PreLoadCargoDialog(object __instance)
+        private static bool PreLoadCargoDialog(VehiclePawn __instance)
         {
             if (!MP.IsInMultiplayer)
                 return true;
 
-            var vehicle = vehiclePawnInnerClassParentField(__instance);
+            var vehicle = __instance;
             if (!LoadVehicleCargoSession.TryOpenLoadVehicleCargoDialog(vehicle))
                 LoadVehicleCargoSession.CreateLoadVehicleCargoSession(vehicle);
 

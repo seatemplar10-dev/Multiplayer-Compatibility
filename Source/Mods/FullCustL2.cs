@@ -24,6 +24,10 @@ namespace Multiplayer.Compat
             Exception inner = e is HarmonyException && e.InnerException != null ? e.InnerException : e;
             if (inner is ArgumentException && inner.Message != null && inner.Message.StartsWith("Undefined target method for patch method")) return true;
             if (inner is NullReferenceException && inner.Message != null && inner.Message.StartsWith("Null method for")) return true;
+            // Harmony PatchClassProcessor.RunMethod: plain System.Exception "Method <T>::TargetMethod() returned an unexpected result: null"
+            if (inner.GetType() == typeof(Exception) && inner.Message != null && inner.Message.StartsWith("Method ")
+                && (inner.Message.Contains("::TargetMethod()") || inner.Message.Contains("::TargetMethods()"))
+                && inner.Message.EndsWith("returned an unexpected result: null")) return true;
             return false;
         }
 
