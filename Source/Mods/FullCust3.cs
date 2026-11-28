@@ -332,7 +332,7 @@ namespace Multiplayer.Compat
         {
             __state = false;
             if (!MP.IsInMultiplayer || RightPlayerFaction.PlayerFactionCount() < 2) return;
-            var f = VisitorFaction(map);
+            var f = VisitorFaction(map) ?? FullCust10.TileOwner(map);
             if (f == null || f == Faction.OfPlayer) return;
             FullCust3.Push(map, f);
             __state = true;
