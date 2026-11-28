@@ -160,9 +160,9 @@ namespace Multiplayer.Compat
     }
 
     // Mechanoid Skins: Corpse gizmo toggle writes Comp_MechanoidSkin.PrevOverseerResurrection locally.
-    // cu24 (FIXES 569): switched OFF. With this class on, lab runs desync on the first compare after the arbiter joins, with no click
-    // (Q1b, Q1c, Q1e, Q1gp); with it off they pass (Q1d, Q1f, Q1gm). The mechanism is not known yet, so the toggle stays unsynced (row OPEN).
-    // [MpCompatFor("veltaris.mechanoidskins")]
+    // cu24 switched this class off for FIXES 569. cu26 (28 Nov 04:4x) switches it on again: the clean dll outwfull12 also desyncs on the
+    // first compare (Q1w, Q1y), so the 569 bisect was map luck (quicktest maps are random per run), not this class.
+    [MpCompatFor("veltaris.mechanoidskins")]
     class FullN2MechanoidSkins
     {
         static FieldInfo flag;
