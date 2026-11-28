@@ -1,4 +1,5 @@
-﻿using System.Collections;
+﻿using System;
+using System.Collections;
 using HarmonyLib;
 using Multiplayer.API;
 using RimWorld;
@@ -13,13 +14,13 @@ namespace Multiplayer.Compat
     public class Hospitality
     {
         // CompUtility
-        private static AccessTools.FieldRef<IDictionary> guestCompsField;
+        private static AccessTools.FieldRef<object> guestCompsField;
         // RelationUtility
-        private static AccessTools.FieldRef<IDictionary> relationCacheField;
+        private static AccessTools.FieldRef<object> relationCacheField;
         // GenericUtility
-        private static AccessTools.FieldRef<IDictionary> travelDaysCacheField;
+        private static AccessTools.FieldRef<object> travelDaysCacheField;
         // GuestUtility
-        private static AccessTools.FieldRef<IDictionary> relatedCacheField;
+        private static AccessTools.FieldRef<object> relatedCacheField;
         private static AccessTools.FieldRef<int> relatedCacheNextClearTickField;
 
         // CompUtility
@@ -50,16 +51,16 @@ namespace Multiplayer.Compat
             // Cache
             {
                 var type = AccessTools.TypeByName("Hospitality.Utilities.CompUtility");
-                guestCompsField = AccessTools.StaticFieldRefAccess<IDictionary>(AccessTools.DeclaredField(type, "guestComps"));
+                guestCompsField = CacheRef(type, "guestComps");
 
                 type = AccessTools.TypeByName("Hospitality.Utilities.RelationUtility");
-                relationCacheField = AccessTools.StaticFieldRefAccess<IDictionary>(AccessTools.DeclaredField(type, "relationCache"));
+                relationCacheField = CacheRef(type, "relationCache");
 
                 type = AccessTools.TypeByName("Hospitality.Utilities.GenericUtility");
-                travelDaysCacheField = AccessTools.StaticFieldRefAccess<IDictionary>(AccessTools.DeclaredField(type, "travelDaysCache"));
+                travelDaysCacheField = CacheRef(type, "travelDaysCache", "travelTicksCache");
 
                 type = AccessTools.TypeByName("Hospitality.Utilities.GuestUtility");
-                relatedCacheField = AccessTools.StaticFieldRefAccess<IDictionary>(AccessTools.DeclaredField(type, "relatedCache"));
+                relatedCacheField = CacheRef(type, "relatedCache");
                 relatedCacheNextClearTickField = AccessTools.StaticFieldRefAccess<int>(AccessTools.DeclaredField(type, "relatedCacheNextClearTick"));
 
                 MpCompat.harmony.Patch(AccessTools.DeclaredMethod(typeof(GameComponentUtility), nameof(GameComponentUtility.FinalizeInit)),
@@ -95,21 +96,46 @@ namespace Multiplayer.Compat
             return false;
         }
 
+        // Hospitality 1.2.0 keeps some caches in a ConditionalWeakTable (guestComps, relationCache), older versions in an IDictionary,
+        // and renamed travelDaysCache to travelTicksCache. The first name that exists is used, a missing field is skipped.
+        private static AccessTools.FieldRef<object> CacheRef(Type type, params string[] names)
+        {
+            foreach (var name in names)
+            {
+                var field = AccessTools.DeclaredField(type, name);
+                if (field != null) return AccessTools.StaticFieldRefAccess<object>(field);
+            }
+            Log.Warning($"[MPCompat] Hospitality: {type?.Name}.{names[0]} not found, that cache will not be cleared on load");
+            return null;
+        }
+
+        private static void ClearCacheObject(AccessTools.FieldRef<object> field)
+        {
+            var cache = field?.Invoke();
+            if (cache is IDictionary dict) dict.Clear();
+            else if (cache != null)
+            {
+                var clear = AccessTools.DeclaredMethod(cache.GetType(), "Clear", Type.EmptyTypes);
+                if (clear != null) clear.Invoke(cache, null);
+                else field() = Activator.CreateInstance(cache.GetType());
+            }
+        }
+
         private static void ClearCache()
         {
             // CompUtility
-            guestCompsField().Clear();
+            ClearCacheObject(guestCompsField);
 
             // RelationUtility
-            relationCacheField().Clear();
+            ClearCacheObject(relationCacheField);
 
             // GenericUtility
             // This one probably doesn't need clearing, but it will just keep on filling up with
             // more data each time someone desyncs, or a game is loaded, etc.
-            travelDaysCacheField().Clear();
+            ClearCacheObject(travelDaysCacheField);
 
             // GuestUtility
-            relatedCacheField().Clear();
+            ClearCacheObject(relatedCacheField);
             relatedCacheNextClearTickField() = 0;
 
             // Hospitality.Patches.ThingFilter_Patch.Allows:bedNameToThing doesn't look like it needs clearing
