@@ -283,7 +283,7 @@ namespace Multiplayer.Compat
 
         static void PostDoWindowContents(bool __state, bool __runOriginal)
         {
-            if (__state && __runOriginal) MP.WatchEnd();
+            if (__state) MP.WatchEnd(); // always pair: our void prefix always runs (Harmony skips only bool/ref prefixes)
         }
     }
 }

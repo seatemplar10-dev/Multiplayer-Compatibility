@@ -33,7 +33,7 @@ namespace Multiplayer.Compat
             long b = (long)(tick / n) ^ (token << 40);
             bool changed = !last.TryGetValue(key, out var old) || old != b;
             last[key] = b;
-            F(stampField)?.SetValue(null, changed ? tick - n : tick);
+            F(stampField)?.SetValue(null, changed ? tick - n - 1 : tick); // -1: strict ">" tests (alliesarehelpful) must rebuild too
         }
 
         public static bool Patch(string spec, string prefix, string what)
